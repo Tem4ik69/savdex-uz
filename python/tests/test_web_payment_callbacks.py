@@ -600,6 +600,49 @@ def test_сбой_уведомления_не_срывает_подтвержд�
     assert len(база["subscriptions"]) == 1
 
 
+def test_трата_единиц_во_время_выдачи_тарифа_не_теряется(сайт, касса):
+    """
+    Н25: компания тратит единицу продвижения в ту же секунду, когда
+    выдаётся тариф. Раньше выдача читала кошелёк без замка и записывала
+    «прежний остаток + квота» — трата затиралась, продвижение выходило
+    бесплатным. Здесь трата — поток теста: держит кошелёк под замком и,
+    пока подтверждение ждёт, списывает единицу.
+    """
+    import threading
+    import time
+
+    import psycopg
+
+    from .pg_admin import АДРЕС
+
+    взял = threading.Event()
+
+    def трата() -> None:
+        with psycopg.connect(АДРЕС) as соединение:
+            соединение.execute("select 1 from wallets for update")
+            взял.set()
+            time.sleep(1.5)
+            соединение.execute("update wallets set promo_units = promo_units - 1")
+            соединение.commit()
+
+    поток = threading.Thread(target=трата)
+
+    def подготовка() -> None:
+        сброс(счета=счёт("pending", "business"), транзакция=СВЕЖАЯ, кошелёк=True)()
+        поток.start()
+        взял.wait(5)
+
+    итог = вызов(
+        сайт, касса, "/payments/uzum/callback/confirm", тело("confirm", transId="T-1"), подготовка
+    )
+    поток.join()
+    [(квота,)] = sql("select promo_units from plans where code = 'business'")
+
+    assert ответ(итог)["status"] == "CONFIRMED"
+    # Было 1, одну потратили, тариф добавил квоту
+    assert итог["база"]["wallets"][0][1] == квота
+
+
 def test_подтверждение_без_компании_не_списывает(сайт, касса):
     """
     Компанию удалили, пока покупатель платил: зачислить некуда — Uzum

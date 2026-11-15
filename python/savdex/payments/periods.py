@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, cast
 
-from django.db import connection
+from django.db import connection, transaction
 
 from savdex.web import eloquent, ui
 from savdex.web.cabinet import _rows, company_plan
@@ -223,32 +223,48 @@ def _reset_wallets(now: datetime) -> int:
         [_stamp(now)],
     )
 
-    for wallet in wallets:
-        alive = _rows(
-            "select 1 from companies where id = %s and deleted_at is null", [wallet["company_id"]]
-        )
-        plan = company_plan(int(wallet["company_id"])) if alive else None
-        eloquent.save(
-            None,
-            "wallets",
-            wallet,
-            {
-                "contacts_used_this_period": 0,
-                "responses_used_this_period": 0,
-                "promo_units": (plan or {}).get("promo_units") or 0,
-                "period_resets_at": now
-                + timedelta(days=int((plan or {}).get("period_days") or 30)),
-            },
-            section=None,
-            model="Wallet",
-            casts={
-                "contacts_used_this_period": "int",
-                "responses_used_this_period": "int",
-                "promo_units": "int",
-            },
-        )
+    reset = 0
 
-    return len(wallets)
+    for listed in wallets:
+        # Каждый кошелёк — своей транзакцией, под замком и заново: трата или
+        # выдача тарифа в ту же секунду иначе затиралась старой строкой (Н25)
+        with transaction.atomic():
+            fresh = _rows(
+                "select * from wallets where id = %s and period_resets_at <= %s for update",
+                [listed["id"], _stamp(now)],
+            )
+
+            if not fresh:
+                continue
+
+            wallet = fresh[0]
+            alive = _rows(
+                "select 1 from companies where id = %s and deleted_at is null",
+                [wallet["company_id"]],
+            )
+            plan = company_plan(int(wallet["company_id"])) if alive else None
+            eloquent.save(
+                None,
+                "wallets",
+                wallet,
+                {
+                    "contacts_used_this_period": 0,
+                    "responses_used_this_period": 0,
+                    "promo_units": (plan or {}).get("promo_units") or 0,
+                    "period_resets_at": now
+                    + timedelta(days=int((plan or {}).get("period_days") or 30)),
+                },
+                section=None,
+                model="Wallet",
+                casts={
+                    "contacts_used_this_period": "int",
+                    "responses_used_this_period": "int",
+                    "promo_units": "int",
+                },
+            )
+            reset += 1
+
+    return reset
 
 
 def expire_invoices(now: datetime) -> int:

@@ -383,7 +383,11 @@ def assign(
         {"after": {k: _stamp(v) for k, v in subscription.items()}},
     )
 
-    wallets = _rows("select * from wallets where company_id = %s limit 1", [company["id"]])
+    # Кошелёк — под замком до конца выдачи: трата единиц продвижения в эту
+    # же секунду иначе затиралась прежним остатком плюс квотой (Н25)
+    wallets = _rows(
+        "select * from wallets where company_id = %s limit 1 for update", [company["id"]]
+    )
 
     if wallets:
         wallet = wallets[0]
