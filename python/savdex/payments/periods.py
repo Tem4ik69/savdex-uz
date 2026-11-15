@@ -104,7 +104,8 @@ def _issue_renewals(now: datetime) -> int:
     """
     Счёт на продление за неделю до конца срока подписки с автопродлением:
     у бухгалтерии остаётся неделя, чтобы провести платёж без разрыва.
-    Уже выставленный (ждёт оплаты, тот же тариф) — второй не нужен.
+    Уже выставленный (ждёт оплаты, тот же тариф) — второй не нужен; как и
+    выставленный в этом окне и отменённый компанией.
     """
     from savdex.web import orders
 
@@ -132,10 +133,15 @@ def _issue_renewals(now: datetime) -> int:
         if not companies or not plans or not users:
             continue
 
+        # Счёт на этот тариф уже ждёт оплаты — или в этом окне продления уже
+        # выставлялся: отменённый компанией счёт — её решение, а не повод
+        # выставлять новый каждую ночь до конца срока (Н26)
+        window = subscription["ends_at"] - timedelta(days=RENEW_BEFORE_DAYS)
+
         if _rows(
-            "select 1 from payments where company_id = %s and status = 'pending' "
-            "and plan_id = %s limit 1",
-            [subscription["company_id"], subscription["plan_id"]],
+            "select 1 from payments where company_id = %s and plan_id = %s "
+            "and purpose = 'subscription' and (status = 'pending' or created_at >= %s) limit 1",
+            [subscription["company_id"], subscription["plan_id"], _stamp(window)],
         ):
             continue
 
