@@ -708,9 +708,11 @@ def _webhook(ctx: Context, request: HttpRequest) -> HttpResponse:
     if existing and existing[0]["state"] == PERFORMED:
         return _gateway_response(True)
 
-    # Неподтверждённое состояние не оживляет отменённую транзакцию и не
-    # затирает её журнал: отмена — конечное состояние, как и оплата
-    if existing and existing[0]["state"] == CANCELLED and status != "paid":
+    # Неподтверждённое состояние (тело вебхука не подписано) существующую
+    # транзакцию не трогает: не оживляет отменённую и не затирает журнал
+    # живого заказа — в нём ссылка на оплату. Без неё следующее «Оплатить»
+    # заводило второй заказ в Uzum (Н27)
+    if existing and status != "paid":
         return _gateway_response(True)
 
     fields = {

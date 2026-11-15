@@ -907,6 +907,45 @@ def test_вебхук_по_прежнему_заказу_счёта(сайт, к
     assert база["subscriptions"]
 
 
+@pytest.mark.parametrize("состояние", ["PROCESSING", "FAILED"])
+def test_неподтверждённый_вебхук_не_трогает_живой_заказ(сайт, касса, состояние):
+    """
+    Н27: «ещё не оплачено» по живому заказу ничего не перезаписывает. Раньше
+    тело вебхука затирало журнал транзакции вместе со ссылкой на оплату и
+    сумму — и следующее «Оплатить» заводило второй заказ в Uzum.
+    """
+    касса.режим = "processing"
+
+    def подготовка() -> None:
+        сброс()()
+        sql("update payments set provider = 'uzum'")
+        sql(
+            "insert into payment_transactions (payment_id, provider, provider_transaction_id, "
+            "state, amount_minor, currency, payload, created_at, updated_at) values "
+            "(1, 'uzum', 'ORD-SVD-000001', 'created', 150000, 'UZS', "
+            '\'{"redirect_url":"https://pay.example/x"}\', now(), now())'
+        )
+
+    итог = вызов(
+        сайт,
+        касса,
+        "/payments/uzum/callback",
+        {"orderId": "ORD-SVD-000001", "operationState": состояние},
+        подготовка,
+        вход=None,
+    )
+    [транзакция] = итог["база"]["transactions"]
+
+    assert (итог["ответ"]["status"], ответ(итог)) == ПРИНЯТ
+    assert транзакция[3:7] == (
+        "created",
+        150000,
+        "UZS",
+        '{"redirect_url":"https://pay.example/x"}',
+    )
+    assert [p[1] for p in итог["база"]["payments"]] == ["pending"]
+
+
 def test_вебхук_чужой_адрес(сайт, касса):
     итог = вызов(
         сайт,
