@@ -282,7 +282,9 @@ def approve(ctx: Context, actor: access.Admin, refund: dict[str, Any], note: str
         # Счёт под замком: два возврата по одному счёту одобряются по
         # очереди, и второй видит первый — больше оплаченного не вернуть
         payments = _rows("select * from payments where id = %s for update", [refund["payment_id"]])
-        fresh = _rows("select status from refunds where id = %s", [refund["id"]])
+        # Заявка — тоже под замком: «Отклонить» в ту же секунду ждёт и видит
+        # решение, а не переписывает «Проведён» на «Отклонён» (Н28)
+        fresh = _rows("select status from refunds where id = %s for update", [refund["id"]])
 
         if not fresh or fresh[0]["status"] != REQUESTED:
             raise RefundError("Решение по этому возврату уже принято.")
@@ -331,7 +333,17 @@ def reject(ctx: Context, actor: access.Admin, refund: dict[str, Any], note: str)
     if refund["status"] != REQUESTED:
         raise RefundError("Решение по этому возврату уже принято.")
 
-    _decide(ctx, actor, refund, REJECTED, note)
+    # Статус — заново и под замком: одобрение в ту же секунду проводит
+    # возврат, и «Отклонить» не должен переписать его решение (Н28). Счёт
+    # не запираем — порядок замков «счёт → заявка» остаётся только у approve
+    with transaction.atomic():
+        fresh = _rows("select status from refunds where id = %s for update", [refund["id"]])
+
+        if not fresh or fresh[0]["status"] != REQUESTED:
+            raise RefundError("Решение по этому возврату уже принято.")
+
+        _decide(ctx, actor, refund, REJECTED, note)
+
     _log(
         actor,
         "rejected",

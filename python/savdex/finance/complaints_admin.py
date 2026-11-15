@@ -148,20 +148,32 @@ def accept(ctx: Context, actor: access.Admin, unlock: dict[str, Any], note: str)
 
 def decline(ctx: Context, actor: access.Admin, unlock: dict[str, Any], note: str) -> None:
     """ModerationService::declineComplaint."""
-    eloquent.save(
-        ctx,
-        "contact_unlocks",
-        unlock,
-        {
-            "complaint_status": "declined",
-            "moderator_note": note,
-            "moderated_by": actor.id,
-            "moderated_at": eloquent.now(),
-        },
-        section=None,
-        model="ContactUnlock",
-        casts={"refunded": "bool", "credits_spent": "int"},
-    )
+    with transaction.atomic():
+        # Жалоба под замком и заново, как у accept: «Принять» в ту же
+        # секунду уже вернул кредиты — «Отказать» не переписывает решение и
+        # не шлёт компании «отказано» (Н28)
+        fresh = _rows(
+            "select complaint_status from contact_unlocks where id = %s for update",
+            [unlock["id"]],
+        )
+
+        if not fresh or fresh[0]["complaint_status"] != "pending":
+            return
+
+        eloquent.save(
+            ctx,
+            "contact_unlocks",
+            unlock,
+            {
+                "complaint_status": "declined",
+                "moderator_note": note,
+                "moderated_by": actor.id,
+                "moderated_at": eloquent.now(),
+            },
+            section=None,
+            model="ContactUnlock",
+            casts={"refunded": "bool", "credits_spent": "int"},
+        )
     company = _company(unlock["company_id"])
 
     if company is not None:
