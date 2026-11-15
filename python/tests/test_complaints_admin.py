@@ -158,6 +158,53 @@ def test_отказать(люди):
     }
 
 
+def _решение_в_ту_же_секунду(таблица: str, изменение: str) -> Any:
+    """
+    Поток теста: держит строку под замком, через 1,5 с записывает решение
+    коллеги и фиксирует. Пока он держит замок, сайт принимает другое решение.
+    """
+    import threading
+    import time
+
+    import psycopg
+
+    from .pg_admin import АДРЕС
+
+    взял = threading.Event()
+
+    def коллега() -> None:
+        with psycopg.connect(АДРЕС) as соединение:
+            соединение.execute(f"select 1 from {таблица} where id = 1 for update")
+            взял.set()
+            time.sleep(1.5)
+            соединение.execute(f"update {таблица} set {изменение} where id = 1")
+            соединение.commit()
+
+    поток = threading.Thread(target=коллега)
+    поток.start()
+    взял.wait(5)
+
+    return поток
+
+
+def test_отказать_после_принятия_коллегой(люди):
+    """
+    Н28: коллега принял жалобу и вернул кредиты в ту же секунду. «Отказать»
+    не переписывает его решение и не шлёт компании «отклонена».
+    """
+    сброс()
+    поток = _решение_в_ту_же_секунду(
+        "contact_unlocks", "complaint_status = 'accepted', refunded = true"
+    )
+
+    django(люди["admin"], ("post", LIST + "1/decline/", {"note": "Контакт рабочий, дозвонились"}))
+    поток.join()
+    база = снимок()
+
+    assert [u[:2] for u in база["unlocks"]] == [("accepted", True)]
+    assert база["notifications"] == []
+
+
 def test_короткая_формулировка(люди):
     сброс()
     до = снимок()

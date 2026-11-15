@@ -314,6 +314,49 @@ def test_отклонить(люди):
     ]
 
 
+def _решение_в_ту_же_секунду(таблица: str, изменение: str) -> Any:
+    """
+    Поток теста: держит строку под замком, через 1,5 с записывает решение
+    коллеги и фиксирует. Пока он держит замок, сайт принимает другое решение.
+    """
+    import threading
+    import time
+
+    import psycopg
+
+    from .pg_admin import АДРЕС
+
+    взял = threading.Event()
+
+    def коллега() -> None:
+        with psycopg.connect(АДРЕС) as соединение:
+            соединение.execute(f"select 1 from {таблица} where id = 1 for update")
+            взял.set()
+            time.sleep(1.5)
+            соединение.execute(f"update {таблица} set {изменение} where id = 1")
+            соединение.commit()
+
+    поток = threading.Thread(target=коллега)
+    поток.start()
+    взял.wait(5)
+
+    return поток
+
+
+def test_отклонить_после_одобрения_коллеги(люди):
+    """
+    Н28: коллега одобрил возврат в ту же секунду. «Отклонить» ждёт его и
+    видит решение — а не переписывает «Проведён» на «Отклонён».
+    """
+    сброс(заявки=((1000, "requested"),))
+    поток = _решение_в_ту_же_секунду("refunds", "status = 'done'")
+
+    django(люди["finance"], ("post", f"{LIST}1/reject/", {"note": "Услуга оказана"}))
+    поток.join()
+
+    assert sql("select status, decision_note from refunds where id = 1") == [("done", None)]
+
+
 def test_отказ_без_причины(люди):
     сброс(заявки=((1000, "requested"),))
     до = снимок()

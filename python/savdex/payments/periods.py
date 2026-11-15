@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, cast
 
-from django.db import connection
+from django.db import connection, transaction
 
 from savdex.web import eloquent, ui
 from savdex.web.cabinet import _rows, company_plan
@@ -104,7 +104,8 @@ def _issue_renewals(now: datetime) -> int:
     """
     Счёт на продление за неделю до конца срока подписки с автопродлением:
     у бухгалтерии остаётся неделя, чтобы провести платёж без разрыва.
-    Уже выставленный (ждёт оплаты, тот же тариф) — второй не нужен.
+    Уже выставленный (ждёт оплаты, тот же тариф) — второй не нужен; как и
+    выставленный в этом окне и отменённый компанией.
     """
     from savdex.web import orders
 
@@ -132,10 +133,15 @@ def _issue_renewals(now: datetime) -> int:
         if not companies or not plans or not users:
             continue
 
+        # Счёт на этот тариф уже ждёт оплаты — или в этом окне продления уже
+        # выставлялся: отменённый компанией счёт — её решение, а не повод
+        # выставлять новый каждую ночь до конца срока (Н26)
+        window = subscription["ends_at"] - timedelta(days=RENEW_BEFORE_DAYS)
+
         if _rows(
-            "select 1 from payments where company_id = %s and status = 'pending' "
-            "and plan_id = %s limit 1",
-            [subscription["company_id"], subscription["plan_id"]],
+            "select 1 from payments where company_id = %s and plan_id = %s "
+            "and purpose = 'subscription' and (status = 'pending' or created_at >= %s) limit 1",
+            [subscription["company_id"], subscription["plan_id"], _stamp(window)],
         ):
             continue
 
@@ -223,32 +229,48 @@ def _reset_wallets(now: datetime) -> int:
         [_stamp(now)],
     )
 
-    for wallet in wallets:
-        alive = _rows(
-            "select 1 from companies where id = %s and deleted_at is null", [wallet["company_id"]]
-        )
-        plan = company_plan(int(wallet["company_id"])) if alive else None
-        eloquent.save(
-            None,
-            "wallets",
-            wallet,
-            {
-                "contacts_used_this_period": 0,
-                "responses_used_this_period": 0,
-                "promo_units": (plan or {}).get("promo_units") or 0,
-                "period_resets_at": now
-                + timedelta(days=int((plan or {}).get("period_days") or 30)),
-            },
-            section=None,
-            model="Wallet",
-            casts={
-                "contacts_used_this_period": "int",
-                "responses_used_this_period": "int",
-                "promo_units": "int",
-            },
-        )
+    reset = 0
 
-    return len(wallets)
+    for listed in wallets:
+        # Каждый кошелёк — своей транзакцией, под замком и заново: трата или
+        # выдача тарифа в ту же секунду иначе затиралась старой строкой (Н25)
+        with transaction.atomic():
+            fresh = _rows(
+                "select * from wallets where id = %s and period_resets_at <= %s for update",
+                [listed["id"], _stamp(now)],
+            )
+
+            if not fresh:
+                continue
+
+            wallet = fresh[0]
+            alive = _rows(
+                "select 1 from companies where id = %s and deleted_at is null",
+                [wallet["company_id"]],
+            )
+            plan = company_plan(int(wallet["company_id"])) if alive else None
+            eloquent.save(
+                None,
+                "wallets",
+                wallet,
+                {
+                    "contacts_used_this_period": 0,
+                    "responses_used_this_period": 0,
+                    "promo_units": (plan or {}).get("promo_units") or 0,
+                    "period_resets_at": now
+                    + timedelta(days=int((plan or {}).get("period_days") or 30)),
+                },
+                section=None,
+                model="Wallet",
+                casts={
+                    "contacts_used_this_period": "int",
+                    "responses_used_this_period": "int",
+                    "promo_units": "int",
+                },
+            )
+            reset += 1
+
+    return reset
 
 
 def expire_invoices(now: datetime) -> int:

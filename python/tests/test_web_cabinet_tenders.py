@@ -63,8 +63,14 @@ def _свой() -> int:
 
 
 def день(n: int) -> str:
-    """Дата через n дней (UTC), как в поле формы."""
-    return (datetime.now(UTC) + timedelta(days=n)).strftime("%Y-%m-%d")
+    """
+    Дата через n дней, как в поле формы, — по Ташкенту: сроки считаются по
+    его дням (Н13). По UTC с 19:00 до полуночи дата отставала на сутки, и
+    проверки срока падали каждый вечер.
+    """
+    ташкент = timezone(timedelta(hours=5))
+
+    return (datetime.now(UTC) + timedelta(days=n)).astimezone(ташкент).strftime("%Y-%m-%d")
 
 
 def конец(n: int) -> str:

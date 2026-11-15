@@ -500,6 +500,149 @@ def test_подтверждение_выдаёт_купленное(сайт, к
     assert len(база["events"]) == len(база["notifications"])
 
 
+def _оплачен_транзакцией(статус: str = "paid", транзакция: tuple[str, str, str] = СВЕЖАЯ):
+    """Счёт уже оплачен транзакцией T-1, а её «проведена» не записалась (сбой между ними)."""
+
+    def run() -> None:
+        сброс(транзакция=транзакция)()
+        sql(
+            "update payments set status = %s, paid_at = now() - interval '1 minute', "
+            "provider = 'uzum', external_id = 'T-1'",
+            [статус],
+        )
+
+    return run
+
+
+@pytest.mark.parametrize("транзакция", [СВЕЖАЯ, СТАРАЯ], ids=["свежая", "просроченная"])
+def test_повтор_подтверждения_доводит_оплату(сайт, касса, транзакция):
+    """
+    Н20: счёт оплачен этой транзакцией, но отметка «проведена» не успела
+    записаться. Повторное подтверждение доводит её, а не отвечает «уже
+    оплачено» — иначе Uzum отменит транзакцию и вернёт деньги, а тариф
+    останется. Срок ожидания тут не важен: оплата уже состоялась.
+    """
+    итог = вызов(
+        сайт,
+        касса,
+        "/payments/uzum/callback/confirm",
+        тело("confirm", transId="T-1"),
+        _оплачен_транзакцией(транзакция=транзакция),
+    )
+    база = итог["база"]
+
+    assert итог["ответ"]["status"] == 200, итог["ответ"]["body"]
+    assert ответ(итог)["status"] == "CONFIRMED"
+    assert база["transactions"][0][3] == "performed"
+    assert база["payments"][0][1] == "paid"
+    # Второй раз ничего не выдано
+    assert база["subscriptions"] == []
+
+
+@pytest.mark.parametrize("статус", ["paid", "refunded"])
+def test_отмена_оплаченной_транзакции_отклоняется(сайт, касса, статус):
+    """
+    Н20: отмена транзакции, которой счёт уже оплачен, вернула бы деньги,
+    оставив купленное (или, после возврата, вернула бы их второй раз).
+    """
+    итог = вызов(
+        сайт,
+        касса,
+        "/payments/uzum/callback/reverse",
+        тело("reverse", transId="T-1"),
+        _оплачен_транзакцией(статус),
+    )
+    база = итог["база"]
+
+    assert ответ(итог).get("errorCode") == 10017
+    assert база["transactions"][0][3] == "created"
+    assert база["payments"][0][1] == статус
+
+
+def test_сбой_уведомления_не_срывает_подтверждение(сайт, касса):
+    """
+    Н20: уведомление «оплата зачислена» (оно — после зачисления) падает —
+    оплата и «проведена» всё равно записаны вместе, Uzum получает
+    подтверждение. Раньше счёт оплачивался, а запрос падал до отметки
+    «проведена».
+    """
+
+    def подготовка() -> None:
+        сброс(счета=счёт("pending", "business"), транзакция=СВЕЖАЯ)()
+        sql(
+            "create or replace function н20_сбой() returns trigger language plpgsql as "
+            "$$ begin if new.title like '%%зачислена%%' then "
+            "raise exception 'уведомления недоступны'; end if; return new; end $$"
+        )
+        sql(
+            "create trigger н20_сбой before insert on user_notifications "
+            "for each row execute function н20_сбой()"
+        )
+
+    try:
+        итог = вызов(
+            сайт,
+            касса,
+            "/payments/uzum/callback/confirm",
+            тело("confirm", transId="T-1"),
+            подготовка,
+        )
+    finally:
+        sql("drop trigger if exists н20_сбой on user_notifications")
+        sql("drop function if exists н20_сбой()")
+
+    база = итог["база"]
+
+    assert итог["ответ"]["status"] == 200, итог["ответ"]["body"][:500]
+    assert ответ(итог)["status"] == "CONFIRMED"
+    assert база["payments"][0][1:3] == ("paid", True)
+    assert база["transactions"][0][3] == "performed"
+    assert len(база["subscriptions"]) == 1
+
+
+def test_трата_единиц_во_время_выдачи_тарифа_не_теряется(сайт, касса):
+    """
+    Н25: компания тратит единицу продвижения в ту же секунду, когда
+    выдаётся тариф. Раньше выдача читала кошелёк без замка и записывала
+    «прежний остаток + квота» — трата затиралась, продвижение выходило
+    бесплатным. Здесь трата — поток теста: держит кошелёк под замком и,
+    пока подтверждение ждёт, списывает единицу.
+    """
+    import threading
+    import time
+
+    import psycopg
+
+    from .pg_admin import АДРЕС
+
+    взял = threading.Event()
+
+    def трата() -> None:
+        with psycopg.connect(АДРЕС) as соединение:
+            соединение.execute("select 1 from wallets for update")
+            взял.set()
+            time.sleep(1.5)
+            соединение.execute("update wallets set promo_units = promo_units - 1")
+            соединение.commit()
+
+    поток = threading.Thread(target=трата)
+
+    def подготовка() -> None:
+        сброс(счета=счёт("pending", "business"), транзакция=СВЕЖАЯ, кошелёк=True)()
+        поток.start()
+        взял.wait(5)
+
+    итог = вызов(
+        сайт, касса, "/payments/uzum/callback/confirm", тело("confirm", transId="T-1"), подготовка
+    )
+    поток.join()
+    [(квота,)] = sql("select promo_units from plans where code = 'business'")
+
+    assert ответ(итог)["status"] == "CONFIRMED"
+    # Было 1, одну потратили, тариф добавил квоту
+    assert итог["база"]["wallets"][0][1] == квота
+
+
 def test_подтверждение_без_компании_не_списывает(сайт, касса):
     """
     Компанию удалили, пока покупатель платил: зачислить некуда — Uzum
@@ -805,6 +948,45 @@ def test_вебхук_по_прежнему_заказу_счёта(сайт, к
     assert [p[1] for p in база["payments"]] == ["paid"]
     assert [t[3] for t in база["transactions"]] == ["performed"]
     assert база["subscriptions"]
+
+
+@pytest.mark.parametrize("состояние", ["PROCESSING", "FAILED"])
+def test_неподтверждённый_вебхук_не_трогает_живой_заказ(сайт, касса, состояние):
+    """
+    Н27: «ещё не оплачено» по живому заказу ничего не перезаписывает. Раньше
+    тело вебхука затирало журнал транзакции вместе со ссылкой на оплату и
+    сумму — и следующее «Оплатить» заводило второй заказ в Uzum.
+    """
+    касса.режим = "processing"
+
+    def подготовка() -> None:
+        сброс()()
+        sql("update payments set provider = 'uzum'")
+        sql(
+            "insert into payment_transactions (payment_id, provider, provider_transaction_id, "
+            "state, amount_minor, currency, payload, created_at, updated_at) values "
+            "(1, 'uzum', 'ORD-SVD-000001', 'created', 150000, 'UZS', "
+            '\'{"redirect_url":"https://pay.example/x"}\', now(), now())'
+        )
+
+    итог = вызов(
+        сайт,
+        касса,
+        "/payments/uzum/callback",
+        {"orderId": "ORD-SVD-000001", "operationState": состояние},
+        подготовка,
+        вход=None,
+    )
+    [транзакция] = итог["база"]["transactions"]
+
+    assert (итог["ответ"]["status"], ответ(итог)) == ПРИНЯТ
+    assert транзакция[3:7] == (
+        "created",
+        150000,
+        "UZS",
+        '{"redirect_url":"https://pay.example/x"}',
+    )
+    assert [p[1] for p in итог["база"]["payments"]] == ["pending"]
 
 
 def test_вебхук_чужой_адрес(сайт, касса):

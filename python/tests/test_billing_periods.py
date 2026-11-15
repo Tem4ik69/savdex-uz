@@ -368,3 +368,105 @@ def test_старые_неоплаченные_счета_закрываются
         ("SVD-NEW", "pending", None),
         ("SVD-OLD", "failed", "Счёт не оплачен за 14 дней — закрыт"),
     ]
+
+
+@pytest.mark.parametrize(
+    ("выставлен", "новый"),
+    [
+        # Отменён в этом окне продления — компания решила не продлевать
+        ("now() - interval '1 day'", False),
+        # Отменён давно, до окна — это не счёт на это продление
+        ("now() - interval '20 days'", True),
+    ],
+)
+def test_отменённый_счёт_на_продление_не_выставляется_снова(мир, tmp_path, выставлен, новый):
+    """
+    Н26: компания отменила счёт на продление — каждую ночь до конца срока
+    выставлялся новый (и уведомление о нём). Теперь в окне продления
+    любой счёт на этот тариф, и отменённый, — повод второй не выставлять.
+    """
+    подготовка(мир)
+    к, т = мир["companies"], мир["plans"]
+    sql(
+        "insert into payments (company_id, purpose, description, amount, currency, provider, "
+        f"status, number, plan_id, created_at, updated_at) values (%s, 'subscription', 'x', 1, "
+        f"'UZS', 'invoice', 'failed', 'SVD-ОТМЕНЁН', %s, {выставлен}, now())",
+        [к["c1"], т["business"]],
+    )
+
+    subprocess.run(
+        [sys.executable, "manage.py", "schedule", "--once", "billing_reset_periods"],
+        cwd=PYTHON,
+        env={
+            **ОКРУЖЕНИЕ,
+            "PYTHONPATH": str(PYTHON),
+            "SAVDEX_SCHEDULE_STATE": str(tmp_path / "state"),
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    ждёт = sql(
+        "select count(*) from payments where company_id = %s and status = 'pending'", [к["c1"]]
+    )
+    assert ждёт == [(1 if новый else 0,)]
+
+
+def test_сброс_периода_не_теряет_свежую_трату(мир, tmp_path):
+    """
+    Н25: в ту же секунду, когда задача сбрасывает период, компания раскрыла
+    контакт. Раньше сброс записывал только поля, отличные от строки,
+    прочитанной до начала, — и счётчик, выросший с нуля, так и оставался
+    ненулевым в новом периоде. Здесь раскрытие — поток теста: держит
+    кошелёк под замком и, пока задача ждёт, увеличивает счётчик.
+    """
+    import threading
+    import time
+
+    import psycopg
+
+    from .pg_admin import АДРЕС
+
+    cid = компания()
+    [(кошелёк,)] = sql(
+        "insert into wallets (company_id, credits, promo_units, contacts_used_this_period, "
+        "period_resets_at, created_at, updated_at) values (%s, 0, 0, 0, "
+        "now() - interval '1 hour', now(), now()) returning id",
+        [cid],
+    )
+    взял = threading.Event()
+
+    def раскрытие() -> None:
+        with psycopg.connect(АДРЕС) as соединение:
+            соединение.execute("select 1 from wallets where id = %s for update", [кошелёк])
+            взял.set()
+            time.sleep(1.5)
+            соединение.execute(
+                "update wallets set contacts_used_this_period = 5 where id = %s", [кошелёк]
+            )
+            соединение.commit()
+
+    поток = threading.Thread(target=раскрытие)
+    поток.start()
+    взял.wait(5)
+
+    subprocess.run(
+        [sys.executable, "manage.py", "schedule", "--once", "billing_reset_periods"],
+        cwd=PYTHON,
+        env={
+            **ОКРУЖЕНИЕ,
+            "PYTHONPATH": str(PYTHON),
+            "SAVDEX_SCHEDULE_STATE": str(tmp_path / "state"),
+        },
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    поток.join()
+
+    # Сброс прошёл после раскрытия — новый период с нуля
+    assert sql(
+        "select contacts_used_this_period, period_resets_at > now() from wallets where id = %s",
+        [кошелёк],
+    ) == [(0, True)]
