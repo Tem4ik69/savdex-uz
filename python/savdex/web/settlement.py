@@ -258,6 +258,18 @@ def settle(
         elif payment["purpose"] == "credits":
             _grant_credits(payment, company, admin)
 
+    # Аналитика, уведомление и сделка — после фиксации оплаты: внутри общей
+    # транзакции (подтверждение Uzum, Н20) их сбой не откатит зачисление и
+    # не сорвёт ответ шлюзу; без внешней транзакции — сразу, как раньше
+    transaction.on_commit(lambda: _after_paid(ctx, payment, company, admin), robust=True)
+
+    return True, _t(ctx, "messages.order.credited")
+
+
+def _after_paid(
+    ctx: Context, payment: dict[str, Any], company: dict[str, Any], admin: dict[str, Any] | None
+) -> None:
+    """Что следует за зачислением: аналитика, уведомление компании, сделка в CRM."""
     _record_payment(payment, admin)
 
     _notify_company(
@@ -280,5 +292,3 @@ def settle(
     automation.close_deal_on_payment(
         {**payment, "status": "paid"}, actor_id=admin["id"] if admin is not None else None
     )
-
-    return True, _t(ctx, "messages.order.credited")

@@ -27,6 +27,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from django.db import transaction
 from django.http import HttpRequest, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
 
@@ -129,23 +130,37 @@ def _callback(
     return wrapped
 
 
-def _transaction(trans_id: str) -> dict[str, Any] | None:
+def _transaction(trans_id: str, *, lock: bool = False) -> dict[str, Any] | None:
     if trans_id == "":
         return None
 
     found = _rows(
         "select * from payment_transactions where provider = 'uzum' "
-        "and provider_transaction_id = %s limit 1",
+        "and provider_transaction_id = %s limit 1" + (" for update" if lock else ""),
         [trans_id],
     )
 
     return found[0] if found else None
 
 
-def _payment(payment_id: int | None) -> dict[str, Any] | None:
-    found = _rows("select * from payments where id = %s", [payment_id])
+def _payment(payment_id: int | None, *, lock: bool = False) -> dict[str, Any] | None:
+    found = _rows(
+        "select * from payments where id = %s" + (" for update" if lock else ""), [payment_id]
+    )
 
     return found[0] if found else None
+
+
+def _paid_by(
+    payment: dict[str, Any] | None, tx: dict[str, Any], statuses: tuple[str, ...] = ("paid",)
+) -> bool:
+    """Счёт оплачен именно этой транзакцией Uzum (её след пишет mark_paid)."""
+    return (
+        payment is not None
+        and payment["status"] in statuses
+        and payment.get("provider") == "uzum"
+        and payment.get("external_id") == tx["provider_transaction_id"]
+    )
 
 
 def _save_tx(ctx: Context, tx: dict[str, Any], changes: dict[str, Any]) -> None:
@@ -318,7 +333,14 @@ class _Merchant:
         )
 
     def confirm(self) -> HttpResponse:
-        tx = _transaction(_php_string(self.input("transId") or ""))
+        # Одной транзакцией и под замком: зачисление и «проведена» не
+        # расходятся при сбое между ними, а два подтверждения разом не дают
+        # «оплачено, но транзакция погашена» (Н20)
+        with transaction.atomic():
+            return self._confirm()
+
+    def _confirm(self) -> HttpResponse:
+        tx = _transaction(_php_string(self.input("transId") or ""), lock=True)
 
         if tx is None:
             return self.error(ERROR_TRANSACTION_NOT_FOUND)
@@ -329,6 +351,18 @@ class _Merchant:
         if tx["state"] == PERFORMED:
             return self.error(ERROR_ALREADY_CONFIRMED, {"confirmTime": _ms(tx["performed_at"])})
 
+        payment = _payment(tx["payment_id"], lock=True)
+
+        # Счёт уже оплачен этой самой транзакцией, а отметка «проведена» не
+        # успела записаться — доводим её: иначе Uzum вернёт деньги, а тариф
+        # останется
+        if _paid_by(payment, tx):
+            assert payment is not None
+            done = payment["paid_at"] or eloquent.now()
+            _save_tx(self.ctx, tx, {"state": PERFORMED, "performed_at": done})
+
+            return self.confirmed(tx, payment, done)
+
         # Просроченную — гасим: Uzum вернёт деньги покупателю
         deadline = tx["created_at"] + timedelta(minutes=_confirm_timeout())
 
@@ -336,8 +370,6 @@ class _Merchant:
             _save_tx(self.ctx, tx, {"state": CANCELLED, "cancelled_at": eloquent.now()})
 
             return self.error(ERROR_TRANSACTION_CANCELLED)
-
-        payment = _payment(tx["payment_id"])
 
         # Счёт успели оплатить переводом — второй раз не начисляем
         if payment is None or payment["status"] == "paid":
@@ -370,19 +402,26 @@ class _Merchant:
         now = eloquent.now()
         _save_tx(self.ctx, tx, {"state": PERFORMED, "performed_at": now})
 
+        return self.confirmed(tx, payment, now)
+
+    def confirmed(self, tx: dict[str, Any], payment: dict[str, Any], when: Any) -> HttpResponse:  # noqa: ANN401
         return _json(
             {
                 "serviceId": self.input("serviceId"),
                 "transId": tx["provider_transaction_id"],
                 "status": "CONFIRMED",
-                "confirmTime": _ms(now.replace(microsecond=0)),
+                "confirmTime": _ms(when.replace(microsecond=0)),
                 "data": self.invoice_data(payment),
                 "amount": tx["amount_minor"],
             }
         )
 
     def reverse(self) -> HttpResponse:
-        tx = _transaction(_php_string(self.input("transId") or ""))
+        with transaction.atomic():
+            return self._reverse()
+
+    def _reverse(self) -> HttpResponse:
+        tx = _transaction(_php_string(self.input("transId") or ""), lock=True)
 
         if tx is None:
             return self.error(ERROR_TRANSACTION_NOT_FOUND)
@@ -393,9 +432,18 @@ class _Merchant:
         if tx["state"] == PERFORMED:
             return self.error(ERROR_CANNOT_REVERSE)
 
+        payment = _payment(tx["payment_id"], lock=True)
+
+        # Счёт оплачен этой транзакцией, а «проведена» не записалась: отмена
+        # вернула бы деньги, оставив купленное; возвращённый — вернула бы
+        # второй раз (Н20)
+        if _paid_by(payment, tx, ("paid", "refunded")):
+            log.error("payment.uzum.reverse_paid", extra={"payment_id": tx["payment_id"]})
+
+            return self.error(ERROR_CANNOT_REVERSE)
+
         now = eloquent.now()
         _save_tx(self.ctx, tx, {"state": CANCELLED, "cancelled_at": now})
-        payment = _payment(tx["payment_id"])
 
         return _json(
             {
