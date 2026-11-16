@@ -282,7 +282,8 @@ def _listings(where: str, params: list[Any], order: str, limit: int) -> list[dic
     return _rows(
         f"select l.*, {_LISTING_COMPANY} from listings l join companies c on c.id = l.company_id "
         f"where l.status = 'active' and l.deleted_at is null and {visibility.company_sql()} "
-        f"{where} order by {order} limit {int(limit)}",
+        # Истёкшее по сроку — не в лентах, до часовой задачи снятия (Н31)
+        f"and {visibility.listing_live_sql()} {where} order by {order} limit {int(limit)}",
         params,
     )
 
@@ -331,7 +332,7 @@ def offers_count(locale: str) -> int:
     rows = _rows(
         "select count(*) as n from listings l join companies c on c.id = l.company_id "
         f"where l.status = 'active' and l.deleted_at is null and {visibility.company_sql()} "
-        f"{visible} and l.type = 'supply'",
+        f"and {visibility.listing_live_sql()}{visible} and l.type = 'supply'",
         params,
     )
 
@@ -505,7 +506,8 @@ def popular_categories(locale: str) -> list[dict[str, Any]]:
         r["category_id"]: int(r["total"])
         for r in _rows(
             "select category_id, count(*) as total from listings l where l.status = 'active' "
-            f"and l.deleted_at is null{visible}{LIVE_COMPANY} and l.category_id is not null "
+            f"and l.deleted_at is null and {visibility.listing_live_sql()}{visible}{LIVE_COMPANY} "
+            "and l.category_id is not null "
             "group by category_id",
             params,
         )
@@ -599,11 +601,13 @@ def top_suppliers(ctx: Context) -> list[dict[str, Any]]:
         }
         for c in _rows(
             "select m.*, (select count(*) from listings l where l.company_id = m.id and "
-            "l.status = 'active' and l.deleted_at is null) as listings_count from companies m "
+            "l.status = 'active' and l.deleted_at is null "
+            f"and {visibility.listing_live_sql()}) as listings_count from companies m "
             "where m.status = 'active' and m.deleted_at is null "
             "and coalesce(m.source_note, '') = '' "
             "and exists (select 1 from listings s where s.company_id = m.id "
-            "and s.type = 'supply' and s.status = 'active' and s.deleted_at is null) "
+            "and s.type = 'supply' and s.status = 'active' and s.deleted_at is null "
+            f"and {visibility.listing_live_sql('s')}) "
             "order by m.verification_level desc, coalesce(m.logo_path, '') <> '' desc, "
             "m.created_at desc nulls last, m.id desc limit 4"
         )
@@ -636,7 +640,7 @@ def city_options(locale: str) -> list[dict[str, Any]]:
             "select id from cities ci where is_active and exists (select 1 from listings l "
             f"join companies c on c.id = l.company_id and {visibility.company_sql()} "
             f"where {shown} = ci.id and l.status = 'active' "
-            "and l.deleted_at is null)",
+            f"and l.deleted_at is null and {visibility.listing_live_sql()})",
             params,
         )
     ]

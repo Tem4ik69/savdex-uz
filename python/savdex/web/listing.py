@@ -557,7 +557,11 @@ def _show(ctx: Context, slug: str) -> HttpResponse:
 def _similar(ctx: Context, cards: Cards, row: dict[str, Any]) -> list[dict[str, Any]]:
     """CatalogController::similar: живые того же раздела, свежие; хвост по id."""
     visible, params = visible_in(ctx.locale)
-    where = f"l.status = 'active'{visible} and l.deleted_at is null and l.id != %s"
+    # Истёкшее по сроку — не в «Похожих», до часовой задачи снятия (Н31)
+    where = (
+        f"l.status = 'active'{visible} and l.deleted_at is null "
+        f"and {visibility.listing_live_sql()} and l.id != %s"
+    )
     params.append(row["id"])
 
     if row["category_id"] is not None:

@@ -18,7 +18,7 @@ from django.db import connection
 from django.http import HttpRequest, HttpResponse, HttpResponsePermanentRedirect
 
 from savdex import laravel_storage
-from savdex.web import inertia, locales
+from savdex.web import inertia, locales, visibility
 from savdex.web.phpquery import php_int
 from savdex.web.request import context
 from savdex.web.seo import Seo, php_json
@@ -146,7 +146,7 @@ def listed_countries(locale: str) -> list[dict[str, Any]]:
 #: Компания с числом живых объявлений — как withCount у PageController
 _WITH_LISTINGS = (
     "(select count(*) from listings l where l.company_id = m.id and l.status = 'active' "
-    "and l.deleted_at is null) as listings_count"
+    f"and l.deleted_at is null and {visibility.listing_live_sql()}) as listings_count"
 )
 
 
@@ -188,7 +188,8 @@ def countries(request: HttpRequest) -> HttpResponse:
     for c in _rows(
         "select * from (select m.*, row_number() over (partition by country_id order by "
         "verification_level desc, rating desc, id) as country_rank, (select count(*) from "
-        "listings l where l.company_id = m.id and l.status = 'active' and l.deleted_at is null) "
+        "listings l where l.company_id = m.id and l.status = 'active' and l.deleted_at is null "
+        f"and {visibility.listing_live_sql()}) "
         "as listings_count from companies m where m.status = 'active' and m.deleted_at is null "
         "and m.country_id is not null) companies where country_rank <= %s order by country_rank",
         [COMPANIES_PER_COUNTRY],
@@ -265,7 +266,8 @@ def partners_tier(request: HttpRequest, tier: str) -> HttpResponse:
     country_names = _named("countries", ctx.locale)
     rows = _rows(
         "select m.*, (select count(*) from listings l where l.company_id = m.id and "
-        "l.status = 'active' and l.deleted_at is null) as listings_count from companies m "
+        "l.status = 'active' and l.deleted_at is null "
+        f"and {visibility.listing_live_sql()}) as listings_count from companies m "
         "where m.status = 'active' and m.deleted_at is null and m.partner_tier = %s "
         "order by m.partner_sort, m.rating desc, m.id",
         [code],

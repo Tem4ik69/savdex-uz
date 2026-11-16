@@ -590,7 +590,7 @@ def _show(ctx: Context, slug: str) -> HttpResponse:
     hidden, hidden_params = platform.exclude_sql(platform.service_company_id())
     listings = _rows(
         "select count(*) as n from listings l where l.company_id = %s and l.status = 'active' "
-        f"and l.deleted_at is null{hidden}{visible}",
+        f"and l.deleted_at is null and {visibility.listing_live_sql()}{hidden}{visible}",
         [c["id"], *hidden_params, *params],
     )[0]["n"]
 
