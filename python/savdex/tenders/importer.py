@@ -445,13 +445,48 @@ def _cell(value: Any) -> Any:  # noqa: ANN401
     return value
 
 
+def unreadable(error: Exception) -> str:
+    """Почему таблица не прочитана — для формы загрузки."""
+    from savdex.data import xlsx_limits
+
+    if isinstance(error, xlsx_limits.TooLargeError):
+        return str(error)
+
+    return "Не удалось прочитать файл: нужен .xlsx или .csv."
+
+
 def read_table(name: str, content: bytes) -> list[dict[str, Any]]:
     """Строки таблицы: заголовок столбца → значение. Excel — первый лист."""
     if name.lower().endswith((".xlsx", ".xlsm")):
         from openpyxl import load_workbook
 
+        from savdex.data import xlsx_limits
+
+        # Пределы до и во время разбора: иначе маленький файл съедал память
+        # машины админки (Н35)
+        xlsx_limits.check(content)
         book = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
-        rows = list(book.worksheets[0].iter_rows(values_only=True))
+
+        try:
+            page = book.worksheets[0]
+            # Размер листа из заголовка не в счёт, ширина — не больше предела
+            page.reset_dimensions()
+            rows: list[tuple[Any, ...]] = []
+
+            for values in page.iter_rows(values_only=True, max_col=xlsx_limits.MAX_COLS):
+                if len(rows) >= xlsx_limits.MAX_ROWS:
+                    raise xlsx_limits.too_many_rows()
+
+                rows.append(values)
+        finally:
+            book.close()
+
+        # Ширина — до последнего непустого столбца, как раньше по заголовку
+        width = max(
+            (max((i + 1 for i, v in enumerate(r) if v is not None), default=0) for r in rows),
+            default=0,
+        )
+        rows = [tuple(r[:width]) for r in rows]
     else:
         try:
             decoded = content.decode("utf-8-sig")

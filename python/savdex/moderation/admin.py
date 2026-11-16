@@ -540,8 +540,8 @@ class ReviewAdmin(SavdexModelAdmin):
             else:
                 try:
                     table = importer.read_table(upload.name, upload.read())
-                except Exception:
-                    form.add_error("file", "Не удалось прочитать файл: нужен .xlsx или .csv.")
+                except Exception as error:
+                    form.add_error("file", importer.unreadable(error))
 
             if table is not None:
                 report = self.import_reviews(request, table)
