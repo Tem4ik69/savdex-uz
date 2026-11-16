@@ -252,12 +252,16 @@ jobs:
           # Общая папка (на машине базы — NFS) — здесь общий том Docker:
           # в нём загрузки и кэш, который видят обе машины
           common=(--add-host=host.docker.internal:host-gateway
-            -e APP_KEY="$key" -e DB_CONNECTION=pgsql -e DB_URL="$db" -e DJANGO_DATABASE_URL="$db"
+            -e APP_KEY="$key" -e DB_CONNECTION=pgsql -e DJANGO_DATABASE_URL="$db"
             -e CACHE_STORE=file -e SAVDEX_CACHE_DIR=/var/data/storage/cache
             -e SAVDEX_FORCE_HTTPS=false
             -v savdex-ci-shared:/var/data/storage)
+          # Пароль владельца (DB_URL) — только migrate и админке: на боевом
+          # у машины сайта его нет (web-db.env, prod-db.sh), и сайт должен
+          # подниматься без него
+          owner=(-e DB_URL="$db")
 
-          docker run --rm "${common[@]}" savdex:ci migrate 2>&1 | tee /tmp/migrate.txt
+          docker run --rm "${common[@]}" "${owner[@]}" savdex:ci migrate 2>&1 | tee /tmp/migrate.txt
           grep -q "Схема и справочники готовы" /tmp/migrate.txt
           grep -q "снимок не нужен" /tmp/migrate.txt
           # Ни Apache, ни Django разовый запуск не поднимает
@@ -266,7 +270,7 @@ jobs:
           docker run -d --name web -p 18081:18081 "${common[@]}" \
             -e PORT=18081 -e APP_URL=http://127.0.0.1:18081 \
             -e SAVDEX_MIGRATE=0 -e PYTHON_ADMIN_WORKERS=0 savdex:ci
-          docker run -d --name admin -p 18082:18082 "${common[@]}" \
+          docker run -d --name admin -p 18082:18082 "${common[@]}" "${owner[@]}" \
             -e PORT=18082 -e APP_URL=http://127.0.0.1:18082 \
             -e SAVDEX_MIGRATE=0 -e SAVDEX_BACKGROUND=0 \
             -e PYTHON_WORKERS=1 -e PYTHON_THREADS=2 -e PYTHON_ADMIN_WORKERS=2 savdex:ci

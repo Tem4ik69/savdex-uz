@@ -56,6 +56,23 @@ for file in db.env app.env; do
         exit 1
     fi
 done
+
+# Машина сайта — без пароля владельца базы: он суперпользователь, а у
+# сайта единственный внешний адрес. Схему меняет migrate на машине
+# админки; сайту хватает роли Django (web-db.env, prod-db.sh)
+if [ "$ROLE" = web ]; then
+    if [ "$migrate" = 1 ]; then
+        echo "ОШИБКА: --migrate — только на машине админки: у машины сайта нет пароля владельца базы." >&2
+        exit 1
+    fi
+    # Адрес владельца бывает под тремя именами (settings.py, render-env.py)
+    for file in db.env app.env; do
+        if grep -q -E '^(DB_URL|DATABASE_URL|TARGET_DB_URL)=' "$ENV_DIR/$file"; then
+            echo "ОШИБКА: в $ENV_DIR/$file на машине сайта — адрес базы с паролем владельца (DB_URL, DATABASE_URL или TARGET_DB_URL). Сайту — только web-db.env с машины базы (prod.yml)." >&2
+            exit 1
+        fi
+    done
+fi
 if ! docker image inspect "savdex:$TAG" > /dev/null 2>&1; then
     echo "ОШИБКА: на машине нет образа savdex:$TAG — его присылает prod-build.sh с машины админки." >&2
     exit 1

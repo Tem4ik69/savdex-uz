@@ -428,10 +428,12 @@ jobs:
             echo "::warning::Нет ключей хранилища или BACKUP_PASSPHRASE — копии с машины базы не пойдут."
           fi
           ssh db 'bash /opt/savdex/src/deploy/server/prod-db.sh'
-          # Адрес базы с паролями — сайту и админке
-          for host in web admin; do
-            ssh db 'cat /opt/savdex/env/app-db.env' \
-              | ssh "$host" 'umask 077; mkdir -p /opt/savdex/env; cat > /opt/savdex/env/db.env'
+          # Адрес базы с паролями: админке — и владельца (для migrate),
+          # сайту — только роль Django (prod-db.sh)
+          for pair in admin:app-db.env web:web-db.env; do
+            # shellcheck disable=SC2029 # имя файла подставляется здесь, так и задумано
+            ssh db "cat /opt/savdex/env/${pair#*:}" \
+              | ssh "${pair%%:*}" 'umask 077; mkdir -p /opt/savdex/env; cat > /opt/savdex/env/db.env'
           done
 
       - name: Настройки с Render
