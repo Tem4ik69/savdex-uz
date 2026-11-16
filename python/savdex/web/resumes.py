@@ -310,15 +310,23 @@ def _contacts(row: dict[str, Any]) -> dict[str, Any] | list[Any]:
     return {k: v for k, v in values.items() if v not in (None, "", "0")} or []
 
 
-def count_view(table: str, row_id: int) -> None:
+def count_view(ctx: Context, table: str, row_id: int) -> bool:
     """
     $model->increment('views_count'): +1 без событий сохранения и без
-    updated_at — просмотр не правка (lastmod карты сайта).
+    updated_at — просмотр не правка (lastmod карты сайта). Повтор, робот
+    и сверх часового предела не засчитываются (view_counter, Н22);
+    True — засчитан.
     """
     from savdex.guards import allowed_writes
+    from savdex.web.view_counter import should_count
+
+    if not should_count(ctx, table, row_id):
+        return False
 
     with allowed_writes(table), connection.cursor() as cursor:
         cursor.execute(f"update {table} set views_count = views_count + 1 where id = %s", [row_id])
+
+    return True
 
 
 def show(request: HttpRequest, slug: str) -> HttpResponse:
@@ -342,8 +350,7 @@ def show(request: HttpRequest, slug: str) -> HttpResponse:
 
     row = found[0]
 
-    if ctx.visitor.user_id != row["user_id"]:
-        count_view("resumes", row["id"])
+    if ctx.visitor.user_id != row["user_id"] and count_view(ctx, "resumes", row["id"]):
         row["views_count"] += 1
 
     locale = ctx.locale

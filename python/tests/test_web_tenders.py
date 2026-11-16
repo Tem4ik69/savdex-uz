@@ -301,6 +301,50 @@ def test_просмотры_считаются(сайт):
     assert sql("select views_count from tenders where slug = %s", [slug])[0][0] == было + 2
 
 
+#: Просмотры с отсевом — файловый кэш, как на сервере
+ФАЙЛОВЫЙ = {"CACHE_STORE": "file"}
+БРАУЗЕР = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0"
+
+
+def _гость(ip: str, агент: str = БРАУЗЕР) -> dict[str, str]:
+    return {"User-Agent": агент, "X-Forwarded-For": ip}
+
+
+def _забыть(kind: str, ip: str, object_id: int) -> None:
+    """Метки отсева этого гостя — с прошлого прогона тестов."""
+    import hashlib
+
+    from savdex import laravel_cache
+
+    who = hashlib.sha1(f"ip:{ip}".encode()).hexdigest()
+
+    for key in (f"views:{kind}:{who}:{object_id}", f"views:cap:{who}", f"views:cap:{who}:timer"):
+        laravel_cache.forget(key)
+
+
+def test_повтор_и_робот_не_накручивают_просмотры(сайт, monkeypatch):
+    """Н22: обновление страницы и робот не пишут +1 в базу."""
+    slug = адреса()[2]
+    [(tid, было)] = sql("select id, views_count from tenders where slug = %s", [slug])
+    monkeypatch.setenv("CACHE_STORE", "file")
+
+    for ip in ("203.0.113.71", "203.0.113.72", "203.0.113.73"):
+        _забыть("tenders", ip, tid)
+
+    def смотреть(заголовки: dict[str, str]) -> None:
+        assert открыть(сайт, f"/tenders/{slug}", None, заголовки, ФАЙЛОВЫЙ)["status"] == 200
+
+    for _ in range(5):
+        смотреть(_гость("203.0.113.71"))
+
+    смотреть(_гость("203.0.113.72"))
+    смотреть(_гость("203.0.113.73", "Mozilla/5.0 (compatible; Googlebot/2.1)"))
+    смотреть(_гость("203.0.113.73", "curl/8.5.0"))
+
+    # Пять обновлений одного гостя — один просмотр, второй гость — ещё один, роботы — ноль
+    assert sql("select views_count from tenders where id = %s", [tid])[0][0] == было + 2
+
+
 def test_просмотр_администратора_в_журнале(сайт):
     uid = пользователь("boss@savdex.uz", is_admin=True, admin_role="superadmin")
     куки = вход(uid)

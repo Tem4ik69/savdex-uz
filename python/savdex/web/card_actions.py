@@ -284,7 +284,7 @@ def show(request: HttpRequest, token: str) -> HttpResponse:
         return not_found(ctx)
 
     if not own:
-        count_view("company_cards", card["id"])
+        count_view(ctx, "company_cards", card["id"])
 
     title = card["full_name"] or card["company_name"] or card["owner_name"]
     seo = Seo(ctx.root, ctx.path.rstrip("/") or "/", ctx.locale)
