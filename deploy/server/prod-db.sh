@@ -45,7 +45,7 @@ fi
 
 if [ ! -s "$ENV_DIR/compose.env" ]; then
     {
-        echo "# Создано prod-db.sh $(date -Iseconds). Пароли — только на этой машине и в db.env сайта и админки."
+        echo "# Создано prod-db.sh $(date -Iseconds). Пароли — только на этой машине и в db.env: у админки — владелец и роль Django, у сайта — только роль Django."
         echo "SAVDEX_HOME=$APP_HOME"
         echo "POSTGRES_PASSWORD=$(secret)"
         echo "DJANGO_DB_PASSWORD=$(secret)"
@@ -60,13 +60,20 @@ fi
 # shellcheck disable=SC1091
 . "$ENV_DIR/compose.env"
 
-# Адреса базы для сайта и админки: владелец — для схемы (разовый
-# запуск migrate), роль Django — для самого сайта
+# Адреса базы. Машине админки — оба: владелец — для схемы (разовый
+# запуск migrate), роль Django — для самой админки
 {
     echo "DB_CONNECTION=pgsql"
     echo "DB_URL=postgresql://savdex:${POSTGRES_PASSWORD}@${DB_IP}:5432/savdex"
     echo "DJANGO_DATABASE_URL=postgresql://savdex_django:${DJANGO_DB_PASSWORD}@${DB_IP}:5432/savdex"
 } > "$ENV_DIR/app-db.env"
+# Машине сайта — только роль Django. Владелец — суперпользователь базы,
+# а сайт — единственная машина с внешним адресом: его пароль там ни к
+# чему, migrate идёт на машине админки (prod-app.sh не пускает его на сайт)
+{
+    echo "DB_CONNECTION=pgsql"
+    echo "DJANGO_DATABASE_URL=postgresql://savdex_django:${DJANGO_DB_PASSWORD}@${DB_IP}:5432/savdex"
+} > "$ENV_DIR/web-db.env"
 
 echo "── База: PostgreSQL на $DB_IP:5432"
 docker compose -f "$COMPOSE_FILE" --env-file "$ENV_DIR/compose.env" up -d

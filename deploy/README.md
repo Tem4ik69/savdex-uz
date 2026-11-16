@@ -230,7 +230,9 @@ Settings → Rules → Rulesets → New ruleset → New branch ruleset:
 
 ```
 /opt/savdex/src           код (переключается на выкладываемый коммит)
-/opt/savdex/env           db.env — адрес базы с паролями (с машины базы);
+/opt/savdex/env           db.env — адрес базы с паролями (с машины базы):
+                          у админки — владелец (для migrate) и роль Django,
+                          у сайта — только роль Django (web-db.env);
                           app.env — настройки, перенесённые с Render;
                           role.env, compose.env, Caddyfile — пишет prod-app.sh
 /opt/savdex/pg            файлы базы (только машина базы)
