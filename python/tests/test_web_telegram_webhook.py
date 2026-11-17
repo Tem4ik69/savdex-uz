@@ -336,3 +336,30 @@ def test_кнопка_без_привязки(сайт, tmp_path, фирма):
     бот = Бот(сайт, tmp_path, chat=902)
 
     assert "Привязать Telegram" in бот.нажать("pause")[0]["text"]
+
+
+def test_миграция_стирает_инн_из_разговоров(сайт, фирма):
+    """
+    Н38: разовая чистка при релизе — ИНН (ПИНФЛ), сверка с учётной записью
+    и хеш кода из разговоров стираются; «ждали почту или код» — снова
+    ждут ссылку. Привязанные и чистые разговоры не меняются.
+    """
+    from savdex import schema
+
+    sql(
+        "insert into telegram_bot_chats (chat_id, state, locale, tin, user_id, code_hash, "
+        "code_expires_at, mistakes, locked_until, codes_sent, codes_window_at) values "
+        "('1', 'code', 'uz', '30212345678901', %s, 'abc', now(), 2, now(), 1, now()), "
+        "('2', 'done', 'ru', null, null, null, null, 0, null, 0, null)",
+        [фирма["owner"]],
+    )
+    файл = schema.MIGRATIONS / "2026_11_18_100000_clear_tin_from_telegram_bot_chats.sql"
+    sql(файл.read_text(encoding="utf-8"))
+
+    assert sql(
+        "select chat_id, state, locale, tin, user_id, code_hash, code_expires_at, mistakes, "
+        "locked_until, codes_sent, codes_window_at from telegram_bot_chats order by chat_id"
+    ) == [
+        ("1", "inn", "uz", None, None, None, None, 0, None, 0, None),
+        ("2", "done", "ru", None, None, None, None, 0, None, 0, None),
+    ]
