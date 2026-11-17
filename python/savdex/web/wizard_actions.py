@@ -36,6 +36,7 @@ from savdex.web.listing_actions import (
     _notify_company,
     _search_text,
     _stamp,
+    listings_lock,
     refuse_blocked,
 )
 from savdex.web.resume_actions import _exists
@@ -287,48 +288,51 @@ def publish(request: HttpRequest, listing_id: str) -> HttpResponse:
 
     negotiable = _php_boolean(data.get("price_negotiable")) if "price_negotiable" in data else False
 
-    company = company_of(ctx)
-    assert company is not None
-    plan = company_plan(company["id"])
-    limit = plan.get("listings_limit")
+    # Проверка лимита и запись — под замком компании: два запроса разом
+    # видели одно свободное место и публиковали оба (Н30)
+    with listings_lock(listing["company_id"]):
+        company = company_of(ctx)
+        assert company is not None
+        plan = company_plan(company["id"])
+        limit = plan.get("listings_limit")
 
-    if limit is not None and _active(company["id"], listing["id"]) >= limit:
-        flash(ctx, "error", listing_limit_message(ctx, plan, hint=False))
-        analytics.limit_reached(ctx, "listing", plan.get("code"))
+        if limit is not None and _active(company["id"], listing["id"]) >= limit:
+            flash(ctx, "error", listing_limit_message(ctx, plan, hint=False))
+            analytics.limit_reached(ctx, "listing", plan.get("code"))
 
-        return back(ctx)
+            return back(ctx)
 
-    fields = (
-        "category_id", "title", "description", "price", "price_to", "bundle_price", "currency",
-        "unit", "min_order", "delivery_terms", "payment_terms",
-    )  # fmt: skip
-    now = eloquent.now()
-    changes = {k: data[k] for k in fields if k in data}
-    changes.update(_price_kind(data, negotiable))
-    _mask_free_text(changes)
+        fields = (
+            "category_id", "title", "description", "price", "price_to", "bundle_price", "currency",
+            "unit", "min_order", "delivery_terms", "payment_terms",
+        )  # fmt: skip
+        now = eloquent.now()
+        changes = {k: data[k] for k in fields if k in data}
+        changes.update(_price_kind(data, negotiable))
+        _mask_free_text(changes)
 
-    # Валюта обязательна в базе: пустая — остаётся прежней
-    if changes.get("currency") is None:
-        changes.pop("currency", None)
+        # Валюта обязательна в базе: пустая — остаётся прежней
+        if changes.get("currency") is None:
+            changes.pop("currency", None)
 
-    if isinstance(changes.get("min_order"), bool):
-        changes["min_order"] = int(changes["min_order"])
+        if isinstance(changes.get("min_order"), bool):
+            changes["min_order"] = int(changes["min_order"])
 
-    changes.update(
-        price_negotiable=negotiable,
-        status="active",
-        wizard_step=4,
-        # Дата публикации — первая: по ней сортирует каталог, и повторная
-        # публикация поднимала объявление наверх бесплатно (это платная
-        # услуга «Поднять»)
-        published_at=listing["published_at"] or now,
-        expires_at=now + timedelta(days=plan.get("listing_days") or LIFETIME_DAYS),
-    )
-    _save(ctx, listing, changes)
+        changes.update(
+            price_negotiable=negotiable,
+            status="active",
+            wizard_step=4,
+            # Дата публикации — первая: по ней сортирует каталог, и повторная
+            # публикация поднимала объявление наверх бесплатно (это платная
+            # услуга «Поднять»)
+            published_at=listing["published_at"] or now,
+            expires_at=now + timedelta(days=plan.get("listing_days") or LIFETIME_DAYS),
+        )
+        _save(ctx, listing, changes)
 
-    if not listing["slug"]:
-        slug = numbered_slug(str(listing["title"]), listing["id"])
-        _save(ctx, listing, {"slug": slug})
+        if not listing["slug"]:
+            slug = numbered_slug(str(listing["title"]), listing["id"])
+            _save(ctx, listing, {"slug": slug})
 
     _notify_company(
         ctx,
