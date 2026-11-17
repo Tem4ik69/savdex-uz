@@ -40,7 +40,6 @@ from savdex.web.validation import validate
 # ── LoginThrottle ───────────────────────────────────────────────────
 
 MAX_ATTEMPTS = 5
-LOCKOUT_MINUTES = 15
 WINDOW_MINUTES = 15
 #: Неудач по самой учётке со всех адресов за то же окно — дальше вход в
 #: неё только с капчей: перебор с тысяч адресов (у каждого — свои пять
@@ -89,7 +88,11 @@ class LoginThrottle:
         return self.remaining() == 0
 
     def seconds_until_unlock(self) -> int:
-        """unlocksAt: самая ранняя из пяти последних неудач плюс 15 минут."""
+        """
+        Когда вход откроется: самая ранняя из пяти последних неудач уйдёт из
+        окна — её время плюс 15 минут (Н29). Раньше бралась самая поздняя
+        (первая строка выборки), и «через N минут» было больше, чем на деле.
+        """
         if not self.locked():
             return 0
 
@@ -97,13 +100,12 @@ class LoginThrottle:
             cursor.execute(
                 "select created_at from login_attempts where email = %s and ip = %s "
                 "and successful = false and created_at >= %s "
-                "order by created_at desc limit %s",
-                [self.email, self.ip, _stamp(self._since()), MAX_ATTEMPTS],
+                "order by created_at desc offset %s limit 1",
+                [self.email, self.ip, _stamp(self._since()), MAX_ATTEMPTS - 1],
             )
-            # ->value(): первая строка выборки
             row = cursor.fetchone()
 
-        unlocks = (row[0] if row else eloquent.now()) + timedelta(minutes=LOCKOUT_MINUTES)
+        unlocks = (row[0] if row else eloquent.now()) + timedelta(minutes=WINDOW_MINUTES)
 
         return max(0, int((unlocks - eloquent.now()).total_seconds()))
 
