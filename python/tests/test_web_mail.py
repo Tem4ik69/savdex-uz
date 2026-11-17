@@ -140,8 +140,7 @@ def test_файлы_шаблонов():
     имена = {п.name for п in mail._TEMPLATES.iterdir()}
     ждём = {
         f"{имя}.{lang}.{ext}"
-        # telegram_code — код привязки Telegram-бота (savdex/telegram_bot.py)
-        for имя in (*ПИСЬМА, "notification", "telegram_code")
+        for имя in (*ПИСЬМА, "notification")
         for lang in locales.CODES
         for ext in ("subject", "html", "txt")
     }
