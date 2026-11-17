@@ -96,6 +96,33 @@ def test_карта_список(сайт):
     ]
 
 
+def test_карта_компаний_частями(сайт):
+    """
+    Н34: компаний больше CHUNK (5000) — карта частями, как у объявлений:
+    «companies» и «companies-2». Иначе одна карта на пяти языках выходила
+    за предел поисковиков (50 тыс. адресов).
+    """
+    sql(
+        "insert into companies (slug, name, status, created_at, updated_at) "
+        "select 'bulk-' || n, 'Компания ' || n, 'active', now(), now() "
+        "from generate_series(1, 5000) as n"
+    )
+
+    try:
+        список = адреса(сайт, текст(сайт, "/sitemap.xml"))
+        первая = открыть(сайт, "/sitemap-companies.xml")["body"]
+        вторая = открыть(сайт, "/sitemap-companies-2.xml")["body"]
+        третья = открыть(сайт, "/sitemap-companies-3.xml")["status"]
+        лишняя = открыть(сайт, "/sitemap-companies-1.xml")["status"]
+    finally:
+        sql("delete from companies where slug like 'bulk-%%'")
+
+    assert "/sitemap-companies.xml" in список and "/sitemap-companies-2.xml" in список
+    assert первая.count("<url>") == 5000 * 5
+    assert вторая.count("<url>") == 1 * 5
+    assert третья == 404 and лишняя == 404
+
+
 @pytest.mark.parametrize(
     ("part", "ожидание"),
     [
