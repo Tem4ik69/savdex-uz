@@ -417,16 +417,16 @@ def test_вложения(люди, чисто):
     assert файл["status"] == 200 and файл["body"].startswith("%PDF")
 
 
-@нужна_база
-def test_ящик_по_imap(люди, чисто):
-    """Ящик: новое письмо — обращение и «прочитано»; битое — флажок."""
-    raw, _ = _письмо()
-    script = f"""
+#: Ящик IMAP для проверок: письма по UID; UID без письма — пустой ответ
+ЯЩИК = """
 import django; django.setup()
+from django.db import OperationalError
 from savdex.support import mail
 
 class Box:
     stored = []
+    letters = {{}}
+    flagged = b""
     def __init__(self, host, port, timeout): pass
     def __enter__(self): return self
     def __exit__(self, *a): return False
@@ -434,9 +434,9 @@ class Box:
     def select(self, folder): return ("OK", [b"2"])
     def uid(self, command, *args):
         if command == "search":
-            return ("OK", [b"1 2"])
+            return ("OK", [Box.flagged if args[1] == "FLAGGED" else b" ".join(Box.letters)])
         if command == "fetch":
-            body = {raw!r} if args[0] == "1" else None
+            body = Box.letters.get(args[0].encode())
             return ("OK", [(b"1 (BODY[] {{1}}", body)] if body else [])
         if command == "store":
             Box.stored.append((args[0], args[2]))
@@ -445,10 +445,13 @@ class Box:
 mail.imaplib.IMAP4_SSL = Box
 mail.os.environ.update(SUPPORT_IMAP_HOST="imap.test", SUPPORT_IMAP_USERNAME="s@savdex.uz",
                        SUPPORT_IMAP_PASSWORD="x")
-print(mail.run(), Box.stored)
+{сценарий}
 """
+
+
+def _ящик(чисто: Path, сценарий: str) -> str:
     вывод = subprocess.run(
-        [sys.executable, "-c", script],
+        [sys.executable, "-c", ЯЩИК.format(сценарий=сценарий)],
         cwd=PYTHON,
         env={
             **ОКРУЖЕНИЕ,
@@ -459,11 +462,82 @@ print(mail.run(), Box.stored)
         capture_output=True,
         text=True,
     )
-
     assert вывод.returncode == 0, вывод.stderr[-3000:]
-    assert "новых 1" in вывод.stdout
-    assert "('1', '(\\\\Seen)')" in вывод.stdout
+
+    return вывод.stdout
+
+
+@нужна_база
+def test_ящик_по_imap(люди, чисто):
+    """Ящик: новое письмо — обращение и «прочитано»; UID без письма — пропуск."""
+    raw, _ = _письмо()
+    вывод = _ящик(
+        чисто, f"Box.letters = {{b'1': {raw!r}, b'2': None}}\nprint(mail.run(), Box.stored)"
+    )
+
+    assert "новых 1" in вывод
+    assert "('1', '(\\\\Seen)')" in вывод
     assert sql("select count(*) from support_tickets") == [(1,)]
+
+
+@нужна_база
+def test_сбой_базы_письмо_не_теряется(люди, чисто):
+    """
+    Н24: база недоступна (релиз) — письмо не помечается прочитанным и не
+    получает флажок: следующий проход его разберёт. Раньше любое исключение
+    ставило «прочитано» с флажком — письмо пропадало из работы.
+    """
+    raw, _ = _письмо()
+    вывод = _ящик(
+        чисто,
+        f"""Box.letters = {{b'1': {raw!r}, b'2': {raw!r}}}
+real = mail.accept
+def down(raw):
+    raise OperationalError("connection refused")
+mail.accept = down
+print("первый:", mail.run(), Box.stored)
+mail.accept = real
+Box.stored.clear()
+print("второй:", mail.run(), Box.stored)""",
+    )
+    первый, второй = вывод.split("второй:")
+
+    # Первый проход: ничего не тронуто, остальные письма ждут
+    assert "отложено до следующего прохода 1" in первый
+    assert "[]" in первый
+    # Второй, когда база поднялась: письмо стало обращением и прочитано
+    assert "новых 1" in второй
+    assert "('1', '(\\\\Seen)')" in второй
+    assert sql("select count(*) from support_tickets") == [(1,)]
+
+
+@нужна_база
+def test_битое_письмо_с_флажком_видно_в_админке(люди, чисто):
+    """
+    Письмо, которое не разобрать (ошибка в разборе), — «прочитано» с
+    флажком, как раньше, но число таких писем видно над списком обращений.
+    """
+    raw, _ = _письмо()
+    вывод = _ящик(
+        чисто,
+        f"""Box.letters = {{b'1': {raw!r}}}
+Box.flagged = b"1 7"
+def broken(raw):
+    raise ValueError("не разобрать")
+mail.accept = broken
+print(mail.run(), Box.stored, mail.flagged_count())""",
+    )
+
+    assert "ошибок 1" in вывод and "с флажком в ящике 2" in вывод
+    assert "('1', '(\\\\Flagged)')" in вывод and "('1', '(\\\\Seen)')" in вывод
+    assert вывод.strip().endswith("2")
+
+    _, страница = django(
+        люди["support"],
+        ("get", "/py/admin/support/ticket/", None),
+        env={"LARAVEL_ROOT": str(чисто)},
+    )
+    assert "писем, которые не удалось разобрать: 2" in страница["body"]
 
 
 @нужна_база

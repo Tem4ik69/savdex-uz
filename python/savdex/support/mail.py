@@ -53,10 +53,10 @@ from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, ClassVar
 
-from django.db import connection, transaction
+from django.db import InterfaceError, OperationalError, connection, transaction
 from django.utils import timezone
 
-from savdex import audit
+from savdex import audit, laravel_cache
 from savdex.catalog import now
 from savdex.laravel_storage import private_root
 from savdex.support import spam
@@ -621,21 +621,64 @@ def accept(raw: bytes) -> Outcome:
 # ── Ящик ───────────────────────────────────────────────────────────
 
 
+#: Сбои, которые проходят сами: база недоступна (релиз, перезапуск),
+#: хранилище вложений не отвечает. Письмо с таким сбоем остаётся
+#: непрочитанным — его разберёт следующий проход (Н24)
+_TRANSIENT = (OperationalError, InterfaceError, OSError)
+
+#: Сколько писем в ящике с флажком «не разобрано» — для админки (Н24)
+FLAGGED_KEY = "support:mail:flagged"
+
+
 @dataclass
 class Pass:
     created: int = 0
     appended: int = 0
     skipped: int = 0
     failed: int = 0
+    postponed: int = 0
+    flagged: int = 0
 
     def __bool__(self) -> bool:
-        return bool(self.created or self.appended or self.skipped or self.failed)
+        return bool(self.created or self.appended or self.skipped or self.failed or self.postponed)
 
     def __str__(self) -> str:
-        return (
+        text = (
             f"новых {self.created}, в обращения {self.appended}, "
             f"пропущено {self.skipped}, ошибок {self.failed}"
         )
+
+        if self.postponed:
+            text += f", отложено до следующего прохода {self.postponed}"
+
+        if self.flagged:
+            text += f", с флажком в ящике {self.flagged}"
+
+        return text
+
+
+def flagged_count() -> int:
+    """Писем с флажком «не разобрано» по последнему проходу; 0 — нет или не знаем."""
+    try:
+        return laravel_cache._to_int(laravel_cache.get(FLAGGED_KEY, any_store=True) or 0)
+    except Exception:
+        return 0
+
+
+def _remember_flagged(count: int) -> None:
+    """
+    Запомнить число писем с флажком; о новых — ошибка в журнал один раз,
+    а не каждую минуту. Админка показывает число над списком обращений.
+    """
+    before = flagged_count()
+
+    try:
+        laravel_cache.put(FLAGGED_KEY, count, 7 * 86400)
+    except Exception:
+        log.warning("Число писем с флажком не запомнено", exc_info=True)
+
+    if count > before:
+        log.error("В ящике поддержки писем с флажком «не разобрано»: %s", count)
 
 
 def run(limit: int = LIMIT) -> Pass:
@@ -664,6 +707,16 @@ def run(limit: int = LIMIT) -> Pass:
 
             try:
                 outcome = accept(raw)
+            except _TRANSIENT:
+                # База или хранилище недоступны: письмо не трогаем — оно
+                # остаётся непрочитанным, остальные тоже ждут следующего прохода
+                log.warning(
+                    "Письмо в ящике поддержки отложено: база или хранилище недоступны (UID %s)",
+                    uid,
+                    exc_info=True,
+                )
+                report.postponed += 1
+                break
             except Exception:
                 log.exception("Письмо в ящике поддержки не разобрано (UID %s)", uid)
                 box.uid("store", uid.decode(), "+FLAGS", "(\\Flagged)")
@@ -672,6 +725,12 @@ def run(limit: int = LIMIT) -> Pass:
                 setattr(report, outcome.kind, getattr(report, outcome.kind) + 1)
 
             box.uid("store", uid.decode(), "+FLAGS", "(\\Seen)")
+
+        _, marked = box.uid("search", None, "FLAGGED")  # type: ignore[arg-type]
+        report.flagged = len((marked[0] or b"").split()) if marked else 0
+
+    if not report.postponed:
+        _remember_flagged(report.flagged)
 
     return report
 
