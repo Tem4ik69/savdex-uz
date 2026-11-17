@@ -384,8 +384,7 @@ def show(request: HttpRequest, slug: str) -> HttpResponse:
     if hidden and not owner:
         return not_found(ctx)
 
-    if not owner:
-        count_view("it_tasks", row["id"])
+    if not owner and count_view(ctx, "it_tasks", row["id"]):
         before = row["views_count"]
         row["views_count"] += 1
         admin = _admin(ctx)

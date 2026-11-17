@@ -282,8 +282,9 @@ def _products(ctx: Context, company_id: int) -> list[dict[str, Any]]:
     rows = _rows(
         f"select l.*, {_LISTING_COMPANY} from listings l "
         "left join companies c on c.id = l.company_id and c.deleted_at is null "
-        "where l.company_id = %s and l.status = 'active' and l.deleted_at is null"
-        f"{hidden}{visible} order by l.published_at desc limit %s",
+        "where l.company_id = %s and l.status = 'active' and l.deleted_at is null "
+        f"and {visibility.listing_live_sql()}{hidden}{visible} "
+        "order by l.published_at desc limit %s",
         [company_id, *hidden_params, *params, LISTINGS],
     )
     cards = Cards(ctx, settings_values(), content.Translations(ctx.locale)).present(rows)

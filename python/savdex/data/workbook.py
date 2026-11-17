@@ -1448,6 +1448,15 @@ class _Import:
         """
         from openpyxl import load_workbook
 
+        from savdex.data import xlsx_limits
+
+        # Пределы до разбора: маленький файл распаковывался в сотни
+        # мегабайт и съедал память машины админки (Н35)
+        try:
+            xlsx_limits.check(content)
+        except xlsx_limits.TooLargeError as error:
+            raise UnreadableWorkbookError(str(error)) from error
+
         try:
             book = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
         except Exception as error:
@@ -1481,6 +1490,8 @@ class _Import:
                 sheet = _Sheet(name, locale)
                 _read_sheet(sheet, _values(page), epoch)
                 sheets.append(sheet)
+        except xlsx_limits.TooLargeError as error:
+            raise UnreadableWorkbookError(str(error)) from error
         except Exception as error:
             raise UnreadableWorkbookError("Книгу Excel не удалось прочитать.") from error
         finally:
@@ -2029,10 +2040,23 @@ def _values(page: Any) -> Iterable[list[Any]]:  # noqa: ANN401
     достанется пятому товару), размер листа из заголовка не в счёт,
     ячейка с ошибкой формулы (#N/A) — пустая.
     """
+    from savdex.data import xlsx_limits
+
     page.reset_dimensions()
 
-    for row in page.iter_rows():
-        yield [None if cell.data_type == "e" else cell.value for cell in row]
+    # Не шире и не длиннее пределов: одна ячейка в столбце XFD растягивала
+    # строку до 16 384 значений, одна в строке 1 048 576 — лист до миллиона
+    # строк (Н35). Хвост пустых ячеек до предела ширины — отрезается
+    for number, row in enumerate(page.iter_rows(max_col=xlsx_limits.MAX_COLS), start=1):
+        if number > xlsx_limits.MAX_ROWS:
+            raise xlsx_limits.too_many_rows()
+
+        values = [None if cell.data_type == "e" else cell.value for cell in row]
+
+        while values and values[-1] is None:
+            values.pop()
+
+        yield values
 
 
 def _translations(value: Any) -> dict[str, Any]:  # noqa: ANN401

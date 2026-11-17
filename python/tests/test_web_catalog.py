@@ -384,6 +384,52 @@ def test_дешевле_по_курсу_а_не_по_числу(сайт, monkey
     assert строки == [(30, "EUR"), (500000, "UZS"), (100, "USD")]
 
 
+def test_истёкшее_по_сроку_нет_в_лентах_и_карте(сайт):
+    """
+    Н31: до часовой задачи снятия истёкшее по сроку уже не в лентах
+    главной, не в «Похожих», не в карте сайта и без картинки для соцсетей.
+    Раньше срок проверяли только каталог и страница объявления — клик из
+    ленты вёл на 404.
+    """
+    видно = (
+        "from listings l join companies c on c.id = l.company_id and c.status = 'active' "
+        "and c.deleted_at is null where l.status = 'active' and l.deleted_at is null "
+        "and l.category_id is not null"
+    )
+    [(lid, slug, раздел, было)] = sql(
+        f"select l.id, l.slug, l.category_id, l.expires_at {видно} "
+        "order by l.published_at desc, l.id desc limit 1"
+    )
+    [(сосед,)] = sql(
+        f"select l.slug {видно} and l.category_id = %s and l.id <> %s order by l.id limit 1",
+        [раздел, lid],
+    )
+
+    def где_видно() -> dict[str, bool]:
+        return {
+            "главная": slug in открыть(сайт, "/", None, IP)["body"],
+            "похожие": slug in открыть(сайт, f"/listing/{сосед}", None, IP)["body"],
+            "карта": slug in открыть(сайт, "/sitemap-listings-1.xml", None, IP)["body"],
+            "картинка": открыть(сайт, f"/og/listing/{lid}.jpg", None, IP)["status"] != 404,
+        }
+
+    # Пока срок не вышел — везде есть: проверка смотрит туда, куда надо
+    assert где_видно() == dict.fromkeys(("главная", "похожие", "карта", "картинка"), True)
+
+    sql(
+        "update listings set expires_at = now() at time zone 'UTC' - interval '1 hour' "
+        "where id = %s",
+        [lid],
+    )
+
+    try:
+        стало = где_видно()
+    finally:
+        sql("update listings set expires_at = %s where id = %s", [было, lid])
+
+    assert стало == dict.fromkeys(("главная", "похожие", "карта", "картинка"), False)
+
+
 def test_истёкшее_по_сроку_не_показывается(сайт):
     """
     Срок вышел, а задача расписания ещё не сняла объявление: в каталоге и

@@ -28,6 +28,7 @@ from savdex.web.phpquery import php_int
 from savdex.web.request import context
 from savdex.web.seo import Seo, _limit
 from savdex.web.shared import _TASHKENT, Context
+from savdex.web.view_counter import should_count
 from savdex.web.visibility import author_visible
 
 PER_PAGE = 20
@@ -239,8 +240,12 @@ def _count_view(ctx: Context, row: dict[str, Any]) -> None:
     """
     $tender->increment('views_count'): +1 без событий сохранения и без
     updated_at — просмотр не правка (lastmod карты сайта). Администратор —
-    ещё и строка журнала, как AuditObserver на событии updated.
+    ещё и строка журнала, как AuditObserver на событии updated. Повтор,
+    робот и сверх часового предела не засчитываются (view_counter, Н22).
     """
+    if not should_count(ctx, "tenders", row["id"]):
+        return
+
     with allowed_writes("tenders"), connection.cursor() as cursor:
         cursor.execute(
             "update tenders set views_count = views_count + 1 where id = %s", [row["id"]]

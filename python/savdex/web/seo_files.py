@@ -151,7 +151,7 @@ def sitemap(request: HttpRequest) -> HttpResponse:
     listings = math.ceil(
         _count(
             "select count(*) as n from listings where status = 'active' and deleted_at is null "
-            f"and {_live('listings')}"
+            f"and {_live('listings')} and {visibility.listing_live_sql('listings')}"
         )
         / CHUNK
     )
@@ -233,7 +233,8 @@ def _categories(ctx: Context) -> list[dict[str, Any]]:
         {"loc": ctx.url(f"/catalog?category={r['id']}"), "priority": "0.8", "changefreq": "daily"}
         for r in _rows(
             "select c.id, (select count(*) from listings l where c.id = l.category_id "
-            f"and l.status = 'active' and l.deleted_at is null and {_live('l')}) as active "
+            f"and l.status = 'active' and l.deleted_at is null and {_live('l')} "
+            f"and {visibility.listing_live_sql()}) as active "
             "from categories c "
             "where c.is_active = true"
         )
@@ -264,6 +265,8 @@ def _listings(ctx: Context, page: int) -> list[dict[str, Any]]:
     rows = _rows(
         "select slug, updated_at, source, title_i18n from listings where status = 'active' "
         f"and deleted_at is null and slug is not null and {_live('listings')} "
+        # Истёкшее по сроку — не в карте сайта (Н31)
+        f"and {visibility.listing_live_sql('listings')} "
         "order by id limit %s offset %s",
         [CHUNK, max(0, (page - 1) * CHUNK)],
     )
