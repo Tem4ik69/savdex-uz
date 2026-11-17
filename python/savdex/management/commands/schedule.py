@@ -60,9 +60,10 @@ class Command(BaseCommand):
 
             for job in schedule.pending(now):
                 try:
-                    due = job.due(now)
-                    self.stdout.write(f"{job.name}: {job.run(now, due)}")
-                    schedule.remember(job.name, job.mark(due))
+                    result = schedule.run_locked(job, now)
+
+                    if result is not None:
+                        self.stdout.write(f"{job.name}: {result}")
                 except Exception:
                     # Сбой задачи — не повод останавливать остальные:
                     # следующая проверка через минуту попробует снова
