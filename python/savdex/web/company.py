@@ -191,8 +191,10 @@ def _contacts(company_id: int, unlocked: bool) -> list[dict[str, Any]]:
         result.append(
             {
                 "type": c["type"],
-                "label": c["label"],
-                "contact_person": c["contact_person"],
+                # Подпись и контактное лицо закрытого контакта — тоже за
+                # раскрытием: туда вписывали телефон и имя (Н21)
+                "label": c["label"] if is_open else None,
+                "contact_person": c["contact_person"] if is_open else None,
                 "value": c["value"] if is_open else masked(c["type"], c["value"]),
                 "href": href(c["type"], c["value"]) if is_open else None,
                 "locked": not is_open,

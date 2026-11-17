@@ -128,6 +128,15 @@ def ошибки(итог: dict[str, Any]) -> set[str]:
             {"type": "website", "value": "https://cement.uz"},
             ("website", "https://cement.uz", None, None, True, True, 2),
         ),
+        # «Сайт» виден всем без раскрытия — только адрес с доменом (Н21)
+        (
+            {"type": "website", "value": "cement.uz"},
+            ("website", "cement.uz", None, None, True, True, 2),
+        ),
+        ({"type": "website", "value": "+998 90 123 45 67"}, {"value"}),
+        ({"type": "website", "value": "звоните 901234567"}, {"value"}),
+        ({"type": "website", "value": "cement.uz/998901234567"}, {"value"}),
+        ({"type": "website", "value": "@cement_trade"}, {"value"}),
         ({"type": "fax", "value": "123"}, {"type"}),
         # Одно значение в компании — один раз (чужой такой же телефон не мешает)
         ({"type": "phone", "value": "+998 90 111-22-33"}, {"value"}),

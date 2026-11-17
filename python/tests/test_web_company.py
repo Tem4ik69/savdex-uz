@@ -181,6 +181,8 @@ def test_визитка_гостю(сайт, path, locale):
     assert [c["locked"] for c in props["contacts"]] == [True, True, True, True, False, True]
     assert props["contacts"][0]["value"] == "+998 90 ••• •• ••"
     assert props["contacts"][1]["value"] == "s••••@stroybaza.uz"
+    # Подпись и контактное лицо закрытого контакта — тоже за раскрытием (Н21)
+    assert [(c["label"], c["contact_person"]) for c in props["contacts"]] == [(None, None)] * 6
     assert props["locked_count"] == 5 and props["unlocked"] is False
     # Материал (прайс) — сразу; документы — после одобрения; пропавший с диска не виден
     assert [f["title"] for f in props["files"]] == ["Лицензия", "Прайс", "Качество"]
@@ -285,6 +287,8 @@ def test_раскрытые_контакты(сайт):
         assert props["unlocked"] is True and props["locked_count"] == 0
         assert not any(c["locked"] for c in props["contacts"])
         assert props["contacts"][0]["value"] == "+998 90 123-45-67"
+        assert props["contacts"][0]["contact_person"] == "Азиз"
+        assert props["contacts"][1]["label"] == "Отдел продаж"
         # Раскрыл — можно оставить отзыв
         assert props["review_blocked"] is None
 

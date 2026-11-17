@@ -37,7 +37,11 @@ pytestmark = нужна_база
 ФАЙЛОВЫЙ = {"CACHE_STORE": "file"}
 
 #: Свой адрес посетителя: счётчик частоты — только наш
-IP = {"X-Forwarded-For": "192.0.2.148"}
+IP = {
+    "X-Forwarded-For": "192.0.2.148",
+    # Браузер: робота статистика поиска не считает (Н23)
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131.0",
+}
 
 ГЕО = ("countries", "country_translations", "cities", "city_translations")
 РАЗДЕЛЫ = ("categories", "category_translations", "category_fields")
@@ -189,9 +193,20 @@ def сайт(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
         ФАЙЛОВЫЙ.pop("LARAVEL_ROOT")
 
 
+def отсев_поиска(*запросы: str) -> None:
+    """Метки отсева статистики поиска гостя с адресом IP — с нуля (Н23)."""
+    who = hashlib.sha1(f"ip:{IP['X-Forwarded-For']}".encode()).hexdigest()
+    names = [f"search:cap:{who}", f"search:cap:{who}:timer"]
+    names += [f"search:query:{who}:{hashlib.sha1(q.encode()).hexdigest()}" for q in запросы]
+
+    for name in names:
+        файл_кэша(name, _свой_корень()).unlink(missing_ok=True)
+
+
 def обнулить() -> None:
     """Статистика и счётчик частоты с нуля."""
     счётчик_частоты()
+    отсев_поиска("цемент м400")
     sql("update listings set impressions_count = 0")
     sql("delete from listing_stats")
     sql("delete from search_hits")
@@ -351,6 +366,31 @@ def test_статистика_поиска(сайт):
         )
     ]
     assert запросы == [(c, "цемент м400", 1) for c in компании_]
+
+
+@pytest.mark.parametrize("запрос", ["%25", "_", "%25%25", "__"])
+def test_процент_и_подчёркивание_ищутся_буквально(сайт, запрос):
+    """Н23: «%» и «_» — не шаблон LIKE: ни одно объявление их не содержит."""
+    props = каталог(сайт, f"/catalog?q={запрос}")["props"]
+
+    assert props["total"] == 0
+    assert статистика()[2] == []
+
+
+def test_повтор_поиска_не_засоряет_статистику(сайт):
+    """Н23: тот же запрос того же гостя — раз в полчаса; робот — никогда."""
+    путь = "/catalog?q=%D0%A6%D0%B5%D0%BC%D0%B5%D0%BD%D1%82%20%D0%9C400"
+    каталог(сайт, путь)
+    было = статистика()[2]
+    assert было != []
+
+    for _ in range(3):
+        открыть(сайт, путь, None, IP, ФАЙЛОВЫЙ)
+
+    робот = {**IP, "X-Forwarded-For": "192.0.2.149", "User-Agent": "Googlebot/2.1"}
+    открыть(сайт, путь, None, робот, ФАЙЛОВЫЙ)
+
+    assert статистика()[2] == было
 
 
 def test_повтор_показа_отсеивает_кэш(сайт):

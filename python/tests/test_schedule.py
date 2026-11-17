@@ -71,6 +71,29 @@ def test_чистка_старше_90_дней(компании, tmp_path):
     assert "Удалено просмотров: 3." in вывод
 
 
+def test_чистка_статистики_поиска_старше_120_дней(компании, tmp_path):
+    """Н23: строки «по каким запросам находили» старше 120 дней — прочь."""
+    sql("truncate search_hits restart identity")
+
+    for n, days in enumerate((400, 121, 120, 119, 1)):
+        sql(
+            "insert into search_hits (company_id, query, date, impressions, clicks, "
+            "created_at, updated_at) values "
+            "(%s, %s, (now() at time zone 'utc')::date - %s, 1, 0, now(), now())",
+            [компании[0], f"запрос {n}", days],
+        )
+
+    вывод = schedule("--once", "search_hits_prune", state=tmp_path / "state")
+
+    # 400 и 121 день — прочь; 120, 119 и 1 — остаются
+    assert sql("select query from search_hits order by id") == [
+        ("запрос 2",),
+        ("запрос 3",),
+        ("запрос 4",),
+    ]
+    assert "Удалено строк статистики поиска: 2." in вывод
+
+
 #: Суточные задачи, которые раньше делал Laravel
 ДНЕВНЫЕ = {"audience_views_prune", "expire_listings", "ratings_recalculate", "reviews_ask"}
 
@@ -183,6 +206,7 @@ def test_список_задач(компании, tmp_path):
     вывод = schedule("--list", state=tmp_path / "state")
 
     assert "ratings_recalculate\t03:00" in вывод
+    assert "search_hits_prune\t04:10" in вывод
     assert "audience_views_prune\t04:00" in вывод and "expire_listings\t06:00" in вывод
     assert "reviews_ask\t06:00" in вывод
 

@@ -170,7 +170,7 @@ def tenders_tab(ctx: Context, string: Callable[[str], str]) -> HttpResponse:
 
     if term != "":
         where.append("t.search_text like %s")
-        params.append(f"%{search_text.normalize(term)}%")
+        params.append(search_text.contains(search_text.normalize(term)))
 
     if category:
         where.append("t.category_id in (select id from categories where id = %s or parent_id = %s)")

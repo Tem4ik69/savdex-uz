@@ -210,7 +210,7 @@ def index(request: HttpRequest) -> HttpResponse:
                 "lower(r.title) like %s or lower(r.about) like %s "
                 "or lower(cast(r.skills as text)) like %s or lower(cast(r.jobs as text)) like %s"
             )
-            params += [f"%{needle}%"] * 4
+            params += [search_text.contains(needle)] * 4
 
         # where(function) без вариантов — пустая группа, Laravel её выбрасывает
         if clauses:

@@ -36,6 +36,7 @@ from savdex.web.company_profile_actions import (
     _unique_tin,
     changed_profile_fields,
     locked_fields,
+    mask_free_text,
     normalize_tin,
 )
 from savdex.web.forms import action, input_of
@@ -261,6 +262,7 @@ def update(request: HttpRequest) -> HttpResponse:
         return _invalid(errors)
 
     fields = validated(data, rules)
+    mask_free_text(fields)
 
     # Пустое в обязательной колонке — без изменений (было 500)
     if "is_it_provider" in fields and fields["is_it_provider"] is None:

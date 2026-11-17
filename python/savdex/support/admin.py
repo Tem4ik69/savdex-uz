@@ -249,6 +249,17 @@ class TicketAdmin(CrmAdmin):
     def changelist_view(self, request: HttpRequest, extra_context: Any = None) -> HttpResponse:  # noqa: ANN401
         # Кнопка «Взять» в строке — только с правом правки
         self._can_take = self.has_edit(request)
+        flagged = support_mail.flagged_count()
+
+        # Н24: письма, которые не стали обращениями, — не молча в ящике
+        if flagged and request.method == "GET":
+            self.message_user(
+                request,
+                f"В ящике поддержки писем, которые не удалось разобрать: {flagged}. "
+                "Они отмечены флажком — посмотрите их в почте.",
+                messages.WARNING,
+            )
+
         extra = {
             **(extra_context or {}),
             "spam_url": reverse("savdex_admin:support_ticket_spam_list"),

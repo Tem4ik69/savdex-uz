@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from django.db import connection
@@ -22,6 +23,7 @@ from savdex.guards import allowed_writes
 from savdex.web import eloquent
 from savdex.web.actions import form
 from savdex.web.cabinet import _rows, company_of
+from savdex.web.companies import has_domain
 from savdex.web.company_profile_actions import not_owner
 from savdex.web.forms import action, back, flash, input_of, invalid
 from savdex.web.listing_actions import _stamp
@@ -48,6 +50,23 @@ def _php_boolean(value: Any) -> bool:  # noqa: ANN401
         return value.strip().lower() in ("1", "true", "on", "yes")
 
     return False
+
+
+def website_ok(value: Any) -> bool:  # noqa: ANN401
+    """
+    Контакт «Сайт» виден всем без раскрытия — поэтому только адрес сайта
+    с настоящим доменом: без пробелов и без девяти цифр подряд (телефон в
+    «Сайт» прятали мимо оплаты, Н21). Схема необязательна: «savdex.uz».
+    """
+    if not isinstance(value, str):
+        return False
+
+    site = value.strip()
+
+    if site == "" or re.search(r"\s", site) or len(re.findall(r"\d", site)) >= 9:
+        return False
+
+    return has_domain(site if "://" in site else "https://" + site)
 
 
 def _validated(
@@ -81,7 +100,14 @@ def _validated(
 
     rules: dict[str, list[str | Check]] = {
         "type": ["required", "in:" + ",".join(TYPES)],
-        "value": ["required", "string", "max:190", kind, Check("unique", unique)],
+        "value": [
+            "required",
+            "string",
+            "max:190",
+            kind,
+            *([Check("website", website_ok)] if type_ == "website" else []),
+            Check("unique", unique),
+        ],
         "label": ["nullable", "string", "max:60"],
         "contact_person": ["nullable", "string", "max:120"],
         "is_public": ["boolean"],
@@ -96,6 +122,7 @@ def _validated(
             "value.email": ctx.t("messages.register.email_format"),
             "value.regex": ctx.t("messages.phone_format"),
             "value.unique": ctx.t("messages.contact.duplicate"),
+            "value.website": ctx.t("messages.contact.website_format"),
         },
     )
 

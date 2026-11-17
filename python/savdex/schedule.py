@@ -108,6 +108,34 @@ def prune_audience_views(now: datetime, due: datetime) -> str:
     return f"Удалено просмотров: {deleted}."
 
 
+#: Сколько дней хранится статистика поиска (Н23, решение директора 15.11)
+SEARCH_HITS_DAYS = 120
+
+
+def prune_search_hits(now: datetime, due: datetime) -> str:
+    """
+    search-hits:prune (04:10): статистика «по каким запросам находили»
+    старше 120 дней — прочь. Кабинет показывает до 90 дней, месяц — про
+    запас. Удаляется пачками, чтобы не держать таблицу долго.
+    """
+    border = (now - timedelta(days=SEARCH_HITS_DAYS)).date()
+    deleted = 0
+
+    with allowed_writes("search_hits"), connection.cursor() as cursor:
+        while True:
+            cursor.execute(
+                "delete from search_hits where id in "
+                "(select id from search_hits where date < %s limit 5000)",
+                [border],
+            )
+            deleted += cursor.rowcount
+
+            if cursor.rowcount < 5000:
+                break
+
+    return f"Удалено строк статистики поиска: {deleted}."
+
+
 def recalculate_ratings(now: datetime, due: datetime) -> str:
     """
     ratings:recalculate (03:00): байесовский рейтинг каждой компании —
@@ -310,6 +338,7 @@ def send_ga4_purchases(now: datetime, due: datetime) -> str:
 JOBS: tuple[Job, ...] = (
     Job("ratings_recalculate", time(3, 0), recalculate_ratings),
     Job("audience_views_prune", time(4, 0), prune_audience_views),
+    Job("search_hits_prune", time(4, 10), prune_search_hits),
     Job("expire_listings", time(6, 0), expire_listings),
     Job("expire_listings_hourly", time(0, 20), expire_listings_hourly, every=1),
     Job("expire_tenders", time(0, 5), expire_tenders, every=1),

@@ -25,7 +25,7 @@ from typing import Any
 from django.db import connection
 from django.http import HttpRequest, HttpResponse, HttpResponseRedirect
 
-from savdex.web import inertia, locales, session, specs, ui
+from savdex.web import inertia, locales, search_text, session, specs, ui
 from savdex.web.home import _filled, completeness, php_round
 from savdex.web.phpquery import laravel_input, php_int, text
 from savdex.web.request import _expects_json, context
@@ -950,7 +950,7 @@ def contacts_props(ctx: Context) -> dict[str, Any]:
             "(exists (select 1 from companies s where s.id = u.target_company_id "
             "and s.name like %s and s.deleted_at is null) or u.note like %s)"
         )
-        params += [f"%{q}%", f"%{q}%"]
+        params += [search_text.contains(q)] * 2
 
     unlocks = _rows(
         "select u.*, l.title as l_title from contact_unlocks u "
