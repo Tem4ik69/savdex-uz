@@ -1101,6 +1101,59 @@ def test_забыли_пароль_ещё_раз(сайт, telnyx, канал, �
     assert len(ЗАПРОСЫ) == int(уходит and канал == "sms")
 
 
+def test_ссылка_сброса_в_telegram_без_почты(сайт, tmp_path):
+    """
+    Ссылка сброса уходит в Telegram — в адресе номер учётной записи, а не
+    почта: переписка мессенджера хранится за пределами Узбекистана.
+    """
+    журнал = tmp_path / "telegram.log"
+
+    def с_телеграмом() -> None:
+        пользователь(telegram_chat_id="777")
+
+    итог = отправить(
+        сайт,
+        "/forgot-password",
+        подготовка(с_телеграмом),
+        снимок,
+        body={"email": ПОЧТА, "channel": "telegram"},
+        env={
+            **ОКРУЖЕНИЕ_DJANGO,
+            "TELEGRAM_BOT_TOKEN": "123:abc",
+            "TELEGRAM_BOT_USERNAME": "savdex_test_bot",
+            "TELEGRAM_TRANSPORT": "log",
+            "TELEGRAM_LOG_PATH": str(журнал),
+        },
+    )
+    [uid] = [r[0] for r in sql("select id from users where email = %s", [ПОЧТА])]
+    [сообщение] = [json.loads(s) for s in журнал.read_text(encoding="utf-8").splitlines()]
+
+    assert итог["база"]["tokens"] == [(ПОЧТА, True, True)]
+    assert re.search(rf"/reset-password/[0-9a-f]{{64}}\?u={uid}\b", сообщение["text"])
+    assert ПОЧТА not in сообщение["text"] and "%40" not in сообщение["text"]
+
+
+@pytest.mark.parametrize(("токен", "почта"), [(ТОКЕН_СБРОСА, ПОЧТА), ("b" * 64, "")])
+def test_страница_сброса_по_номеру(сайт, токен, почта):
+    """
+    Ссылка из мессенджера (?u=номер): почту страница подставляет только при
+    верном токене — по одному номеру чужую почту не узнать.
+    """
+    from .web_site import страница
+
+    uid = пользователь()
+    итог = отправить(
+        сайт,
+        f"/reset-password/{токен}?u={uid}",
+        подготовка(_токен()),
+        method="GET",
+        env=ОКРУЖЕНИЕ_DJANGO,
+        headers={"User-Agent": "savdex-parity"},
+    )
+
+    assert страница(итог["ответ"]["body"])["props"]["email"] == почта
+
+
 @pytest.mark.parametrize("есть", [True, False])
 def test_забыли_пароль_страница_отправили(сайт, telnyx, есть):
     """Экран после поиска — один и тот же, есть учётка или нет: без адресов."""

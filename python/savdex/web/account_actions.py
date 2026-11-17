@@ -219,13 +219,56 @@ def create_reset_token(email: str, channel: str) -> str:
     return token
 
 
-def _reset_link(ctx: Context, token: str, email: str) -> str:
-    """url(route('password.reset', ['token' => …, 'email' => …], false))."""
+def _reset_link(ctx: Context, token: str, email: str, user_id: int | None = None) -> str:
+    """
+    url(route('password.reset', ['token' => …, 'email' => …], false)).
+
+    user_id — ссылка уходит в мессенджер (Telegram, WhatsApp): вместо
+    почты в адресе — номер учётной записи. Переписка мессенджера хранится
+    на его серверах за пределами Узбекистана, и почта целиком попадала
+    туда вместе со ссылкой. Страница сброса подставит почту сама — только
+    при действительном токене (reset_email).
+    """
     # На языке письма: англоязычное письмо открывает английскую страницу,
     # а не русскую в новом браузере без сохранённого языка
-    path = f"/reset-password/{quote(token, safe='')}?email={quote(email, safe='')}"
+    query = f"u={user_id}" if user_id is not None else f"email={quote(email, safe='')}"
+    path = f"/reset-password/{quote(token, safe='')}?{query}"
 
     return locales.url(ctx.root, path, ctx.locale)
+
+
+def token_valid(email: str, token: str) -> bool:
+    """Токен сброса этой почты действителен и свежий."""
+    record = _reset_record(email)
+
+    return (
+        record is not None
+        and record["created_at"] is not None
+        and record["created_at"] + timedelta(minutes=RESET_EXPIRE_MINUTES) > eloquent.now()
+        and guard.check(token, record["token"])
+    )
+
+
+def reset_email(user_id: str, token: str) -> str:
+    """
+    Почта для страницы сброса по ссылке из мессенджера (?u=): только если
+    токен этой учётной записи действителен — иначе по номеру узнавали бы
+    чужую почту. Не нашлась — пусто: человек впишет почту сам.
+    """
+    if not user_id.isdigit() or len(user_id) > 18:
+        return ""
+
+    rows = _rows(
+        "select email from users where id = %s and deleted_at is null and status = 'active'",
+        [int(user_id)],
+    )
+
+    if not rows or not rows[0]["email"]:
+        return ""
+
+    email = str(rows[0]["email"])
+
+    return email if token_valid(email, token) else ""
 
 
 def _send_reset_mail(ctx: Context, email: str) -> None:
@@ -275,7 +318,7 @@ def _send_reset_message(ctx: Context, email: str, channel: str) -> None:
         return
 
     token = create_reset_token(str(user["email"]), channel)
-    link = _reset_link(ctx, token, str(user["email"]))
+    link = _reset_link(ctx, token, str(user["email"]), user_id=int(user["id"]))
 
     if channel == "telegram" and user["telegram_chat_id"] is not None:
         messaging.telegram(

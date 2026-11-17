@@ -526,6 +526,66 @@ def test_публикация_отказ(сайт, было, лимит, оши�
         assert итог["база"]["notifications"] == []
 
 
+def test_две_публикации_разом_не_обходят_лимит(сайт):
+    """
+    Н30: в лимите одно место, и второе объявление публикуется в ту же
+    секунду (другая вкладка). Раньше оба запроса видели свободное место и
+    публиковали оба. Здесь второй запрос — поток теста: держит замок
+    лимита компании и, пока сайт ждёт, выпускает своё объявление.
+    """
+    import threading
+    import time
+
+    import psycopg
+
+    from .pg_admin import АДРЕС
+
+    uid = владелец()
+    поток: list[threading.Thread] = []
+
+    def подготовка() -> None:
+        sql("update plans set listings_limit = 1 where code = 'free'")
+        объявления(("draft", ""), ("draft", "Цемент"))()
+        взял = threading.Event()
+
+        def другая_вкладка() -> None:
+            with psycopg.connect(АДРЕС) as соединение:
+                соединение.execute(
+                    "select pg_advisory_xact_lock(hashtextextended('listings-limit', %s))",
+                    [_компания()],
+                )
+                взял.set()
+                time.sleep(1.5)
+                соединение.execute("update listings set status = 'active' where id = 2")
+                соединение.commit()
+
+        поток.append(threading.Thread(target=другая_вкладка))
+        поток[0].start()
+        взял.wait(5)
+
+    def после() -> Any:
+        поток[0].join()
+
+        return снимок()
+
+    try:
+        итог = отправить(
+            сайт,
+            "/cabinet/listings/1/publish",
+            подготовка,
+            после,
+            uid=uid,
+            env=БЕЗ_ПЕРЕВОДА,
+            body={**ВЕРНО, "category_id": _категория()},
+            headers=inertia(),
+        )
+    finally:
+        sql("update plans set listings_limit = null where code = 'free'")
+
+    assert сессия(итог)["error"] == ЛИМИТ
+    assert [(r[0], r[9]) for r in итог["база"]["listings"]] == [(1, "draft"), (2, "active")]
+
+
 # ── Автосохранение ──────────────────────────────────────────────────
 
 

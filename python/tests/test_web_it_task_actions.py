@@ -131,16 +131,17 @@ def _ошибки(итог: dict[str, Any]) -> dict[str, list[str]]:
     ("close", "closed"): ("closed", True, False, False, None),
     ("close", "completed"): ("completed", True, False, False, None),
     ("reopen", "active"): ("active", False, None, False, None),
-    # Открыта заново — снова на витрине с сегодняшней датой
+    # Открыта заново — снова на витрине, но с прежней датой публикации:
+    # «Открыть снова» наверх не поднимает (Н33, решение директора 15.11)
     ("reopen", "closed"): (
-        "active", False, None, True,
-        '{"before":{"status":"closed","published_at":"T","closed_at":"T"},"after":{'
-        '"status":"active","published_at":"T","closed_at":null}}',
+        "active", False, None, False,
+        '{"before":{"status":"closed","closed_at":"T"},"after":{'
+        '"status":"active","closed_at":null}}',
     ),
     ("reopen", "completed"): (
-        "active", False, None, True,
-        '{"before":{"status":"completed","published_at":"T","closed_at":"T"},"after":{'
-        '"status":"active","published_at":"T","closed_at":null}}',
+        "active", False, None, False,
+        '{"before":{"status":"completed","closed_at":"T"},"after":{'
+        '"status":"active","closed_at":null}}',
     ),
 }  # fmt: skip
 

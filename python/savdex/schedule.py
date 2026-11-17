@@ -18,6 +18,7 @@ manage.py schedule (цикл в docker/render-entrypoint.sh), проверка �
 from __future__ import annotations
 
 import json
+import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -29,6 +30,8 @@ from django.conf import settings
 from django.db import connection
 
 from savdex.guards import allowed_writes
+
+log = logging.getLogger("savdex.schedule")
 
 
 @dataclass(frozen=True)
@@ -43,9 +46,17 @@ class Job:
     every: int | None = None
 
     def due(self, now: datetime) -> datetime:
-        """Последний назначенный момент (у суточной — сегодняшний, даже будущий)."""
+        """
+        Последний назначенный момент, не позже «сейчас»: у суточной —
+        сегодняшний, если его час прошёл, иначе вчерашний. Раньше суточная
+        брала сегодняшний и до его часа ждала — пропущенный простоем вчерашний
+        день (машина лежала с 02:50 до 03:10 следующего дня) так и не
+        выполнялся (Н37).
+        """
         if self.every is None:
-            return datetime.combine(now.date(), self.at)
+            slot = datetime.combine(now.date(), self.at)
+
+            return slot if slot <= now else slot - timedelta(days=1)
 
         slot = datetime.combine(now.date(), time(now.hour - now.hour % self.every, self.at.minute))
 
@@ -398,12 +409,42 @@ def remember(name: str, day: date | str) -> None:
     os.replace(temporary, path)
 
 
+def run_locked(job: Job, now: datetime) -> str | None:
+    """
+    Задача под замком базы (на её имя), с проверкой отметки уже под ним
+    (Н37): два процесса расписания разом — выкладка, второй контейнер —
+    выполняли одну задачу дважды. Замок держит другой процесс или задача
+    за этот момент уже отмечена — None, ничего не делается.
+    """
+    due = job.due(now)
+    key = f"schedule:{job.name}"
+
+    with connection.cursor() as cursor:
+        cursor.execute("select pg_try_advisory_lock(hashtextextended(%s, 0))", [key])
+        got = bool(cursor.fetchone()[0])
+
+    if not got:
+        return None
+
+    try:
+        if load().get(job.name) == job.mark(due):
+            return None
+
+        result = job.run(now, due)
+        remember(job.name, job.mark(due))
+
+        return result
+    finally:
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute("select pg_advisory_unlock(hashtextextended(%s, 0))", [key])
+        except Exception:
+            # Соединение с базой упало вместе с задачей — замок снят с ним
+            log.warning("Замок задачи %s не снят: соединения нет", job.name, exc_info=True)
+
+
 def pending(now: datetime) -> list[Job]:
     """Задачи, чей назначенный момент настал, а пройден ещё не был."""
     state = load()
 
-    return [
-        item
-        for item in JOBS
-        if now >= item.due(now) and state.get(item.name) != item.mark(item.due(now))
-    ]
+    return [item for item in JOBS if state.get(item.name) != item.mark(item.due(now))]

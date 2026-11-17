@@ -297,6 +297,26 @@ def test_открыть_снова(сайт, было, стало):
     assert итог["база"]["tenders"][0][13] == стало
 
 
+def test_открыть_снова_не_поднимает_наверх(сайт):
+    """Н33: дата публикации — прежняя, тендер не встаёт наверх даром."""
+
+    def подготовка() -> None:
+        тендеры("archived")()
+        sql("update tenders set published_at = now() - interval '10 days'")
+
+    итог = отправить(
+        сайт,
+        "/cabinet/tenders/1/reopen",
+        подготовка,
+        lambda: sql(
+            "select status, published_at < now() - interval '9 days' from tenders order by id"
+        ),
+        uid=заказчик(),
+    )
+
+    assert итог["база"][0] == ("published", True)
+
+
 def test_удалить(сайт):
     итог = отправить(
         сайт,

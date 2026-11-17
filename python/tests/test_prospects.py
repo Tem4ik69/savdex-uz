@@ -153,6 +153,42 @@ def _загрузить(uid: int, content: bytes, **поля: str) -> dict:
 
 
 @нужна_база
+def test_двойной_щелчок_в_лиды_один_лид(люди, чисто):
+    """
+    Н36: два «В лиды» по одной записи разом. Раньше оба запроса видели
+    запись не в лидах и делали два лида. Здесь первый — поток теста:
+    держит запись под замком и отмечает её перенесённой; сайт ждёт и
+    второго лида не создаёт.
+    """
+    import threading
+    import time
+
+    import psycopg
+
+    from .pg_admin import АДРЕС
+
+    pk = _завести(name="Мебель Плюс", email="info@mebel.uz")
+    лидов = sql("select count(*) from crm_leads")[0][0]
+    взял = threading.Event()
+
+    def первый() -> None:
+        with psycopg.connect(АДРЕС) as соединение:
+            соединение.execute("select 1 from crm_prospects where id = %s for update", [pk])
+            взял.set()
+            time.sleep(1.5)
+            соединение.execute("update crm_prospects set converted_at = now() where id = %s", [pk])
+            соединение.commit()
+
+    поток = threading.Thread(target=первый)
+    поток.start()
+    взял.wait(5)
+    _, ответ = django(люди["sales"], ("post", f"{LIST}{pk}/to-lead/", {}))
+    поток.join()
+
+    assert ответ["status"] == 302
+    assert sql("select count(*) from crm_leads")[0][0] == лидов
+
+
 def test_неполные_данные_и_дубль(люди, чисто):
     _, создано, дубль, список = django(
         люди["sales"],

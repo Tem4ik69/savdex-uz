@@ -234,3 +234,90 @@ def test_отметка_пишется_целиком(tmp_path, monkeypatch):
     }
     assert len(замены) == 2 and all(Path(b) == state for _, b in замены)
     assert sorted(p.name for p in state.parent.iterdir()) == ["schedule.json"]
+
+
+def test_суточная_догоняет_пропущенный_день(tmp_path, monkeypatch):
+    """
+    Н37: машина лежала с 02:50 до 00:30 следующего дня — вчерашний проход
+    в 03:00 пропущен. Раньше до сегодняшних 03:00 задача не считалась
+    назначенной, и вчерашний день так и не выполнялся.
+    """
+    from savdex import schedule
+
+    monkeypatch.setenv("SAVDEX_SCHEDULE_STATE", str(tmp_path / "schedule.json"))
+    рейтинги = schedule.job("ratings_recalculate")
+    сейчас = datetime(2026, 11, 17, 0, 30)
+    schedule.remember("ratings_recalculate", "2026-11-15")
+
+    assert рейтинги.due(сейчас) == datetime(2026, 11, 16, 3, 0)
+    assert рейтинги in schedule.pending(сейчас)
+
+    # Вчерашний отмечен — до сегодняшних 03:00 ждать нечего
+    schedule.remember("ratings_recalculate", "2026-11-16")
+    assert рейтинги not in schedule.pending(сейчас)
+    assert рейтинги in schedule.pending(datetime(2026, 11, 17, 3, 0))
+
+
+def test_замок_от_двойного_запуска(компании, tmp_path):
+    """
+    Н37: пока задачу выполняет другой процесс (держит её замок в базе),
+    второй её не запускает и не отмечает; после — выполняет один раз.
+    """
+    import threading
+
+    import psycopg
+
+    from .pg_admin import АДРЕС
+
+    state = tmp_path / "schedule.json"
+    код = (
+        "import django; django.setup()\n"
+        "from savdex import schedule\n"
+        "from savdex.web.listing_actions import _now\n"
+        "print(schedule.run_locked(schedule.job('audience_views_prune'), _now()))\n"
+    )
+
+    def запустить() -> str:
+        return subprocess.run(
+            [sys.executable, "-c", код],
+            cwd=PYTHON,
+            env={
+                **ОКРУЖЕНИЕ,
+                "DJANGO_SETTINGS_MODULE": "savdex.settings",
+                "PYTHONPATH": str(PYTHON),
+                "SAVDEX_SCHEDULE_STATE": str(state),
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+
+    взял, отпустить = threading.Event(), threading.Event()
+
+    def другой_процесс() -> None:
+        with psycopg.connect(АДРЕС) as соединение:
+            соединение.execute(
+                "select pg_advisory_lock(hashtextextended('schedule:audience_views_prune', 0))"
+            )
+            взял.set()
+            отпустить.wait(30)
+
+    поток = threading.Thread(target=другой_процесс)
+    поток.start()
+    взял.wait(5)
+
+    try:
+        занято = запустить()
+        отмечено = state.exists()
+    finally:
+        отпустить.set()
+        поток.join()
+
+    первый = запустить()
+    второй = запустить()
+
+    # Замок у другого — ни прохода, ни отметки
+    assert занято == "None" and not отмечено
+    assert первый.startswith("Удалено просмотров")
+    # Отметка есть — повторно за тот же момент не выполняется
+    assert второй == "None"

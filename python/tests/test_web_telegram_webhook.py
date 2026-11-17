@@ -19,7 +19,6 @@ import hashlib
 import hmac
 import json
 import os
-import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -147,17 +146,6 @@ class Бот:
 
         return новые
 
-    def код(self) -> tuple[str, str]:
-        """Последнее письмо: кому и код из него."""
-        from .test_deliveries import письма, части
-
-        письмо = письма(self.почта)[-1]
-        тело, _ = части(письмо)
-        найдено = re.search(r"^# (\d{6})$", тело, re.M)
-        assert найдено, тело
-
-        return str(письмо["To"]), найдено.group(1)
-
 
 def кнопки(сообщение: dict[str, Any]) -> list[dict[str, Any]]:
     markup = сообщение.get("reply_markup") or {}
@@ -229,54 +217,58 @@ def test_мусор(сайт, tmp_path, фирма, body):
     assert бот.новые() == []
 
 
+def настройки(сайт: str) -> dict[str, str]:
+    """Кнопка «Открыть настройки» — к блоку Telegram в кабинете."""
+    return {"text": "Открыть настройки", "url": f"{сайт}/cabinet/settings#telegram"}
+
+
 def test_сам_открыл_бота(сайт, tmp_path, фирма):
+    """
+    Н38: без ссылки из кабинета бот не привязывает: ИНН, ПИНФЛ и почту
+    в бота больше не вводят — только подсказка и кнопка в настройки.
+    """
     бот = Бот(сайт, tmp_path)
 
     [привет] = бот.написать("/start")
-    assert "введите ИНН" in привет["text"]
+    assert "Привязать Telegram" in привет["text"] and "ИНН" not in привет["text"]
+    assert кнопки(привет) == [
+        {"text": "Открыть настройки", "url": f"{сайт}/cabinet/settings#telegram"}
+    ]
 
-    # Не ИНН, незнакомый ИНН — «зарегистрируйтесь» со ссылкой
-    assert "9 цифр" in бот.написать("12345")[0]["text"]
-    [нет] = бот.написать("999999999")
-    assert "не зарегистрирована" in нет["text"]
-    assert кнопки(нет) == [{"text": "Зарегистрироваться", "url": f"{сайт}/register"}]
+    # ИНН, почта, код — та же подсказка, ничего не привязано и писем нет
+    for текст in (фирма["tin"], f"owner{фирма['n']}@mebel.uz", "123456"):
+        [ответ] = бот.написать(текст)
+        assert "Привязать Telegram" in ответ["text"]
+        assert "Мебель Плюс" not in ответ["text"] and "@mebel.uz" not in ответ["text"]
 
-    # ИНН с пробелами — компания найдена, спрашивают почту
-    [почта] = бот.написать(f"{фирма['tin'][:3]} {фирма['tin'][3:]}")
-    assert "Мебель Плюс" in почта["text"] and "почту" in почта["text"]
-
-    # Почта не из этой компании — отказ, кода нет
-    чужой = пользователь(company_id=компания(), email=f"other{фирма['n']}@x.uz")
-    assert "не относится" in бот.написать(f"other{фирма['n']}@x.uz")[0]["text"]
     assert not бот.почта.exists()
-    assert чат_у(чужой) is None
+    assert (чат_у(фирма["owner"]), чат_у(фирма["staff"])) == (None, None)
 
-    # Почта сотрудника (регистр не важен) — код уходит ему
-    [отправлен] = бот.написать(f"dilnoza{фирма['n']}@MEBEL.uz")
-    assert "Di***@mebel.uz" in отправлен["text"]
-    кому, код = бот.код()
-    assert кому == f"Dilnoza{фирма['n']}@mebel.uz"
 
-    # Неверный код — попытки считаются
-    assert (
-        "Осталось попыток: 2" in бот.написать("000000" if код != "000000" else "111111")[0]["text"]
-    )
+def test_кнопка_кабинета(сайт, tmp_path, фирма):
+    """Ссылка из кабинета — сразу привязка, без ИНН; в ответе ни имени, ни почты (Н38)."""
+    бот = Бот(сайт, tmp_path, chat=777)
+    laravel_cache.put("telegram.link.tok123", фирма["staff"], 900)
 
-    [готово] = бот.написать(код, username="dilnoza_tg")
-    assert "Дилноза, готово" in готово["text"]
+    [готово] = бот.написать("/start tok123", username="dilnoza_tg")
+    assert готово["text"].startswith("Готово! Telegram подключён")
+    assert "Дилноза" not in готово["text"] and "@mebel.uz" not in готово["text"]
     assert "• Мебель" in готово["text"] and "• Текстиль" in готово["text"]
     assert [b.get("url") or b.get("callback_data") for b in кнопки(готово)] == [
         f"{сайт}/cabinet/settings#categories",
         "pause",
     ]
+    # Токен одноразовый
+    assert laravel_cache.get("telegram.link.tok123") is None
 
     # Привязан сотрудник, а не владелец
     assert sql(
         "select telegram_chat_id, telegram_username, telegram_linked_at is not null "
         "from users where id = %s",
         [фирма["staff"]],
-    ) == [("555", "dilnoza_tg", True)]
+    ) == [("777", "dilnoza_tg", True)]
     assert чат_у(фирма["owner"]) is None
+    assert not бот.почта.exists()
 
     # Дальше — меню
     [меню] = бот.написать("привет")
@@ -285,85 +277,36 @@ def test_сам_открыл_бота(сайт, tmp_path, фирма):
     assert "включены" in меню["text"]
 
 
-def test_три_неверных_кода(сайт, tmp_path, фирма):
-    бот = Бот(сайт, tmp_path)
-    бот.написать("/start")
-    бот.написать(фирма["tin"])
-    бот.написать(f"owner{фирма['n']}@mebel.uz")
-    _, код = бот.код()
-    неверный = "000000" if код != "000000" else "111111"
-
-    assert "Осталось попыток: 2" in бот.написать(неверный)[0]["text"]
-    assert "Осталось попыток: 1" in бот.написать(неверный)[0]["text"]
-    assert "Попробуйте через 15 мин" in бот.написать(неверный)[0]["text"]
-
-    # Пауза: даже верный код уже не принимается
-    assert "Попробуйте через" in бот.написать(код)[0]["text"]
-    assert чат_у(фирма["owner"]) is None
-
-
-def test_код_устарел(сайт, tmp_path, фирма):
-    бот = Бот(сайт, tmp_path)
-    бот.написать("/start")
-    бот.написать(фирма["tin"])
-    бот.написать(f"owner{фирма['n']}@mebel.uz")
-    _, код = бот.код()
-    sql("update telegram_bot_chats set code_expires_at = now() - interval '1 day'")
-
-    assert "Код устарел" in бот.написать(код)[0]["text"]
-    assert чат_у(фирма["owner"]) is None
-
-
-def test_кнопка_кабинета(сайт, tmp_path, фирма):
-    бот = Бот(сайт, tmp_path, chat=777)
-    laravel_cache.put("telegram.link.tok123", фирма["staff"], 900)
-
-    [просьба] = бот.написать("/start tok123")
-    assert "Дилноза, чтобы подключить" in просьба["text"]
-    # Токен одноразовый
-    assert laravel_cache.get("telegram.link.tok123") is None
-
-    # ИНН другой компании — «неверный», незнакомый — «зарегистрируйтесь»
-    другая = компания(tin="222333444")
-    assert "не принадлежит вашей компании" in бот.написать("222333444")[0]["text"]
-    assert "не зарегистрирована" in бот.написать("888777666")[0]["text"]
-    assert чат_у(фирма["staff"]) is None
-    assert другая
-
-    # Свой ИНН — сразу привязка, без почты и кода
-    [готово] = бот.написать(фирма["tin"])
-    assert "Дилноза, готово" in готово["text"]
-    assert чат_у(фирма["staff"]) == "777"
-    assert not бот.почта.exists()
-
-
 def test_кнопка_кабинета_без_компании(сайт, tmp_path, фирма):
+    """Без компании — привязка есть, категорий нет: присылать нечего."""
     бот = Бот(сайт, tmp_path, chat=778)
     одиночка = пользователь(company_id=None, name="Без компании")
     laravel_cache.put("telegram.link.tok456", одиночка, 900)
-    бот.написать("/start tok456")
 
-    assert "ещё нет компании" in бот.написать(фирма["tin"])[0]["text"]
-    assert чат_у(одиночка) is None
+    [готово] = бот.написать("/start tok456")
+    assert "не выбраны категории" in готово["text"]
+    assert чат_у(одиночка) == "778"
 
 
 def test_истёкшая_ссылка(сайт, tmp_path, фирма):
     бот = Бот(сайт, tmp_path)
 
-    assert "недействительна" in бот.написать("/start other")[0]["text"]
+    [ответ] = бот.написать("/start other")
+    assert "недействительна" in ответ["text"]
+    assert кнопки(ответ) == [
+        {"text": "Открыть настройки", "url": f"{сайт}/cabinet/settings#telegram"}
+    ]
 
 
 def test_чат_переходит_к_другому(сайт, tmp_path, фирма):
     бот = Бот(сайт, tmp_path, chat=900)
     laravel_cache.put("telegram.link.tok123", фирма["owner"], 900)
     бот.написать("/start tok123")
-    бот.написать(фирма["tin"])
     assert чат_у(фирма["owner"]) == "900"
 
     # Тот же Telegram привязывает сотрудник — у владельца чат снимается
     laravel_cache.put("telegram.link.tok456", фирма["staff"], 900)
     бот.написать("/start tok456")
-    бот.написать(фирма["tin"])
     assert (чат_у(фирма["owner"]), чат_у(фирма["staff"])) == (None, "900")
 
 
@@ -371,7 +314,6 @@ def test_пауза_рассылки(сайт, tmp_path, фирма):
     бот = Бот(сайт, tmp_path, chat=901)
     laravel_cache.put("telegram.link.tok123", фирма["owner"], 900)
     бот.написать("/start tok123")
-    бот.написать(фирма["tin"])
 
     [пауза] = бот.нажать("pause")
     assert "на паузе" in пауза["text"]
@@ -393,4 +335,31 @@ def test_пауза_рассылки(сайт, tmp_path, фирма):
 def test_кнопка_без_привязки(сайт, tmp_path, фирма):
     бот = Бот(сайт, tmp_path, chat=902)
 
-    assert "введите ИНН" in бот.нажать("pause")[0]["text"]
+    assert "Привязать Telegram" in бот.нажать("pause")[0]["text"]
+
+
+def test_миграция_стирает_инн_из_разговоров(сайт, фирма):
+    """
+    Н38: разовая чистка при релизе — ИНН (ПИНФЛ), сверка с учётной записью
+    и хеш кода из разговоров стираются; «ждали почту или код» — снова
+    ждут ссылку. Привязанные и чистые разговоры не меняются.
+    """
+    from savdex import schema
+
+    sql(
+        "insert into telegram_bot_chats (chat_id, state, locale, tin, user_id, code_hash, "
+        "code_expires_at, mistakes, locked_until, codes_sent, codes_window_at) values "
+        "('1', 'code', 'uz', '30212345678901', %s, 'abc', now(), 2, now(), 1, now()), "
+        "('2', 'done', 'ru', null, null, null, null, 0, null, 0, null)",
+        [фирма["owner"]],
+    )
+    файл = schema.MIGRATIONS / "2026_11_18_100000_clear_tin_from_telegram_bot_chats.sql"
+    sql(файл.read_text(encoding="utf-8"))
+
+    assert sql(
+        "select chat_id, state, locale, tin, user_id, code_hash, code_expires_at, mistakes, "
+        "locked_until, codes_sent, codes_window_at from telegram_bot_chats order by chat_id"
+    ) == [
+        ("1", "inn", "uz", None, None, None, None, 0, None, 0, None),
+        ("2", "done", "ru", None, None, None, None, 0, None, 0, None),
+    ]

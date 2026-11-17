@@ -15,12 +15,13 @@ updated_at). Перевод опубликованного ставить в о�
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from django.db import connection
+from django.db import connection, transaction
 from django.http import HttpRequest, HttpResponse
 
 from savdex import audit
@@ -198,6 +199,24 @@ def _owned(ctx: Context, listing_id: int) -> dict[str, Any] | None:
     return rows[0] if rows else None
 
 
+#: Ключ замка лимита объявлений (pg_advisory_xact_lock с номером компании)
+LIMIT_LOCK = "listings-limit"
+
+
+@contextmanager
+def listings_lock(company_id: int) -> Iterator[None]:
+    """
+    Транзакция под замком лимита объявлений одной компании (Н30): второй
+    запрос ждёт первого и считает активные уже с его объявлением.
+    """
+    with transaction.atomic(), connection.cursor() as cursor:
+        cursor.execute(
+            "select pg_advisory_xact_lock(hashtextextended(%s, %s))", [LIMIT_LOCK, company_id]
+        )
+
+        yield
+
+
 def _active_count(company_id: int, exclude: list[int]) -> int:
     rows = _rows(
         "select count(*) as n from listings where company_id = %s and status = 'active' "
@@ -356,20 +375,23 @@ def renew(request: HttpRequest, listing_id: str) -> HttpResponse:
     if (refused := refuse_blocked(ctx, row["company_id"])) is not None:
         return refused
 
-    plan = company_plan(row["company_id"])
-    limit = plan.get("listings_limit")
+    # Проверка лимита и запись — под замком компании: два запроса разом
+    # видели одно свободное место и публиковали оба (Н30)
+    with listings_lock(row["company_id"]):
+        plan = company_plan(row["company_id"])
+        limit = plan.get("listings_limit")
 
-    if limit is not None and _active_count(row["company_id"], [row["id"]]) >= limit:
-        flash(ctx, "error", _limit_message(ctx, plan))
-        analytics.limit_reached(ctx, "listing", plan.get("code"))
+        if limit is not None and _active_count(row["company_id"], [row["id"]]) >= limit:
+            flash(ctx, "error", _limit_message(ctx, plan))
+            analytics.limit_reached(ctx, "listing", plan.get("code"))
+
+            return back(ctx)
+
+        _activate(ctx, row, plan)
+        expires = row["expires_at"]
+        flash(ctx, "success", ctx.t("messages.listing.renewed", date=expires.strftime("%d.%m.%Y")))
 
         return back(ctx)
-
-    _activate(ctx, row, plan)
-    expires = row["expires_at"]
-    flash(ctx, "success", ctx.t("messages.listing.renewed", date=expires.strftime("%d.%m.%Y")))
-
-    return back(ctx)
 
 
 @form()
@@ -454,40 +476,43 @@ def resubmit(request: HttpRequest, listing_id: str) -> HttpResponse:
 
         return redirect(ctx, ctx.url(f"/cabinet/listings/{row['id']}/edit"))
 
-    plan = company_plan(row["company_id"])
-    limit = plan.get("listings_limit")
+    # Проверка лимита и запись — под замком компании: два запроса разом
+    # видели одно свободное место и публиковали оба (Н30)
+    with listings_lock(row["company_id"]):
+        plan = company_plan(row["company_id"])
+        limit = plan.get("listings_limit")
 
-    if limit is not None and _active_count(row["company_id"], [row["id"]]) >= limit:
-        flash(ctx, "error", _limit_message(ctx, plan))
-        analytics.limit_reached(ctx, "listing", plan.get("code"))
+        if limit is not None and _active_count(row["company_id"], [row["id"]]) >= limit:
+            flash(ctx, "error", _limit_message(ctx, plan))
+            analytics.limit_reached(ctx, "listing", plan.get("code"))
+
+            return back(ctx)
+
+        now = _now()
+        save_listing(
+            ctx,
+            row,
+            {
+                "status": ACTIVE,
+                "moderation_note": None,
+                # Дата первой публикации: повторная не поднимает наверх даром
+                "published_at": row["published_at"] or now,
+                "expires_at": now + timedelta(days=plan.get("listing_days") or LIFETIME_DAYS),
+            },
+        )
+        company = company_of(ctx)
+        assert company is not None
+        _notify_company(
+            ctx,
+            company,
+            "moderation",
+            lambda locale: ui.t("messages.listing.republished_notice", locale, title=row["title"]),
+            "success",
+            "/cabinet/listings",
+        )
+        flash(ctx, "success", ctx.t("messages.listing.republished"))
 
         return back(ctx)
-
-    now = _now()
-    save_listing(
-        ctx,
-        row,
-        {
-            "status": ACTIVE,
-            "moderation_note": None,
-            # Дата первой публикации: повторная не поднимает наверх даром
-            "published_at": row["published_at"] or now,
-            "expires_at": now + timedelta(days=plan.get("listing_days") or LIFETIME_DAYS),
-        },
-    )
-    company = company_of(ctx)
-    assert company is not None
-    _notify_company(
-        ctx,
-        company,
-        "moderation",
-        lambda locale: ui.t("messages.listing.republished_notice", locale, title=row["title"]),
-        "success",
-        "/cabinet/listings",
-    )
-    flash(ctx, "success", ctx.t("messages.listing.republished"))
-
-    return back(ctx)
 
 
 @form()
@@ -526,59 +551,62 @@ def bulk(request: HttpRequest) -> HttpResponse:
 
         return back(ctx)
 
-    what = data["action"]
-    plan = company_plan(company["id"])
+    # Проверка лимита и запись — под замком компании: два запроса разом
+    # видели одно свободное место и публиковали оба (Н30)
+    with listings_lock(company["id"]):
+        what = data["action"]
+        plan = company_plan(company["id"])
 
-    if what == "renew" and (refused := refuse_blocked(ctx, company["id"])) is not None:
-        return refused
+        if what == "renew" and (refused := refuse_blocked(ctx, company["id"])) is not None:
+            return refused
 
-    if what == "renew":
-        # Отклонённые и черновики не продлеваются — иначе запрет обходился бы галочками
-        picked, listings = listings, [r for r in listings if r["status"] in RENEWABLE]
+        if what == "renew":
+            # Отклонённые и черновики не продлеваются — иначе запрет обходился бы галочками
+            picked, listings = listings, [r for r in listings if r["status"] in RENEWABLE]
 
-        if not listings:
-            flash(ctx, "error", _not_renewable(ctx, picked))
-
-            return back(ctx)
-
-        limit = plan.get("listings_limit")
-
-        if limit is not None:
-            others = _active_count(company["id"], [r["id"] for r in listings])
-
-            if others + len(listings) > limit:
-                flash(
-                    ctx,
-                    "error",
-                    _limit_message(ctx, plan)
-                    + " "
-                    + ctx.t(
-                        "messages.listing.slots",
-                        free=max(0, limit - others),
-                        picked=len(listings),
-                    ),
-                )
+            if not listings:
+                flash(ctx, "error", _not_renewable(ctx, picked))
 
                 return back(ctx)
 
-    if what == "archive":
-        # Как у одного объявления: черновик, проверка и отклонённое не снимаются
-        listings = [r for r in listings if r["status"] in (*ARCHIVABLE, ARCHIVED)]
+            limit = plan.get("listings_limit")
 
-        if not listings:
-            flash(ctx, "error", ctx.t("messages.listing.archive_closed"))
+            if limit is not None:
+                others = _active_count(company["id"], [r["id"] for r in listings])
 
-            return back(ctx)
+                if others + len(listings) > limit:
+                    flash(
+                        ctx,
+                        "error",
+                        _limit_message(ctx, plan)
+                        + " "
+                        + ctx.t(
+                            "messages.listing.slots",
+                            free=max(0, limit - others),
+                            picked=len(listings),
+                        ),
+                    )
 
-    for row in listings:
-        if what == "renew":
-            _activate(ctx, row, plan)
-        elif what == "archive":
-            save_listing(ctx, row, {"status": ARCHIVED})
-        else:
-            delete_listing(ctx, row)
+                    return back(ctx)
 
-    key = {"renew": "bulk_renewed", "archive": "bulk_archived", "delete": "bulk_deleted"}[what]
-    flash(ctx, "success", ui.choice(f"messages.listing.{key}", len(listings), ctx.locale))
+        if what == "archive":
+            # Как у одного объявления: черновик, проверка и отклонённое не снимаются
+            listings = [r for r in listings if r["status"] in (*ARCHIVABLE, ARCHIVED)]
 
-    return back(ctx)
+            if not listings:
+                flash(ctx, "error", ctx.t("messages.listing.archive_closed"))
+
+                return back(ctx)
+
+        for row in listings:
+            if what == "renew":
+                _activate(ctx, row, plan)
+            elif what == "archive":
+                save_listing(ctx, row, {"status": ARCHIVED})
+            else:
+                delete_listing(ctx, row)
+
+        key = {"renew": "bulk_renewed", "archive": "bulk_archived", "delete": "bulk_deleted"}[what]
+        flash(ctx, "success", ui.choice(f"messages.listing.{key}", len(listings), ctx.locale))
+
+        return back(ctx)

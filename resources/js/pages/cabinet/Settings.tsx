@@ -83,11 +83,13 @@ export default function Settings({
     const pick = useForm<{ categories: number[] }>({ categories: chosen });
     const feedForm = useForm<{ on: boolean }>({ on: feed });
 
-    // Кнопка «Изменить категории» из бота ведёт на #categories: страница
-    // рисуется в браузере, и сам браузер до блока не докручивает
+    // Кнопки бота ведут на #categories и #telegram: страница рисуется
+    // в браузере, и сам браузер до блока не докручивает
     useEffect(() => {
-        if (window.location.hash === '#categories') {
-            document.getElementById('categories')?.scrollIntoView({ block: 'start' });
+        const hash = window.location.hash;
+
+        if (hash === '#categories' || hash === '#telegram') {
+            document.getElementById(hash.slice(1))?.scrollIntoView({ block: 'start' });
         }
     }, []);
 
@@ -343,57 +345,59 @@ export default function Settings({
                         доступ, когда рабочая почта потеряна вместе
                         с сотрудником, который её заводил */}
                     {telegram.available && (
-                        <Panel title={t('cabinet.settings.telegram_title')}>
-                            <p className="t-sm muted" style={{ marginBottom: 16 }}>
-                                {t('cabinet.settings.telegram_lead')}
-                            </p>
+                        <div id="telegram">
+                            <Panel title={t('cabinet.settings.telegram_title')}>
+                                <p className="t-sm muted" style={{ marginBottom: 16 }}>
+                                    {t('cabinet.settings.telegram_lead')}
+                                </p>
 
-                            {telegram.linked && (
-                                <label className="row" style={{ gap: 8, marginBottom: 16 }}>
-                                    <input
-                                        type="checkbox"
-                                        checked={feedOn}
-                                        disabled={feedForm.processing}
-                                        onChange={toggleFeed}
-                                    />
-                                    <span>{t('cabinet.settings.feed_label')}</span>
-                                </label>
-                            )}
+                                {telegram.linked && (
+                                    <label className="row" style={{ gap: 8, marginBottom: 16 }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={feedOn}
+                                            disabled={feedForm.processing}
+                                            onChange={toggleFeed}
+                                        />
+                                        <span>{t('cabinet.settings.feed_label')}</span>
+                                    </label>
+                                )}
 
-                            {telegram.linked ? (
-                                <div className="row-between" style={{ gap: 12 }}>
-                                    <span>
-                                        <span className="badge badge-supply">{t('cabinet.settings.telegram_linked')}</span>
-                                        {telegram.username && <b className="ml-8">@{telegram.username}</b>}
-                                    </span>
-                                    <button
-                                        type="button"
-                                        className="btn btn-secondary"
-                                        onClick={() =>
-                                            unlink.delete(routes.cabinetSettings + '/telegram', { preserveScroll: true })
-                                        }
-                                    >
-                                        {t('cabinet.settings.telegram_disconnect')}
-                                    </button>
-                                </div>
-                            ) : (
-                                <>
-                                    {/* Не ссылка на бот, а запрос к серверу:
-                                        одноразовый токен привязки выдаётся
-                                        в момент нажатия и живёт 15 минут */}
-                                    <button
-                                        type="button"
-                                        className="btn btn-secondary btn-block"
-                                        onClick={() => link.post(routes.cabinetSettings + '/telegram')}
-                                        disabled={link.processing}
-                                    >
-                                        <Send aria-hidden className="size-4" />{' '}
-                                        {t('cabinet.settings.telegram_connect')}
-                                    </button>
-                                    <p className="t-sm muted mt-8">{t('cabinet.settings.telegram_hint')}</p>
-                                </>
-                            )}
-                        </Panel>
+                                {telegram.linked ? (
+                                    <div className="row-between" style={{ gap: 12 }}>
+                                        <span>
+                                            <span className="badge badge-supply">{t('cabinet.settings.telegram_linked')}</span>
+                                            {telegram.username && <b className="ml-8">@{telegram.username}</b>}
+                                        </span>
+                                        <button
+                                            type="button"
+                                            className="btn btn-secondary"
+                                            onClick={() =>
+                                                unlink.delete(routes.cabinetSettings + '/telegram', { preserveScroll: true })
+                                            }
+                                        >
+                                            {t('cabinet.settings.telegram_disconnect')}
+                                        </button>
+                                    </div>
+                                ) : (
+                                    <>
+                                        {/* Не ссылка на бот, а запрос к серверу:
+                                            одноразовый токен привязки выдаётся
+                                            в момент нажатия и живёт 15 минут */}
+                                        <button
+                                            type="button"
+                                            className="btn btn-secondary btn-block"
+                                            onClick={() => link.post(routes.cabinetSettings + '/telegram')}
+                                            disabled={link.processing}
+                                        >
+                                            <Send aria-hidden className="size-4" />{' '}
+                                            {t('cabinet.settings.telegram_connect')}
+                                        </button>
+                                        <p className="t-sm muted mt-8">{t('cabinet.settings.telegram_hint')}</p>
+                                    </>
+                                )}
+                            </Panel>
+                        </div>
                     )}
 
                     <Panel title={t('cabinet.settings.security')}>

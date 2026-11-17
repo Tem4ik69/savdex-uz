@@ -136,6 +136,48 @@ def _live(table: str) -> str:
     return visibility.live_company(table)
 
 
+def _paged() -> dict[str, tuple[str, str, str, str]]:
+    """
+    Части карты по CHUNK адресов (Н34): вид → (путь, «from … where …»,
+    приоритет, частота). Компаний, тендеров и задач бывает больше 50 тыс.
+    на пяти языках — одна карта сверх предела поисковиков. Первая часть
+    — под прежним именем («sitemap-companies.xml»), дальше «-2», «-3».
+    """
+    return {
+        "companies": (
+            "/company",
+            "from companies where status = 'active' and slug is not null and deleted_at is null",
+            "0.7",
+            "weekly",
+        ),
+        "tenders": (
+            "/tenders",
+            "from tenders where status = 'published' "
+            "and (published_at is null or published_at <= now()) "
+            f"and {author_visible('tenders')}",
+            "0.6",
+            "weekly",
+        ),
+        "it-tasks": (
+            "/it-services",
+            f"from it_tasks where status = 'active' and {_live('it_tasks')}",
+            "0.6",
+            "weekly",
+        ),
+    }
+
+
+def _pages(kind: str) -> int:
+    """Сколько частей у вида: пустой — 0."""
+    source = _paged()[kind][1]
+
+    return math.ceil(_count(f"select count(*) as n {source}") / CHUNK)
+
+
+def _part_names(kind: str, pages: int) -> list[str]:
+    return [kind if page == 1 else f"{kind}-{page}" for page in range(1, pages + 1)]
+
+
 def _count(query: str, params: list[Any] | None = None) -> int:
     return int(_rows(query, params)[0]["n"])
 
@@ -147,7 +189,8 @@ def sitemap(request: HttpRequest) -> HttpResponse:
     if isinstance(ctx, HttpResponse):
         return ctx
 
-    parts = ["static", "categories", "companies"]
+    # Компании — всегда (хотя бы пустая первая часть, как раньше)
+    parts = ["static", "categories", *_part_names("companies", max(1, _pages("companies")))]
     listings = math.ceil(
         _count(
             "select count(*) as n from listings where status = 'active' and deleted_at is null "
@@ -163,15 +206,8 @@ def sitemap(request: HttpRequest) -> HttpResponse:
     ):
         parts.append("news")
 
-    if _rows(
-        "select 1 from tenders where status = 'published' "
-        "and (published_at is null or published_at <= now()) "
-        f"and {author_visible('tenders')} limit 1"
-    ):
-        parts.append("tenders")
-
-    if _rows(f"select 1 from it_tasks where status = 'active' and {_live('it_tasks')} limit 1"):
-        parts.append("it-tasks")
+    parts += _part_names("tenders", _pages("tenders"))
+    parts += _part_names("it-tasks", _pages("it-tasks"))
 
     lastmod = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S+00:00")
     items = "".join(
@@ -290,18 +326,6 @@ def _part(ctx: Context, name: str) -> list[dict[str, Any]] | None:
     if name == "categories":
         return _categories(ctx)
 
-    if name == "companies":
-        return _dated(
-            ctx,
-            "/company",
-            _rows(
-                "select slug, updated_at from companies where status = 'active' "
-                "and slug is not null and deleted_at is null"
-            ),
-            "0.7",
-            "weekly",
-        )
-
     if name == "news":
         return _dated(
             ctx,
@@ -314,30 +338,23 @@ def _part(ctx: Context, name: str) -> list[dict[str, Any]] | None:
             "monthly",
         )
 
-    if name == "tenders":
-        return _dated(
-            ctx,
-            "/tenders",
-            _rows(
-                "select slug, updated_at from tenders where status = 'published' "
-                "and (published_at is null or published_at <= now()) "
-                f"and {author_visible('tenders')}"
-            ),
-            "0.6",
-            "weekly",
+    paged = re.fullmatch(r"(companies|tenders|it-tasks)(?:-(\d{1,7}))?", name)
+
+    if paged:
+        kind, number = paged.group(1), int(paged.group(2) or 1)
+
+        # «-1» — это первая часть под своим именем: второго адреса у неё нет
+        if paged.group(2) is not None and number < 2:
+            return None
+
+        path, source, priority, freq = _paged()[kind]
+        rows = _rows(
+            f"select slug, updated_at {source} order by id limit %s offset %s",
+            [CHUNK, (number - 1) * CHUNK],
         )
 
-    if name == "it-tasks":
-        return _dated(
-            ctx,
-            "/it-services",
-            _rows(
-                "select slug, updated_at from it_tasks where status = 'active' "
-                f"and {_live('it_tasks')}"
-            ),
-            "0.6",
-            "weekly",
-        )
+        # Части дальше последней нет; первая есть всегда (пусть пустая)
+        return _dated(ctx, path, rows, priority, freq) if rows or number == 1 else None
 
     found = re.fullmatch(r"listings-(\d+)", name)
 

@@ -1167,10 +1167,18 @@ def to_lead(prospect: Prospect, *, staff: access.Admin, ip: str | None = None) -
     if prospect.converted_at is not None:
         return None
 
-    email = prospect.email if prospect.email and len(prospect.email) <= 160 else None
     stamp = now()
+    given = prospect
 
     with transaction.atomic():
+        # Под замком и заново: двойной щелчок делал два лида из одной
+        # записи (Н36) — второй запрос ждёт первого и видит запись в лидах
+        prospect = Prospect.objects.select_for_update().get(pk=prospect.pk)
+
+        if prospect.converted_at is not None:
+            return None
+
+        email = prospect.email if prospect.email and len(prospect.email) <= 160 else None
         lead = Lead(
             title=prospect.label()[:200],
             source="outbound",
@@ -1186,8 +1194,8 @@ def to_lead(prospect: Prospect, *, staff: access.Admin, ip: str | None = None) -
         Prospect.objects.filter(pk=prospect.pk).update(
             lead_id=lead.pk, converted_at=stamp, updated_at=stamp
         )
-        prospect.lead_id = lead.pk
-        prospect.converted_at = stamp
+        prospect.lead_id = given.lead_id = lead.pk
+        prospect.converted_at = given.converted_at = stamp
 
     from savdex.adminsite import SavdexModelAdmin
 
