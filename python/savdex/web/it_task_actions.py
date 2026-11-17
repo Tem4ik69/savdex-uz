@@ -175,7 +175,13 @@ def reopen(request: HttpRequest, task_id: str) -> HttpResponse:
         _save(
             ctx,
             task,
-            {"status": ACTIVE, "closed_at": None, "published_at": eloquent.now()},
+            # Дата публикации — прежняя: «Открыть снова» не поднимает задачу
+            # наверх даром (Н33, решение директора 15.11)
+            {
+                "status": ACTIVE,
+                "closed_at": None,
+                "published_at": task["published_at"] or eloquent.now(),
+            },
         )
 
     flash(ctx, "success", ctx.t("messages.it_task.reopened"))

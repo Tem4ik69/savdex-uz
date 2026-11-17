@@ -662,7 +662,9 @@ def reopen(request: HttpRequest, tender_id: str) -> HttpResponse:
     if tender["status"] == ARCHIVED:
         changes: dict[str, Any] = {
             "status": PUBLISHED,
-            "published_at": eloquent.now(),
+            # Дата публикации — прежняя: «Открыть снова» не поднимает тендер
+            # наверх даром (Н33, решение директора 15.11)
+            "published_at": tender["published_at"] or eloquent.now(),
             "outcome": None,
             "outcome_party": None,
             "outcome_amount": None,
