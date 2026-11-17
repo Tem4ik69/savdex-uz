@@ -70,6 +70,18 @@ def normalize(text: str) -> str:
     return _SPACES.sub(" ", text)
 
 
+def contains(needle: str) -> str:
+    """
+    Образец «содержит» для LIKE: «%» и «_» из запроса — буквально (Н23).
+
+    Без экранирования «?q=%» находил всё, а «_» — любой знак. У
+    PostgreSQL знак экранирования в LIKE по умолчанию — обратная косая.
+    """
+    escaped = needle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+    return f"%{escaped}%"
+
+
 def variants(term: str) -> list[str]:
     """Как набрано плюс транслитерации, без повторов и пустых."""
     normalized = normalize(term)

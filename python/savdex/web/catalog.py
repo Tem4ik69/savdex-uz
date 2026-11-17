@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -31,7 +32,16 @@ from django.http import HttpRequest, HttpResponse
 
 from savdex import laravel_cache
 from savdex.guards import allowed_writes
-from savdex.web import analytics, content, inertia, paginator, platform, search_text, visibility
+from savdex.web import (
+    analytics,
+    content,
+    inertia,
+    paginator,
+    platform,
+    search_text,
+    view_counter,
+    visibility,
+)
 from savdex.web.directory import _named
 from savdex.web.home import _LISTING_COMPANY, Cards, banner, shown_city_sql, visible_in
 from savdex.web.phpquery import Array, laravel_input, php_int, text
@@ -126,11 +136,23 @@ def impressions(listing_ids: list[int], visitor: str | None) -> None:
     bump_daily(listing_ids, "impressions")
 
 
-def search_hits(company_ids: list[int], query: str) -> None:
-    """StatsRecorder::search: запрос как видит его «по каким запросам находили»."""
+def search_hits(ctx: Context, company_ids: list[int], query: str) -> None:
+    """
+    StatsRecorder::search: запрос как видит его «по каким запросам находили».
+
+    Н23: тот же запрос того же посетителя засчитывается раз в полчаса,
+    роботу — никогда, и не больше часового предела (view_counter) —
+    перелистывание выдачи и скрипт не засоряют статистику. Старше 120
+    дней строки чистит расписание (schedule.prune_search_hits).
+    """
     normalized = re.sub(r"\s+", " ", query).strip(" \t\n\r\0\x0b").lower()
 
     if normalized == "" or len(normalized) > 190 or not company_ids:
+        return
+
+    digest = hashlib.sha1(normalized.encode()).hexdigest()
+
+    if not view_counter.should_count(ctx, "query", digest, cap_group="search"):
         return
 
     stamp, today = _now()
@@ -238,7 +260,7 @@ def listings_tab(ctx: Context, query: Array, string: Callable[[str], str]) -> Ht
 
     if term != "":
         where.append("l.search_text like %s")
-        params.append(f"%{search_text.normalize(term)}%")
+        params.append(search_text.contains(search_text.normalize(term)))
 
     if kind not in ("", "0"):
         where.append("l.type = %s")
@@ -277,7 +299,7 @@ def listings_tab(ctx: Context, query: Array, string: Callable[[str], str]) -> Ht
         impressions([r["id"] for r in rows], visitor)
 
         if term != "":
-            search_hits([int(r["company_id"]) for r in rows], term)
+            search_hits(ctx, [int(r["company_id"]) for r in rows], term)
 
     # GA4: поиск — запрос или любой фильтр; сам текст запроса не уходит,
     # только его письменность (поиски без результата — отдельный отчёт)

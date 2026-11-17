@@ -56,8 +56,12 @@ def _who(ctx: Context) -> str:
     return hashlib.sha1(raw.encode()).hexdigest()
 
 
-def should_count(ctx: Context, kind: str, object_id: int) -> bool:
-    """Засчитать просмотр страницы kind/object_id этим посетителем."""
+def should_count(ctx: Context, kind: str, object_id: int | str, cap_group: str = "views") -> bool:
+    """
+    Засчитать событие kind/object_id этого посетителя: просмотр страницы
+    или (cap_group «search») строку статистики поиска — у группы свой
+    часовой предел.
+    """
     if not laravel_cache.is_file_store():
         return True
 
@@ -65,12 +69,12 @@ def should_count(ctx: Context, kind: str, object_id: int) -> bool:
         return False
 
     who = _who(ctx)
-    cap = f"views:cap:{who}"
+    cap = f"{cap_group}:cap:{who}"
 
     if too_many(cap, HOURLY_CAP):
         return False
 
-    if not laravel_cache.add(f"views:{kind}:{who}:{object_id}", True, DEDUP_SECONDS):
+    if not laravel_cache.add(f"{cap_group}:{kind}:{who}:{object_id}", True, DEDUP_SECONDS):
         return False
 
     hit(cap, 3600)

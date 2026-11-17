@@ -92,7 +92,10 @@ class Filters:
                 "(c.search_text like %s or (c.tin like %s "
                 "and c.legal_form not in ('individual', 'freelancer')))"
             )
-            params += [f"%{search_text.normalize(term)}%", f"%{term.strip(_TRIM)}%"]
+            params += [
+                search_text.contains(search_text.normalize(term)),
+                search_text.contains(term.strip(_TRIM)),
+            ]
 
         if (kind := value("type")) not in ("", "0"):
             where.append("c.type = %s")
