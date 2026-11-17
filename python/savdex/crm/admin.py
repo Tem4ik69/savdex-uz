@@ -831,9 +831,16 @@ class LeadAdmin(OnBoard):
         if not lead.is_open:
             return None
 
-        before = self.snapshot(lead)
-
         with transaction.atomic():
+            # Под замком и заново: двойной щелчок или две вкладки делали
+            # две сделки из одного лида (Н36) — второй запрос ждёт первого
+            # и видит лид уже «Стал сделкой»
+            lead = Lead.objects.select_for_update().get(pk=lead.pk)
+
+            if not lead.is_open:
+                return None
+
+            before = self.snapshot(lead)
             deal = Deal(
                 title=lead.title,
                 company_id=lead.company_id,

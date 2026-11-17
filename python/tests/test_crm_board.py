@@ -360,6 +360,41 @@ def test_в_стал_сделкой_только_кнопкой(люди):
     assert sql("select count(*) from crm_deals where lead_id = %s", [pk]) == [(1,)]
 
 
+def test_двойной_щелчок_в_сделку_одна_сделка(люди):
+    """
+    Н36: два «В сделку» разом (двойной щелчок, две вкладки). Раньше оба
+    запроса видели лид открытым и делали две сделки. Здесь первый запрос
+    — поток теста: держит лид под замком и переводит его в «Стал
+    сделкой»; второй (сайт) ждёт и сделку уже не создаёт.
+    """
+    import threading
+    import time
+
+    import psycopg
+
+    from .pg_admin import АДРЕС
+
+    pk = _лид("Лид", люди["sales"], "working")
+    взял = threading.Event()
+
+    def первый() -> None:
+        with psycopg.connect(АДРЕС) as соединение:
+            соединение.execute("select 1 from crm_leads where id = %s for update", [pk])
+            взял.set()
+            time.sleep(1.5)
+            соединение.execute("update crm_leads set status = 'converted' where id = %s", [pk])
+            соединение.commit()
+
+    поток = threading.Thread(target=первый)
+    поток.start()
+    взял.wait(5)
+    _, кнопка = django(люди["sales"], ("post", f"{LEADS}{pk}/convert/", {}))
+    поток.join()
+
+    assert кнопка["status"] == 302
+    assert sql("select count(*) from crm_deals where lead_id = %s", [pk]) == [(0,)]
+
+
 def test_чужое_и_без_права_не_двигается(люди):
     чужой = _лид("Чужой", люди["sales2"])
     ничей = _лид("Ничей", None)
