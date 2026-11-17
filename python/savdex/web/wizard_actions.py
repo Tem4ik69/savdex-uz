@@ -28,7 +28,7 @@ from savdex.tenders.slug import numbered_slug
 from savdex.web import analytics, eloquent, transitions, ui
 from savdex.web.actions import form
 from savdex.web.cabinet import _rows, company_of, company_plan, listing_limit_message
-from savdex.web.chat_actions import _unverified, mask_contacts
+from savdex.web.chat_actions import _unverified, mask_contacts, mask_fields
 from savdex.web.company_contact_actions import _php_boolean
 from savdex.web.forms import _store, action, back, flash, input_of, invalid, redirect
 from savdex.web.listing_actions import (
@@ -448,7 +448,7 @@ def _category_fields(category_id: int | None) -> dict[str, dict[str, Any]]:
 def _field_value(field: dict[str, Any], value: str) -> str | None:
     """
     Значение поля раздела: у списка — только из вариантов, у свободного
-    текста контакты скрыты (как в чате) — они открываются за кредит.
+    ввода контакты скрыты (как в чате) — они открываются за кредит.
     """
     if value == "":
         return None
@@ -461,10 +461,13 @@ def _field_value(field: dict[str, Any], value: str) -> str | None:
     if field.get("type") == "select" and options:
         return value if value in [str(o) for o in options] else None
 
-    if field.get("type") == "text":
-        return mask_contacts(value)
+    # Флажок и картинка — не текст (в пути файла цифры — не телефон)
+    if field.get("type") in ("boolean", "image"):
+        return value
 
-    return value
+    # Остальное — свободный ввод: строка, текст, число, список без
+    # вариантов. Телефон прятали и в «число» (Н21)
+    return mask_contacts(value)
 
 
 def _price_kind(data: dict[str, Any], negotiable: bool) -> dict[str, Any]:
@@ -480,7 +483,8 @@ def _price_kind(data: dict[str, Any], negotiable: bool) -> dict[str, Any]:
 
 
 #: Свободный текст объявления: контакты в нём — мимо платного раскрытия
-_FREE_TEXT = ("title", "description", "delivery_terms", "payment_terms")
+#: (единица измерения — тоже свободная строка, Н21)
+_FREE_TEXT = ("title", "description", "delivery_terms", "payment_terms", "unit")
 
 
 def _mask_free_text(changes: dict[str, Any]) -> None:
@@ -489,9 +493,7 @@ def _mask_free_text(changes: dict[str, Any]) -> None:
     текстовых полях раздела (_attribute_value) и в чате: иначе контакты
     видны всем бесплатно, а раскрытие продаётся.
     """
-    for key in _FREE_TEXT:
-        if isinstance(changes.get(key), str):
-            changes[key] = mask_contacts(changes[key])
+    mask_fields(changes, _FREE_TEXT)
 
 
 def _keep_publishable(listing: dict[str, Any], changes: dict[str, Any]) -> None:

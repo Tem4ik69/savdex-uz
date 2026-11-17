@@ -29,7 +29,7 @@ from savdex.web import eloquent, ui
 from savdex.web import review_screening as screening
 from savdex.web.actions import form
 from savdex.web.cabinet import _rows, company_of
-from savdex.web.chat_actions import _php_trim, _unverified, str_limit
+from savdex.web.chat_actions import _php_trim, _unverified, mask_contacts, str_limit
 from savdex.web.company import review_blocked
 from savdex.web.company_profile_actions import CASTS, _search_text
 from savdex.web.forms import action, back, flash, input_of, invalid
@@ -114,7 +114,8 @@ def reply(request: HttpRequest, review_id: str) -> HttpResponse:
     if errors:
         return invalid(ctx, errors)
 
-    _save(ctx, row, {"reply": data["reply"], "replied_at": _now()})
+    # Ответ на отзыв виден всем — контакты в нём за раскрытием (Н21)
+    _save(ctx, row, {"reply": mask_contacts(str(data["reply"])), "replied_at": _now()})
     flash(ctx, "success", ctx.t("messages.review.reply_published"))
 
     return back(ctx)

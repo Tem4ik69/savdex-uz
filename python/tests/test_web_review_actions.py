@@ -144,6 +144,21 @@ def test_ответ(сайт, body, прежний, ошибка, admin):
     assert bool(итог["база"]["journal"]) is записан, итог["база"]["journal"]
 
 
+def test_контакты_в_ответе_за_раскрытием(сайт):
+    """Н21: ответ на отзыв виден всем — телефон и ник в нём «[•••]»."""
+    итог = отправить(
+        сайт,
+        f"/cabinet/reviews/{отзывы()[0]}/reply",
+        сброс(None),
+        снимок,
+        uid=продавец(False),
+        body={"reply": "Спасибо! Звоните 90 123 45 67, telegram stroybaza_uz"},
+        headers=inertia(),
+    )
+
+    assert итог["база"]["reviews"][0][0] == "Спасибо! Звоните [•••], [•••]"
+
+
 @pytest.mark.parametrize(
     ("prefix", "сообщения"),
     [

@@ -54,17 +54,56 @@ class ChatRejectedError(Exception):
 # ── Текст ────────────────────────────────────────────────────────────
 
 
+#: Почта, в том числе «name(at)mail.uz», «name [at] mail.uz» (Н21)
+_EMAIL = re.compile(
+    r"[\w.+-]+\s?(?:@|\(at\)|\[at\]|\{at\})\s?[\w-]+(?:\.[\w-]+)*"
+    r"(?:\.|\(dot\)|\[dot\])[a-z]{2,}",
+    re.I,
+)
+
+#: Ссылки и адреса сайтов без «http» — «savdex.uz/catalog», «wa.me/998…» (Н21)
+_LINK = re.compile(
+    r"(?:https?://|www\.|t\.me/|wa\.me/)\S+"
+    r"|\b[\w-]+(?:\.[\w-]+)*\.(?:uz|ru|com|net|org|io|me|tj|kz|kg|tm|su|info|biz|pro"
+    r"|shop|store|online|site|app)\b(?:/\S*)?",
+    re.I,
+)
+
+#: Ник после названия мессенджера — «telegram ivan_petrov», «тг: ivan.petrov» (Н21)
+_MESSENGER = re.compile(
+    r"\b(?:telegram|телеграмм?|tg|тг|whats\s?app|вотсап|ватсап|viber|вайбер|instagram"
+    r"|инстаграмм?|insta|инста|imo|signal|skype|скайп)\b\s*[:\-–—]?\s*@?[a-z0-9_.]{4,}",
+    re.I,
+)
+
+#: Телефон: цифры с пробелами, скобками и разделителями «- . / _» (Н21)
+_PHONE = re.compile(r"\+?[\d(][\d\s()./_-]{6,}\d")
+
+
 def mask_contacts(text: str) -> str:
-    """ChatService::maskContacts: почта, ссылки, ники, телефоны от девяти цифр."""
-    masked = re.sub(r"[\w.+-]+@[\w-]+\.[a-z]{2,}", MASK, text, flags=re.I)
-    masked = re.sub(r"(?:https?://|www\.|t\.me/)\S+", MASK, masked, flags=re.I)
+    """
+    ChatService::maskContacts: почта, ссылки, ники, телефоны от девяти цифр.
+
+    Н21: и адрес с «(at)», и сайт без «http», и ник без «@» после
+    названия мессенджера, и телефон с точками, косой чертой и
+    подчёркиванием между цифрами.
+    """
+    masked = _EMAIL.sub(MASK, text)
+    masked = _LINK.sub(MASK, masked)
+    masked = _MESSENGER.sub(MASK, masked)
     masked = re.sub(r"(?<![\w.])@[a-z0-9_]{4,}", MASK, masked, flags=re.I)
 
-    return re.sub(
-        r"\+?[\d(][\d\s()-]{6,}\d",
+    return _PHONE.sub(
         lambda m: MASK if len(re.findall(r"\d", m.group(0))) >= 9 else m.group(0),
         masked,
     )
+
+
+def mask_fields(values: dict[str, Any], keys: tuple[str, ...]) -> None:
+    """Контакты в свободном тексте этих полей — «[•••]» (на месте)."""
+    for key in keys:
+        if isinstance(values.get(key), str):
+            values[key] = mask_contacts(values[key])
 
 
 def _width(ch: str) -> int:

@@ -29,6 +29,7 @@ from savdex.web import analytics, eloquent
 from savdex.web import tin as tin_rules
 from savdex.web.actions import form
 from savdex.web.cabinet import SERVICE_TYPES, _rows, company_of
+from savdex.web.chat_actions import mask_fields
 from savdex.web.city_choice import city_in_country, resolve_other
 from savdex.web.companies import has_domain
 from savdex.web.forms import action, back, flash, input_of, invalid, redirect
@@ -63,6 +64,16 @@ PROFILE_FIELDS = (
 #: Реквизиты: заполненные меняются только в настройках и раз в полгода.
 #: Остальные сведения меняются когда угодно
 LOCKED_FIELDS = ("name", "legal_name", "tin", "address")
+
+#: Свободный текст компании, который видят все: телефон, почта, ник в нём —
+#: мимо платного раскрытия, поэтому «[•••]», как в объявлении (Н21)
+FREE_TEXT = ("name", "description")
+
+
+def mask_free_text(fields: dict[str, Any]) -> None:
+    """Контакты в названии и описании компании — «[•••]» (на месте)."""
+    mask_fields(fields, FREE_TEXT)
+
 
 #: Физлицо и фрилансер: ограничений на смену сведений нет
 FREE_FORMS = ("individual", "freelancer")
@@ -364,6 +375,7 @@ def update(request: HttpRequest) -> HttpResponse:
         return invalid(ctx, errors)
 
     fields = validated(data, rules)
+    mask_free_text(fields)
 
     # Пустое в обязательных колонках — без изменений (у новой — умолчание),
     # иначе запись падала с 500
@@ -406,8 +418,9 @@ def _create(
     """
     assert ctx.user is not None
     row: dict[str, Any] = {**fields, "status": "active"}
+    mask_free_text(row)
     row.update(_search_text(row))
-    row.update({"slug": fields["slug"]} if fields.get("slug") else slug_fields(str(fields["name"])))
+    row.update({"slug": fields["slug"]} if fields.get("slug") else slug_fields(str(row["name"])))
     now = _stamp(eloquent.now())
     row.update(updated_at=now, created_at=now)
     columns = list(row)
