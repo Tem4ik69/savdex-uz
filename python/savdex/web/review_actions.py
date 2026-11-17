@@ -339,9 +339,13 @@ def store(request: HttpRequest, slug: str) -> HttpResponse:
 
     data = dict(input_of(request))
 
-    # Ноль звёзд у дополнительного критерия — «без оценки», а не ошибка
+    # Ноль звёзд у дополнительного критерия — «без оценки», а не ошибка;
+    # true из JSON — 1, как у основной оценки: логическое в колонку числа
+    # не пишется (Н32)
     for key in ("rating_description", "rating_response", "rating_deadlines", "rating_quality"):
-        if data.get(key) in (0, "0"):
+        if data.get(key) is True:
+            data[key] = 1
+        elif data.get(key) in (0, "0"):
             data[key] = None
 
     errors = validate(

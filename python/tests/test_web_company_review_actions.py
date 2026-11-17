@@ -180,6 +180,11 @@ def на_проверку(причина: str) -> str:
             {"rating": 5, "rating_description": 0, "rating_quality": "0", "body": ТЕКСТ},
             ((5, None, None, None, None), ТЕКСТ, False, "published", None, ("4.25", 3)),
         ),
+        # true и false у критерия (JSON) — 1 и «без оценки», а не ошибка 500 (Н32)
+        (
+            {"rating": 5, "rating_quality": True, "rating_response": False, "body": ТЕКСТ},
+            ((5, None, None, None, 1), ТЕКСТ, False, "published", None, ("4.25", 3)),
+        ),
         # Текст обрезается по краям; оценка строкой — число
         (
             {"rating": "2", "body": "  " + ТЕКСТ + "  ", "deal_confirmed": True},
