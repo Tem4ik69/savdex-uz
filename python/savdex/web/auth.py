@@ -238,13 +238,22 @@ def forgot_password(request: HttpRequest) -> HttpResponse:
 
 
 def reset_password(request: HttpRequest, token: str) -> HttpResponse:
-    """PasswordResetController::reset: токен из адреса, почта из ?email=."""
+    """
+    PasswordResetController::reset: токен из адреса, почта из ?email=;
+    у ссылки из мессенджера вместо почты ?u= — номер учётной записи, почта
+    подставляется при действительном токене (account_actions.reset_email).
+    """
+    from savdex.web.account_actions import reset_email
+
     ctx = guest(request)
 
     if isinstance(ctx, HttpResponse):
         return ctx
 
     email = _query(ctx, "email")
+
+    if email == "" and (user_id := _query(ctx, "u")) != "":
+        email = reset_email(user_id, token)
 
     return inertia.render(ctx, "auth/ResetPassword", {"token": token, "email": email}, _seo(ctx))
 
