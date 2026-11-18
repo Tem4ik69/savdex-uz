@@ -43,6 +43,12 @@ export const routes = {
     reviewsNew: '/reviews/new',
     contacts: '/contact',
 
+    // Маркетплейс (демо-данные, python/savdex/web/market.py)
+    market: '/market',
+    marketCatalog: '/market/catalog',
+    marketProduct: (slug: string) => `/market/product/${slug}`,
+    marketCart: '/market/cart',
+
     // Избранное
     favorites: '/favorites',
     favoriteToggle: (id: number) => `/favorites/${id}`,

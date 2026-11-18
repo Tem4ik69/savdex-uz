@@ -49,6 +49,7 @@ from savdex.web import (
     listing,
     listing_actions,
     listing_image_actions,
+    market,
     microsite,
     news,
     og_image,
@@ -109,6 +110,15 @@ urlpatterns = [
         name="contacts",
     ),
     re_path(r"^(?:(?:uz|en|zh|tr)/)?pricing$", pricing.pricing, name="pricing"),
+    # Маркетплейс: оформление на демо-данных (savdex/web/market.py)
+    re_path(r"^(?:(?:uz|en|zh|tr)/)?market$", market.home, name="market"),
+    re_path(r"^(?:(?:uz|en|zh|tr)/)?market/catalog$", market.catalog, name="market.catalog"),
+    re_path(
+        r"^(?:(?:uz|en|zh|tr)/)?market/product/(?P<slug>[a-z0-9-]{1,80})$",
+        market.product,
+        name="market.product",
+    ),
+    re_path(r"^(?:(?:uz|en|zh|tr)/)?market/cart$", market.cart, name="market.cart"),
     re_path(r"^(?:(?:uz|en|zh|tr)/)?reviews$", reviews.index, name="reviews"),
     re_path(r"^(?:(?:uz|en|zh|tr)/)?resumes$", resumes.index, name="resumes"),
     re_path(r"^(?:(?:uz|en|zh|tr)/)?resume/(?P<slug>[^/]+)$", resumes.show, name="resumes.show"),
