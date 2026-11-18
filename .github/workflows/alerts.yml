@@ -24,7 +24,7 @@ on:
       - deploy/monitoring/grafana-alerts.py
       - .github/workflows/alerts.yml
   push:
-    branches: [claude/website-copy-new-design-xaxsr0]
+    branches: [main]
     paths:
       - deploy/monitoring/alerts.yaml
       - deploy/monitoring/grafana-alerts.py
@@ -60,7 +60,7 @@ jobs:
     needs: rules
     if: >-
       github.event_name != 'pull_request'
-      && github.ref == 'refs/heads/claude/website-copy-new-design-xaxsr0'
+      && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:

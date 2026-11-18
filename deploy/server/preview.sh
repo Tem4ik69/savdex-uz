@@ -224,6 +224,8 @@ fi
 (
     umask 022
     test -d "$SRC/.git" || git clone --no-checkout --filter=blob:none "$REPO_URL" "$SRC"
+    # Адрес — всегда этого репозитория: копия на машине могла остаться со старым (переезд 18.11)
+    git -C "$SRC" remote set-url origin "$REPO_URL"
     git -C "$SRC" fetch --depth 1 origin "$sha"
     git -C "$SRC" checkout --force --detach FETCH_HEAD
 )

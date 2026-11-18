@@ -31,7 +31,7 @@ Settings → Rules → Rulesets → New ruleset → New branch ruleset:
 
 - Ruleset name — `основная ветка`, Enforcement status — **Active**;
 - Target branches → Add target → Include by pattern —
-  `claude/website-copy-new-design-xaxsr0`;
+  `main`;
 - **Restrict deletions** и **Block force pushes** — включены;
 - **Require a pull request before merging** — включено (Required
   approvals — 0: подтверждение второго человека не нужно);

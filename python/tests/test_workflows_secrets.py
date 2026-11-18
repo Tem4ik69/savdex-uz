@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
-MAIN = "refs/heads/claude/website-copy-new-design-xaxsr0"
+MAIN = "refs/heads/main"
 
 
 def _текст(имя: str) -> str:

@@ -118,7 +118,7 @@ jobs:
   # секретов не дойдёт и так (окружение production пускает только
   # основную ветку), здесь — понятная остановка вместо ожидания
   plan:
-    if: vars.PROD_HOST != '' && github.ref == 'refs/heads/claude/website-copy-new-design-xaxsr0'
+    if: vars.PROD_HOST != '' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -415,6 +415,8 @@ jobs:
           for host in admin web db; do
             ssh "$host" "set -e
               test -d /opt/savdex/src/.git || git clone --no-checkout --filter=blob:none '$REPO_URL' /opt/savdex/src
+              # Адрес — всегда этого репозитория: копия на машине могла остаться со старым (переезд 18.11)
+              git -C /opt/savdex/src remote set-url origin '$REPO_URL'
               git -C /opt/savdex/src fetch --depth 1 origin '$sha'
               git -C /opt/savdex/src checkout --force --detach FETCH_HEAD"
           done

@@ -29,7 +29,7 @@ concurrency:
   # Новый коммит в ветку отменяет недоделанную проверку старого. В основной
   # ветке — нет: по каждому её коммиту решается выкладка на тестовый
   group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/claude/website-copy-new-design-xaxsr0' }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions:
   contents: read
@@ -47,7 +47,7 @@ jobs:
 
       - id: diff
         env:
-          MAIN: claude/website-copy-new-design-xaxsr0
+          MAIN: main
         run: |
           set -euo pipefail
           # Основная ветка проверяется всегда целиком: по её зелёной
