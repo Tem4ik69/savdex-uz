@@ -73,7 +73,12 @@ class Attribute(models.Model):
         "тип",
         max_length=16,
         default="text",
-        choices=[("text", "Строка"), ("number", "Число"), ("choice", "Выбор из списка")],
+        choices=[
+            ("text", "Строка"),
+            ("number", "Число"),
+            ("choice", "Выбор из списка"),
+            ("bool", "Да / нет"),
+        ],
     )
     options: Any = models.JSONField("варианты выбора", default=list, blank=True)
     unit = models.CharField("единица", max_length=16, null=True, blank=True)

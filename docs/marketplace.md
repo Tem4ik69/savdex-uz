@@ -100,13 +100,14 @@
 | `categories` | дерево: `[{slug, name, emoji, children: [...]}]` |
 | `catalog?q=&category=&seller=&sort=&only=&min=&max=&page=&attr.<код>=a,b&attr.<код>_min=&attr.<код>_max=` | `{items, total, page, pages, sort, price: {min, max}, filters, category}`; `sort` — popular, cheap, expensive, new, rating; `only` — sale, new, hit, fav; цены — в сумах |
 | `suggest?q=` | `{products: [{slug, title}], categories: [{slug, name}]}` |
-| `product/<slug>` | товар: поля карточки, `images`, `description`, `variants` (что выбирать, как в демо), `offers` (каждый вариант: `id`, цена, остаток — его кладут в корзину), `specs`, `categoryPath`, `sellerInfo`, `favorite` |
+| `product/<slug>` | товар: поля карточки, `images` (`[{id, url, thumb, variantId}]` — `variantId` у фото одного варианта, `null` у общего), `description`, `variants` (что выбирать, как в демо), `offers` (каждый вариант: `id`, цена, остаток — его кладут в корзину), `specs`, `categoryPath`, `sellerInfo`, `favorite` |
 | `seller/<slug>?…` | `{seller, items, …}` — витрина продавца с теми же фильтрами |
 | `banners?place=slider\|strip\|catalog` | `{banners: [{url, alt, image, imageMobile, focal, …}]}` |
 
 Карточка в `items` — формат `MarketProduct` из демо Максуда
 (`resources/js/market/demo.ts`): `id, slug, title, image, price, oldPrice,
-rating, reviews, sold, stock, category, seller, sellerName, badge`.
+rating, reviews, sold, stock, category, seller, sellerName, badge`. `image` —
+уменьшенная копия первого общего фото (480 px).
 
 **Со входом.** Гость получает `401 {message, login}`; адрес страницы, с
 которой он пришёл, запоминается — после входа он вернётся к товару. Запись —
@@ -126,7 +127,7 @@ POST с токеном CSRF в заголовке `X-XSRF-TOKEN` (как шлю�
 | GET · POST `me/products/<id>` | товар для формы · сохранить правку |
 | POST `me/products/<id>/submit` | «Отправить на продажу»: `pending` (на проверку) или `active`; не хватает полей — 422 и `missing` |
 | POST `me/products/<id>/hide` | снять с продажи |
-| POST `me/products/<id>/images` (multipart, поле `file`) · POST `…/images/<imageId>/delete` | добавить фото (WebP до 1600 px, без EXIF) · удалить |
+| POST `me/products/<id>/images` (multipart: `file`, необязательно `variantId`) · POST `…/images/<imageId>/variant` `{variantId: номер \| null}` · POST `…/images/<imageId>/delete` | добавить фото (WebP до 1600 px и копия 480 px, без EXIF; с `variantId` — фото этого варианта) · сделать фото варианта или общим · удалить (оба файла) |
 
 Тело товара:
 
@@ -145,7 +146,11 @@ POST с токеном CSRF в заголовке `X-XSRF-TOKEN` (как шлю�
 ```
 
 Категория — самая точная, без подразделов. Вариант без `id` — новый;
-вариант, которого нет в списке, убирается.
+вариант, которого нет в списке, убирается: выключается и помечается, но не
+удаляется — на него будут ссылаться заказы; его фото становятся общими, из
+корзин он уходит. Характеристика «да / нет» принимает `true` / `false`,
+`1` / `0`, «да» / «нет» и отдаётся в форме правки как `true` / `false`, в
+карточке — «Да» / «Нет», в фильтре — `attr.<код>=1`.
 
 ## Как проверить у себя
 

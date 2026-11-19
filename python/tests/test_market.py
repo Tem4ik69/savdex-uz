@@ -694,8 +694,14 @@ def test_админка_продавцов(сайт, витрина):
 
 @нужна_база
 def test_фото_товара(сайт, витрина):
-    """Фото пересобирается в WebP на публичном диске; не картинка — 422; удаление стирает файл."""
+    """
+    Фото пересобирается в WebP на публичном диске, рядом — уменьшенная
+    копия для каталога; фото можно привязать к варианту своего товара, но не
+    чужого; не картинка — 422; удаление стирает оба файла.
+    """
     from pathlib import Path
+
+    from PIL import Image
 
     from .pg_admin import КОРЕНЬ
     from .test_web_company_profile_actions import multipart, картинка
@@ -703,12 +709,18 @@ def test_фото_товара(сайт, витрина):
     компания = _компания("Samarqand Tekstil", "samarqand-tekstil")
     владелец = _человек("owner@tekstil.uz", компания)
     продавец = _продавец(компания)
-    товар, _ = _товар(
+    товар, вариант = _товар(
         продавец, "textile", "Сюзане ручной работы", "suzani", status="draft", price=900_000
     )
+    диск = Path(КОРЕНЬ) / "storage/app/public"
 
-    def загрузить(имя: str, данные: bytes) -> dict[str, Any]:
-        тело, тип = multipart({"file": (имя, данные)})
+    def загрузить(имя: str, данные: bytes, variant: int | None = None) -> dict[str, Any]:
+        поля: dict[str, Any] = {"file": (имя, данные)}
+
+        if variant is not None:
+            поля["variantId"] = str(variant)
+
+        тело, тип = multipart(поля)
 
         return отправить(
             сайт,
@@ -721,20 +733,154 @@ def test_фото_товара(сайт, витрина):
         )["ответ"]
 
     assert загрузить("fake.png", b"not an image")["status"] == 422
+    # Вариант чужого товара — нельзя
+    assert загрузить("photo.png", картинка(800, 800), витрина["вариант_телефона"])["status"] == 422
 
     ответ = загрузить("photo.png", картинка(2400, 1200))
     assert ответ["status"] == 201, ответ["body"]
     [фото] = _json(ответ)["product"]["images"]
-    [(путь,)] = sql("select path from market_product_images where product_id = %s", [товар])
-    файл = Path(КОРЕНЬ) / "storage/app/public" / путь
+    [(путь, копия)] = sql(
+        "select path, thumb_path from market_product_images where product_id = %s", [товар]
+    )
+    файлы = [диск / путь, диск / копия]
 
     try:
         assert путь.startswith("market/products/") and путь.endswith(".webp")
-        assert файл.exists()
-        assert фото["url"].endswith(путь)
+        assert копия.startswith("market/products/thumbs/") and копия.endswith(".webp")
+        assert all(f.exists() for f in файлы)
+        with Image.open(файлы[1]) as маленькая:
+            assert max(маленькая.size) == 480
+        assert фото["url"].endswith(путь) and фото["thumb"].endswith(копия)
+        assert фото["variantId"] is None
+
+        # Фото — варианту и обратно общим
+        стало = _post(
+            сайт,
+            f"/market/api/me/products/{товар}/images/{фото['id']}/variant",
+            владелец,
+            {"variantId": вариант},
+        )
+        assert _json(стало)["product"]["images"][0]["variantId"] == вариант
+        чужой = _post(
+            сайт,
+            f"/market/api/me/products/{товар}/images/{фото['id']}/variant",
+            владелец,
+            {"variantId": витрина["вариант_телефона"]},
+        )
+        assert чужой["status"] == 422
+        общее = _post(
+            сайт,
+            f"/market/api/me/products/{товар}/images/{фото['id']}/variant",
+            владелец,
+            {"variantId": None},
+        )
+        assert _json(общее)["product"]["images"][0]["variantId"] is None
 
         убрал = _post(сайт, f"/market/api/me/products/{товар}/images/{фото['id']}/delete", владелец)
         assert убрал["status"] == 200 and _json(убрал)["product"]["images"] == []
-        assert not файл.exists()
+        assert not any(f.exists() for f in файлы)
     finally:
-        файл.unlink(missing_ok=True)
+        for файл in файлы:
+            файл.unlink(missing_ok=True)
+
+
+@нужна_база
+def test_характеристика_да_нет(сайт, витрина):
+    """Тип bool: значение '1' / '0', в карточке — «Да» / «Нет», фильтр attr.<код>=1."""
+    наушники = _категория("headphones")
+    признак = _id(
+        "insert into market_attributes (category_id, key, name, names, kind) values "
+        "(%s, 'wireless', 'Беспроводные', '{\"uz\": \"Simsiz\"}', 'bool') returning id",
+        [наушники],
+    )
+    sql(
+        "insert into market_product_values (product_id, attribute_id, value_text) "
+        "values (%s, %s, '1')",
+        [витрина["наушники"], признак],
+    )
+
+    try:
+        товар = _json(_get(сайт, "/market/api/product/air-buds"))["product"]
+        assert ["Беспроводные", "Да"] in товар["specs"]
+        assert ["Simsiz", "Ha"] in _json(_get(сайт, "/uz/market/api/product/air-buds"))["product"][
+            "specs"
+        ]
+
+        def slugs(query: str) -> list[str]:
+            ответ = _json(_get(сайт, f"/market/api/catalog?category=headphones&{query}"))
+            return [i["slug"] for i in ответ["items"]]
+
+        assert slugs("attr.wireless=1") == ["air-buds"]
+        assert slugs("attr.wireless=0") == []
+        фильтры = {
+            f["key"]: f
+            for f in _json(_get(сайт, "/market/api/catalog?category=headphones"))["filters"]
+        }
+        assert фильтры["wireless"]["options"] == [{"value": "1", "name": "Да", "count": 1}]
+
+        # Продавец: «да» / «нет» словами и неизвестное значение
+        компания = _компания("Air Shop", "air-shop")
+        владелец = _человек("owner@air.uz", компания)
+        _продавец(компания)
+        товар_продавца = {
+            "title": "Наушники с проводом",
+            "category": "headphones",
+            "variants": [{"price": 99000}],
+        }
+        нет = _post(
+            сайт,
+            "/market/api/me/products/create",
+            владелец,
+            {**товар_продавца, "values": {"wireless": "нет"}},
+        )
+        assert нет["status"] == 201, нет["body"]
+        assert _json(нет)["product"]["values"] == {"wireless": False}
+        мусор = _post(
+            сайт,
+            "/market/api/me/products/create",
+            владелец,
+            {**товар_продавца, "values": {"wireless": "может быть"}},
+        )
+        assert мусор["status"] == 422 and "values.wireless" in _json(мусор)["errors"]
+    finally:
+        sql("delete from market_product_values where attribute_id = %s", [признак])
+        sql("delete from market_attributes where id = %s", [признак])
+
+
+@нужна_база
+def test_убранный_вариант_не_удаляется(сайт, витрина):
+    """Вариант, который продавец убрал, выключается и помечается — строки остаются для заказов."""
+    компания = _компания("Variant Shop", "variant-shop")
+    владелец = _человек("owner@variant.uz", компания)
+    _продавец(компания)
+    товар = {
+        "title": "Футболка хлопковая",
+        "category": "men-clothes",
+        "variants": [
+            {"options": {"Размер": "M"}, "price": 120000},
+            {"options": {"Размер": "L"}, "price": 125000},
+        ],
+    }
+    создал = _json(_post(сайт, "/market/api/me/products/create", владелец, товар))["product"]
+    средний, большой = создал["variants"]
+    покупатель = _человек("buyer-variant@example.com")
+    sql(
+        "insert into market_cart_items (user_id, variant_id, quantity) values (%s, %s, 1)",
+        [покупатель, большой["id"]],
+    )
+
+    правка = _post(
+        сайт,
+        f"/market/api/me/products/{создал['id']}",
+        владелец,
+        {**товар, "variants": [{**товар["variants"][0], "id": средний["id"]}]},
+    )
+    assert правка["status"] == 200, правка["body"]
+    assert [v["id"] for v in _json(правка)["product"]["variants"]] == [средний["id"]]
+    assert sql(
+        "select is_active, options ? '_removed' from market_product_variants where id = %s",
+        [большой["id"]],
+    ) == [(False, True)]
+    assert sql("select count(*) from market_cart_items where variant_id = %s", [большой["id"]]) == [
+        (0,)
+    ]

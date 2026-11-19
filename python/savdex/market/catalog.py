@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from savdex.market.common import localized, one, rows, som, tiyin, write
+from savdex.market.common import localized, one, rows, som, t, tiyin, write
 from savdex.web.shared import public_url
 
 #: Карточек на странице каталога
@@ -184,8 +184,10 @@ CARD_COLUMNS = (
     "p.id, p.slug, p.title, p.price, p.old_price, p.stock, p.rating, p.reviews_count, "
     "p.sold_count, p.published_at, mc.slug as category_slug, c.slug as seller_slug, "
     "c.name as seller_name, "
-    "(select i.path from market_product_images i where i.product_id = p.id "
-    " order by i.sort, i.id limit 1) as cover"
+    # Обложка — первое общее фото (фото вариантов — после), уменьшенная копия
+    "(select coalesce(i.thumb_path, i.path) from market_product_images i "
+    " where i.product_id = p.id order by i.variant_id is not null, i.sort, i.id "
+    " limit 1) as cover"
 )
 
 
@@ -206,6 +208,26 @@ def card(row: Mapping[str, Any]) -> dict[str, Any]:
         "seller": row["seller_slug"],
         "sellerName": row["seller_name"],
         "badge": _badge(row),
+    }
+
+
+def _cover(images: list[dict[str, Any]]) -> str | None:
+    """Обложка карточки: первое общее фото, иначе первое любое; уменьшенная копия."""
+    ordered = sorted(images, key=lambda i: i["variant_id"] is not None)
+
+    return (ordered[0]["thumb_path"] or ordered[0]["path"]) if ordered else None
+
+
+def image_view(row: Mapping[str, Any]) -> dict[str, Any]:
+    """
+    Фото для страниц: большое, уменьшенное для карточек (нет — то же
+    большое) и чьё — номер варианта (цвета) или None, если общее.
+    """
+    return {
+        "id": row["id"],
+        "url": public_url(row["path"]),
+        "thumb": public_url(row["thumb_path"] or row["path"]),
+        "variantId": row["variant_id"],
     }
 
 
@@ -507,11 +529,15 @@ def _filters(
                 "group by v.value_text order by count(*) desc, v.value_text limit 30",
                 [attribute["id"], ids],
             )
-            names = {
-                str(o.get("value")): localized(str(o.get("name", "")), o.get("names"), locale)
-                for o in attribute["options"] or []
-                if isinstance(o, dict)
-            }
+            names = (
+                {"1": t("yes", locale), "0": t("no", locale)}
+                if attribute["kind"] == "bool"
+                else {
+                    str(o.get("value")): localized(str(o.get("name", "")), o.get("names"), locale)
+                    for o in attribute["options"] or []
+                    if isinstance(o, dict)
+                }
+            )
             item["options"] = [
                 {"value": r["value"], "name": names.get(r["value"], r["value"]), "count": r["n"]}
                 for r in counted
@@ -586,6 +612,9 @@ def _value_text(value: Mapping[str, Any], attribute: Mapping[str, Any], locale: 
 
         return f"{text} {attribute['unit']}" if attribute["unit"] else text
 
+    if attribute["kind"] == "bool":
+        return t("yes" if value["value_text"] == "1" else "no", locale)
+
     if attribute["kind"] == "choice":
         for option in attribute["options"] or []:
             if isinstance(option, dict) and str(option.get("value")) == value["value_text"]:
@@ -632,7 +661,8 @@ def product(slug: str, locale: str, user_id: int | None = None) -> dict[str, Any
         return None
 
     images = rows(
-        "select path from market_product_images where product_id = %s order by sort, id",
+        "select id, path, thumb_path, variant_id from market_product_images "
+        "where product_id = %s order by sort, id",
         [row["id"]],
     )
     offers = variants_of(row["id"])
@@ -668,8 +698,8 @@ def product(slug: str, locale: str, user_id: int | None = None) -> dict[str, Any
     )
 
     return {
-        **card({**row, "cover": images[0]["path"] if images else None}),
-        "images": [public_url(i["path"]) for i in images],
+        **card({**row, "cover": _cover(images)}),
+        "images": [image_view(i) for i in images],
         "description": row["description"] or "",
         "locale": row["locale"],
         "variants": [{"name": name, "options": opts} for name, opts in choices.items()],

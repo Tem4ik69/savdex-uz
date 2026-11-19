@@ -54,6 +54,11 @@ urlpatterns = [
         name="market.api.me.product.images",
     ),
     re_path(
+        _P + rf"me/products/(?P<product_id>{_ID})/images/(?P<image_id>{_ID})/variant$",
+        api.my_product_image_variant,
+        name="market.api.me.product.images.variant",
+    ),
+    re_path(
         _P + rf"me/products/(?P<product_id>{_ID})/images/(?P<image_id>{_ID})/delete$",
         api.my_product_image_delete,
         name="market.api.me.product.images.delete",

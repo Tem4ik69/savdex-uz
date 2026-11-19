@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Callable
 from typing import Any, ClassVar
@@ -505,18 +506,33 @@ class ProductAdmin(DecisionsMixin, SavdexModelAdmin):
     def photos(self, obj: Product) -> str:
         with connection.cursor() as cursor:
             cursor.execute(
-                "select path from market_product_images where product_id = %s order by sort, id",
+                "select i.path, coalesce(i.thumb_path, i.path), v.options "
+                "from market_product_images i "
+                "left join market_product_variants v on v.id = i.variant_id "
+                "where i.product_id = %s order by i.sort, i.id",
                 [obj.pk],
             )
-            paths = [row[0] for row in cursor.fetchall()]
+            found = cursor.fetchall()
 
-        if not paths:
+        if not found:
             return "нет"
+
+        def whose(options: Any) -> str:  # noqa: ANN401
+            if options is None:
+                return "общее"
+
+            values = json.loads(options) if isinstance(options, str) else options
+
+            return ", ".join(str(v) for k, v in values.items() if not str(k).startswith("_"))
 
         return format_html_join(
             " ",
-            '<a href="{0}" target="_blank" rel="noopener"><img src="{0}" alt="" height="96"></a>',
-            ((public_url(p),) for p in paths),
+            '<a href="{0}" target="_blank" rel="noopener" title="{2}">'
+            '<img src="{1}" alt="{2}" height="96"></a>',
+            (
+                (public_url(path), public_url(thumb), whose(options))
+                for path, thumb, options in found
+            ),
         )
 
     @admin.display(description="характеристики")
@@ -723,6 +739,10 @@ class AttributeForm(forms.ModelForm):  # type: ignore[type-arg]
 
         if data.get("kind") == "choice" and not data.get("options"):
             raise forms.ValidationError("У «выбора из списка» нужны варианты.")
+
+        # У «да / нет» варианты свои — «Да» и «Нет», список не нужен
+        if data.get("kind") == "bool":
+            data["options"] = []
 
         return data
 

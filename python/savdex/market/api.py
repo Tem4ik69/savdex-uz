@@ -500,7 +500,10 @@ def my_product_hide(request: HttpRequest, product_id: str) -> HttpResponse:
 
 @form()
 def my_product_image(request: HttpRequest, product_id: str) -> HttpResponse:
-    """POST multipart, поле file: добавить фото (до 10)."""
+    """
+    POST multipart: file — фото (до 10 на товар), variantId — необязательно:
+    фото одного варианта (цвета) этого товара; без него — общее.
+    """
     ctx = action(request, auth=False, throttle=60, throttle_prefix="market-image")
     seller, refused = _seller_ctx(ctx)
 
@@ -513,7 +516,13 @@ def my_product_image(request: HttpRequest, product_id: str) -> HttpResponse:
     if upload is None:
         return _message(ctx, "product.image_invalid", 422)
 
-    path, key = products.add_image(seller, int(product_id), upload)
+    raw = request.POST.get("variantId") or None
+    variant_id = _id(raw) if raw is not None else None
+
+    if raw is not None and variant_id is None:
+        return _message(ctx, "product.variant_invalid", 422)
+
+    path, key = products.add_image(seller, int(product_id), upload, variant_id)
 
     if path is None:
         return _message(ctx, key, 404 if key == "not_found" else 422)
@@ -533,5 +542,29 @@ def my_product_image_delete(request: HttpRequest, product_id: str, image_id: str
 
     if not products.remove_image(seller, int(product_id), int(image_id)):
         return _message(ctx, "not_found", 404)
+
+    return _json({"product": products.detail(seller, int(product_id))})
+
+
+@form()
+def my_product_image_variant(request: HttpRequest, product_id: str, image_id: str) -> HttpResponse:
+    """POST {variantId: номер | null}: фото — одного варианта или общее."""
+    ctx = action(request, auth=False, throttle=60, throttle_prefix="market-image")
+    seller, refused = _seller_ctx(ctx)
+
+    if refused is not None:
+        return refused
+
+    assert seller is not None
+    raw = input_of(request).get("variantId")
+    variant_id = _id(raw) if raw not in (None, "") else None
+
+    if raw not in (None, "") and variant_id is None:
+        return _message(ctx, "product.variant_invalid", 422)
+
+    key = products.set_image_variant(seller, int(product_id), int(image_id), variant_id)
+
+    if key:
+        return _message(ctx, key, 404 if key == "not_found" else 422)
 
     return _json({"product": products.detail(seller, int(product_id))})

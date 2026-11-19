@@ -28,6 +28,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import re
 from dataclasses import dataclass, field
@@ -37,7 +38,7 @@ from typing import IO, Any
 from django.db import transaction
 
 from savdex import images
-from savdex.market.catalog import attributes_for
+from savdex.market.catalog import attributes_for, image_view
 from savdex.market.common import now, one, premoderated_count, rows, som, tiyin, write
 from savdex.tenders.slug import numbered_slug
 from savdex.web.shared import public_url
@@ -54,7 +55,16 @@ MAX_OPTION_NAMES = 3
 #: Фото товара — квадрат до 1600 px, WebP
 PHOTO = images.Frame(1600, 1600, 82)
 
+#: Уменьшенная копия для карточек каталога на телефоне
+THUMB = images.Frame(480, 480, 78)
+
 LOCALES = ("ru", "uz", "en", "zh", "tr")
+
+#: «Да / нет» из формы → value_text '1' / '0' (миграция 2026_11_19_110000)
+BOOL_VALUES = {
+    "1": "1", "true": "1", "yes": "1", "on": "1", "да": "1", "ha": "1",
+    "0": "0", "false": "0", "no": "0", "off": "0", "нет": "0", "yo'q": "0",
+}  # fmt: skip
 
 #: Статусы, в которых продавец может править товар
 EDITABLE = ("draft", "pending", "active", "rejected", "hidden")
@@ -296,6 +306,14 @@ def clean_values(
                 continue
 
             result.append((attribute["id"], None, number.quantize(Decimal("0.001"))))
+        elif attribute["kind"] == "bool":
+            flag = BOOL_VALUES.get(str(raw).strip().lower())
+
+            if flag is None:
+                errors.add(name, "product.value_bool")
+                continue
+
+            result.append((attribute["id"], flag, None))
         elif attribute["kind"] == "choice":
             allowed = {
                 str(o.get("value")) for o in attribute["options"] or [] if isinstance(o, dict)
@@ -348,11 +366,15 @@ def refresh(product_id: int) -> None:
 def _save_variants(product_id: int, variants: list[dict[str, Any]]) -> None:
     """
     Варианты товара как в форме: с id — правка своего, без id — новый,
-    не пришедший — выключается, если на него есть ссылки, иначе удаляется.
+    не пришедший — выключается и помечается убранным (не удаляется).
     """
     existing = {
         r["id"]: r
-        for r in rows("select id from market_product_variants where product_id = %s", [product_id])
+        for r in rows(
+            "select id from market_product_variants where product_id = %s "
+            "and not options ? '_removed'",
+            [product_id],
+        )
     }
     kept: set[int] = set()
     moment = now()
@@ -407,16 +429,18 @@ def _save_variants(product_id: int, variants: list[dict[str, Any]]) -> None:
             )
 
     for variant_id in set(existing) - kept:
-        # Остаток на складе — не удалять вариант, только выключить
-        write(
-            "delete from market_product_variants where id = %s and stock = 0 and reserved = 0",
-            [variant_id],
-        )
+        # Вариант не удаляется никогда: на него будут ссылаться позиции
+        # заказов (и остаток на складе). Убранный продавцом — выключен и
+        # помечен; его фото становятся общими, из корзин он уходит
         write(
             "update market_product_variants set is_active = false, options = "
             "jsonb_build_object('_removed', id), updated_at = %s where id = %s",
             [moment, variant_id],
         )
+        write(
+            "update market_product_images set variant_id = null where variant_id = %s", [variant_id]
+        )
+        write("delete from market_cart_items where variant_id = %s", [variant_id])
 
 
 def _save_values(product_id: int, values: list[tuple[int, str | None, Decimal | None]]) -> None:
@@ -670,8 +694,29 @@ def hide(seller: dict[str, Any], product_id: int) -> bool:
 # ── Фото ────────────────────────────────────────────────────────────
 
 
-def add_image(seller: dict[str, Any], product_id: int, upload: IO[bytes]) -> tuple[str | None, str]:
-    """Добавить фото: (путь, ключ ошибки). Файл пересобирается в WebP без EXIF."""
+def _variant_for_image(product_id: int, variant_id: int | None) -> bool:
+    """Фото можно привязать только к живому варианту этого же товара (держит и база)."""
+    if variant_id is None:
+        return True
+
+    return (
+        one(
+            "select 1 as x from market_product_variants where id = %s and product_id = %s "
+            "and not options ? '_removed'",
+            [variant_id, product_id],
+        )
+        is not None
+    )
+
+
+def add_image(
+    seller: dict[str, Any], product_id: int, upload: IO[bytes], variant_id: int | None = None
+) -> tuple[str | None, str]:
+    """
+    Добавить фото: (путь, ключ ошибки). Файл пересобирается в WebP без
+    EXIF, рядом — уменьшенная копия для карточек каталога (thumb_path).
+    variant_id — фото одного варианта (цвета); без него — общее фото.
+    """
     row = owned(seller["id"], product_id)
 
     if row is None:
@@ -679,6 +724,9 @@ def add_image(seller: dict[str, Any], product_id: int, upload: IO[bytes]) -> tup
 
     if row["status"] not in EDITABLE:
         return None, "product.locked"
+
+    if not _variant_for_image(product_id, variant_id):
+        return None, "product.variant_invalid"
 
     count = one(
         "select count(*) as n from market_product_images where product_id = %s", [product_id]
@@ -689,21 +737,47 @@ def add_image(seller: dict[str, Any], product_id: int, upload: IO[bytes]) -> tup
 
     try:
         binary = images.prepare(upload, PHOTO)
+        thumb = images.process(io.BytesIO(binary), THUMB)
     except images.NotAnImageError:
         return None, "product.image_invalid"
 
     path = images.write(binary, "market/products")
+    thumb_path = images.write(thumb, "market/products/thumbs")
 
     if needs_review(seller):
         _to_draft(product_id)
 
     write(
-        "insert into market_product_images (product_id, path, sort) values (%s, %s, "
-        "(select coalesce(max(sort), -1) + 1 from market_product_images where product_id = %s))",
-        [product_id, path, product_id],
+        "insert into market_product_images (product_id, variant_id, path, thumb_path, sort) "
+        "values (%s, %s, %s, %s, (select coalesce(max(sort), -1) + 1 "
+        "from market_product_images where product_id = %s))",
+        [product_id, variant_id, path, thumb_path, product_id],
     )
 
     return path, ""
+
+
+def set_image_variant(
+    seller: dict[str, Any], product_id: int, image_id: int, variant_id: int | None
+) -> str:
+    """Чьё фото: варианта или общее. Итог — ключ ошибки или пусто."""
+    row = owned(seller["id"], product_id)
+
+    if row is None:
+        return "not_found"
+
+    if row["status"] not in EDITABLE:
+        return "product.locked"
+
+    if not _variant_for_image(product_id, variant_id):
+        return "product.variant_invalid"
+
+    changed = write(
+        "update market_product_images set variant_id = %s where id = %s and product_id = %s",
+        [variant_id, image_id, product_id],
+    )
+
+    return "" if changed else "not_found"
 
 
 def remove_image(seller: dict[str, Any], product_id: int, image_id: int) -> bool:
@@ -713,7 +787,7 @@ def remove_image(seller: dict[str, Any], product_id: int, image_id: int) -> bool
         return False
 
     found = one(
-        "select path from market_product_images where id = %s and product_id = %s",
+        "select path, thumb_path from market_product_images where id = %s and product_id = %s",
         [image_id, product_id],
     )
 
@@ -721,7 +795,7 @@ def remove_image(seller: dict[str, Any], product_id: int, image_id: int) -> bool
         return False
 
     write("delete from market_product_images where id = %s", [image_id])
-    images.delete(found["path"])
+    images.delete(found["path"], found["thumb_path"])
 
     if needs_review(seller):
         _to_draft(product_id)
@@ -737,8 +811,9 @@ def mine(seller: dict[str, Any]) -> list[dict[str, Any]]:
     found = rows(
         "select p.id, p.slug, p.title, p.status, p.reject_reason, p.price, p.old_price, "
         "p.stock, p.sold_count, p.views_count, p.updated_at, "
-        "(select i.path from market_product_images i where i.product_id = p.id "
-        " order by i.sort, i.id limit 1) as cover "
+        "(select coalesce(i.thumb_path, i.path) from market_product_images i "
+        " where i.product_id = p.id order by i.variant_id is not null, i.sort, i.id "
+        " limit 1) as cover "
         "from market_products p where p.seller_id = %s order by p.updated_at desc, p.id desc",
         [seller["id"]],
     )
@@ -780,9 +855,12 @@ def detail(seller: dict[str, Any], product_id: int) -> dict[str, Any] | None:
         attribute = attributes.get(v["attribute_id"])
 
         if attribute is not None:
-            values[attribute["key"]] = (
-                float(v["value_number"]) if v["value_number"] is not None else v["value_text"]
-            )
+            if v["value_number"] is not None:
+                values[attribute["key"]] = float(v["value_number"])
+            elif attribute["kind"] == "bool":
+                values[attribute["key"]] = v["value_text"] == "1"
+            else:
+                values[attribute["key"]] = v["value_text"]
 
     return {
         "id": row["id"],
@@ -817,10 +895,10 @@ def detail(seller: dict[str, Any], product_id: int) -> dict[str, Any] | None:
             )
         ],
         "images": [
-            {"id": i["id"], "url": public_url(i["path"])}
+            image_view(i)
             for i in rows(
-                "select id, path from market_product_images where product_id = %s "
-                "order by sort, id",
+                "select id, path, thumb_path, variant_id from market_product_images "
+                "where product_id = %s order by sort, id",
                 [product_id],
             )
         ],

@@ -128,8 +128,10 @@ def summary(user_id: int) -> dict[str, Any]:
         "select ci.variant_id, ci.quantity, v.options, v.price, v.old_price, "
         "v.stock - v.reserved as left_now, v.is_active, p.id as product_id, p.slug, p.title, "
         f"c.slug as seller_slug, c.name as seller_name, ({VISIBLE}) as on_sale, "
-        "(select i.path from market_product_images i where i.product_id = p.id "
-        " order by i.sort, i.id limit 1) as cover "
+        # Своё фото варианта (цвета), иначе общее — уменьшенная копия
+        "(select coalesce(i.thumb_path, i.path) from market_product_images i "
+        " where i.product_id = p.id and (i.variant_id is null or i.variant_id = v.id) "
+        " order by i.variant_id is null, i.sort, i.id limit 1) as cover "
         "from market_cart_items ci "
         "join market_product_variants v on v.id = ci.variant_id "
         "join market_products p on p.id = v.product_id "
