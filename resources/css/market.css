@@ -494,17 +494,19 @@
 .mk-catmenu{flex-shrink:0}
 .mk-catbtn[aria-expanded="true"]{background:var(--navy-900)}
 .mk-catpanel{position:absolute;left:20px;right:20px;top:100%;margin-top:6px;max-width:1200px;margin-inline:auto;background:#fff;border:1px solid var(--border);border-radius:16px;box-shadow:var(--sh-modal);display:grid;grid-template-columns:280px minmax(0,1fr);overflow:hidden;z-index:60}
-.mk-catpanel__list{padding:8px;border-right:1px solid var(--border);max-height:min(70vh,560px);overflow-y:auto;display:grid;gap:2px}
+.mk-catpanel__list{padding:8px;border-right:1px solid var(--border);max-height:calc(100vh - 150px);overflow-y:auto;display:grid;gap:2px;align-content:start;scrollbar-width:thin}
 .mk-catpanel__list a{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:10px;font-weight:600;font-size:14px}
 .mk-catpanel__list a span{font-size:20px;width:26px;text-align:center}
 .mk-catpanel__list a svg{margin-left:auto;color:var(--text-muted)}
 .mk-catpanel__list a[aria-current="true"]{background:var(--primary-50);color:var(--primary-700)}
 .mk-catpanel__list a[aria-current="true"] svg{color:var(--primary-700)}
-.mk-catpanel__sub{padding:20px 24px;display:flex;flex-direction:column;gap:14px;align-items:flex-start}
+.mk-catpanel__sub{padding:20px 24px;display:flex;flex-direction:column;gap:16px;align-items:flex-start;max-height:calc(100vh - 150px);overflow-y:auto}
 .mk-catpanel__sub h3{font-size:20px;font-weight:800}
-.mk-catpanel__sub ul{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 32px;width:100%;max-width:520px}
-.mk-catpanel__sub li a{display:block;padding:6px 0;font-size:14px}
-.mk-catpanel__sub li a:hover,.mk-catpanel__all:hover{color:var(--primary-700)}
+.mk-catpanel__cols{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:22px 28px;width:100%}
+.mk-catpanel__cols h4{font-size:15px;font-weight:800;margin-bottom:6px}
+.mk-catpanel__cols ul{display:grid;gap:2px}
+.mk-catpanel__cols li a{display:block;padding:4px 0;font-size:14px;color:var(--text-muted)}
+.mk-catpanel__cols a:hover,.mk-catpanel__all:hover{color:var(--primary-700)}
 .mk-catpanel__all{color:var(--primary-700)!important;font-weight:700;font-size:13px}
 .mk-hd .mk-in{position:relative}
 
@@ -515,5 +517,4 @@
   .mk-search{order:3;flex-basis:100%}
   .mk-nav{margin-left:auto}
   .mk-catpanel{grid-template-columns:230px minmax(0,1fr)}
-  .mk-catpanel__sub ul{grid-template-columns:minmax(0,1fr)}
 }

@@ -183,7 +183,8 @@ function SearchBox({ initial }: { initial: string }) {
 /**
  * Кнопка «Каталог»: значок-плитка (не «бургер» — тот читается как меню
  * сайта) и окно с деревом категорий. Слева — разделы, справа —
- * подразделы того, на который навели или перешли с клавиатуры.
+ * подразделы колонками с группами товаров под каждым — для раздела,
+ * на который навели или перешли с клавиатуры.
  * Закрывается по Escape, нажатию мимо и после перехода.
  */
 function CatalogMenu() {
@@ -238,15 +239,26 @@ function CatalogMenu() {
                         <h3>
                             <span aria-hidden>{current.emoji}</span> {current.name}
                         </h3>
-                        <ul>
-                            {current.children.map((name) => (
-                                <li key={name}>
-                                    <Link href={href(current.slug)} onClick={() => setOpen(false)}>
-                                        {name}
-                                    </Link>
-                                </li>
+                        <div className="mk-catpanel__cols">
+                            {current.children.map((group) => (
+                                <div key={group.name}>
+                                    <h4>
+                                        <Link href={href(current.slug)} onClick={() => setOpen(false)}>
+                                            {group.name}
+                                        </Link>
+                                    </h4>
+                                    <ul>
+                                        {group.items.map((item) => (
+                                            <li key={item}>
+                                                <Link href={href(current.slug)} onClick={() => setOpen(false)}>
+                                                    {item}
+                                                </Link>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
                             ))}
-                        </ul>
+                        </div>
                         <Link href={href(current.slug)} className="mk-catpanel__all" onClick={() => setOpen(false)}>
                             Все товары раздела →
                         </Link>
