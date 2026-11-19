@@ -142,7 +142,7 @@ jobs:
             exit 1
           fi
           if [ -n "$HOST_KEY" ]; then
-            printf '%s %s\n' "$HOST" "$HOST_KEY" > ~/.ssh/known_hosts
+            printf '%s %s\n' "$HOST" "${HOST_KEY//$'\r'/}" > ~/.ssh/known_hosts
           else
             ssh-keyscan -t ed25519 "$HOST" > ~/.ssh/known_hosts 2>/dev/null
             echo "::warning::Ключ сервера не закреплён. Добавьте переменную STAGING_HOST_KEY = $(cut -d' ' -f2- ~/.ssh/known_hosts)"
@@ -244,7 +244,7 @@ jobs:
             exit 1
           fi
           if [ -n "$PROD_KNOWN_HOSTS" ]; then
-            printf '%s\n' "$PROD_KNOWN_HOSTS" >> ~/.ssh/known_hosts
+            printf '%s\n' "$PROD_KNOWN_HOSTS" | tr -d '\r' >> ~/.ssh/known_hosts
           else
             ssh-keyscan -t ed25519 "$PROD_HOST" >> ~/.ssh/known_hosts 2>/dev/null
           fi
