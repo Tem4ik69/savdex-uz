@@ -1,0 +1,207 @@
+"""
+Модели маркетплейса для раздела админки (savdex/market/admin.py).
+
+Таблицы создаёт миграция SQL 2026_11_19_100000_create_market_catalog.sql:
+managed = False, схему Django не трогает. Витрина, корзина и кабинет
+продавца ходят в базу запросами (catalog.py, cart.py, products.py) — так
+видно каждое условие «товар виден покупателю».
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from django.db import models
+
+from savdex.catalog import UTCDateTimeField
+from savdex.market.common import som
+
+
+class Category(models.Model):
+    parent = models.ForeignKey(
+        "self",
+        on_delete=models.DO_NOTHING,
+        null=True,
+        blank=True,
+        related_name="children",
+        db_column="parent_id",
+        verbose_name="раздел",
+    )
+    slug = models.CharField("адрес (slug)", max_length=80, unique=True)
+    name = models.CharField("название по-русски", max_length=120)
+    names: Any = models.JSONField("названия на других языках", default=dict, blank=True)
+    icon = models.CharField("значок", max_length=16, null=True, blank=True)
+    sort = models.IntegerField("порядок", default=0)
+    is_active = models.BooleanField("включена", default=True)
+    created_at = UTCDateTimeField(auto_now_add=True)
+    updated_at = UTCDateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "market_categories"
+        ordering = ("sort", "name")
+        verbose_name = "категория маркетплейса"
+        verbose_name_plural = "категории маркетплейса"
+
+    def __str__(self) -> str:
+        return self.name if self.pk else "новая категория"
+
+    def depth(self) -> int:
+        """Уровень в дереве: раздел — 1, подраздел — 2, …"""
+        level, node, seen = 1, self.parent, {self.pk}
+
+        while node is not None and node.pk not in seen:
+            seen.add(node.pk)
+            level += 1
+            node = node.parent
+
+        return level
+
+
+class Attribute(models.Model):
+    category = models.ForeignKey(
+        Category,
+        on_delete=models.CASCADE,
+        related_name="attributes",
+        db_column="category_id",
+        verbose_name="категория",
+    )
+    key = models.CharField("код", max_length=40)
+    name = models.CharField("название по-русски", max_length=120)
+    names: Any = models.JSONField("названия на других языках", default=dict, blank=True)
+    kind = models.CharField(
+        "тип",
+        max_length=16,
+        default="text",
+        choices=[("text", "Строка"), ("number", "Число"), ("choice", "Выбор из списка")],
+    )
+    options: Any = models.JSONField("варианты выбора", default=list, blank=True)
+    unit = models.CharField("единица", max_length=16, null=True, blank=True)
+    is_filter = models.BooleanField("в фильтрах каталога", default=True)
+    is_required = models.BooleanField("обязательна", default=False)
+    sort = models.IntegerField("порядок", default=0)
+    created_at = UTCDateTimeField(auto_now_add=True)
+    updated_at = UTCDateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "market_attributes"
+        ordering = ("sort", "id")
+        unique_together = (("category", "key"),)
+        verbose_name = "характеристика"
+        verbose_name_plural = "характеристики"
+
+    def __str__(self) -> str:
+        return self.name
+
+
+class Seller(models.Model):
+    company_id = models.BigIntegerField("компания")
+    user_id = models.BigIntegerField("подал заявку", null=True)
+    status = models.CharField("статус", max_length=16, default="pending")
+    verified_via = models.CharField("подтверждён", max_length=16, null=True)
+    oneid_tin = models.CharField("ИНН из OneID", max_length=14, null=True)
+    offer_version = models.CharField("редакция оферты", max_length=32, null=True)
+    offer_accepted_at = UTCDateTimeField("оферта принята", null=True)
+    note = models.CharField("комментарий к заявке", max_length=1000, null=True)
+    reject_reason = models.CharField("причина", max_length=1000, null=True)
+    reviewed_by = models.BigIntegerField("решение принял", null=True)
+    reviewed_at = UTCDateTimeField("решение", null=True)
+    approved_at = UTCDateTimeField("продавец с", null=True)
+    blocked_at = UTCDateTimeField("заблокирован", null=True)
+    created_at = UTCDateTimeField("заявка", auto_now_add=True)
+    updated_at = UTCDateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "market_sellers"
+        ordering = ("-created_at",)
+        verbose_name = "продавец"
+        verbose_name_plural = "продавцы"
+
+    def __str__(self) -> str:
+        return f"Продавец №{self.pk}"
+
+
+class Product(models.Model):
+    seller = models.ForeignKey(
+        Seller, on_delete=models.DO_NOTHING, db_column="seller_id", verbose_name="продавец"
+    )
+    category = models.ForeignKey(
+        Category, on_delete=models.DO_NOTHING, db_column="category_id", verbose_name="категория"
+    )
+    slug = models.CharField("адрес", max_length=80, null=True)
+    title = models.CharField("название", max_length=200)
+    description = models.TextField("описание", null=True)
+    locale = models.CharField("язык", max_length=8, default="ru")
+    status = models.CharField("статус", max_length=16, default="draft")
+    reject_reason = models.CharField("причина", max_length=1000, null=True)
+    ikpu = models.CharField("ИКПУ", max_length=17, null=True)
+    barcode = models.CharField("штрихкод", max_length=32, null=True)
+    weight_g = models.IntegerField("вес, г", null=True)
+    length_mm = models.IntegerField("длина, мм", null=True)
+    width_mm = models.IntegerField("ширина, мм", null=True)
+    height_mm = models.IntegerField("высота, мм", null=True)
+    price = models.BigIntegerField("цена, тийин", null=True)
+    old_price = models.BigIntegerField("старая цена, тийин", null=True)
+    stock = models.IntegerField("остаток", default=0)
+    rating = models.DecimalField("рейтинг", max_digits=3, decimal_places=2, default=0)
+    reviews_count = models.IntegerField("отзывов", default=0)
+    sold_count = models.IntegerField("продано", default=0)
+    views_count = models.IntegerField("просмотров", default=0)
+    submitted_at = UTCDateTimeField("отправлен", null=True)
+    published_at = UTCDateTimeField("в продаже с", null=True)
+    approved_at = UTCDateTimeField("одобрен модератором", null=True)
+    moderated_by = models.BigIntegerField("решение принял", null=True)
+    moderated_at = UTCDateTimeField("решение", null=True)
+    created_at = UTCDateTimeField("создан", auto_now_add=True)
+    updated_at = UTCDateTimeField("изменён", auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "market_products"
+        ordering = ("-updated_at",)
+        verbose_name = "товар"
+        verbose_name_plural = "товары"
+
+    def __str__(self) -> str:
+        return self.title
+
+    def price_label(self) -> str:
+        value = som(self.price)
+
+        return f"{value:,}".replace(",", " ") + " сум" if value is not None else "—"
+
+
+class Variant(models.Model):
+    product = models.ForeignKey(
+        Product,
+        on_delete=models.CASCADE,
+        related_name="variants",
+        db_column="product_id",
+        verbose_name="товар",
+    )
+    options: Any = models.JSONField("выбор", default=dict)
+    sku = models.CharField("артикул", max_length=64, null=True)
+    price = models.BigIntegerField("цена, тийин")
+    old_price = models.BigIntegerField("старая цена, тийин", null=True)
+    stock = models.IntegerField("остаток", default=0)
+    reserved = models.IntegerField("в резерве", default=0)
+    is_active = models.BooleanField("включён", default=True)
+    sort = models.IntegerField("порядок", default=0)
+    created_at = UTCDateTimeField(auto_now_add=True)
+    updated_at = UTCDateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "market_product_variants"
+        ordering = ("sort", "id")
+        verbose_name = "вариант"
+        verbose_name_plural = "варианты и остатки"
+
+    def __str__(self) -> str:
+        options = self.options if isinstance(self.options, dict) else {}
+
+        return ", ".join(f"{k}: {v}" for k, v in options.items() if not k.startswith("_")) or (
+            "без выбора"
+        )

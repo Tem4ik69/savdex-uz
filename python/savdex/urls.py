@@ -19,6 +19,7 @@ from savdex import adminlogin, adminpanel, adminsite, visitor
 from savdex.crm import unsubscribe as prospect_unsubscribe
 from savdex.data.meyos import feed as meyos_feed
 from savdex.ilmora import views as ilmora
+from savdex.market import urls as market_urls
 from savdex.web import (
     account_actions,
     actions,
@@ -750,6 +751,8 @@ urlpatterns = [
         legal.show,
         name="legal",
     ),
+    # Маркетплейс: JSON для страниц (savdex/market/urls.py)
+    *market_urls.urlpatterns,
     # Последним: всё, у чего нет маршрута, — страница 404 сайта, а не
     # отладочная Django (этап 8: Laravel за спиной больше нет)
     re_path(r"^.*$", fallback.page_not_found, name="fallback.404"),

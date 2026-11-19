@@ -76,6 +76,11 @@ SECTIONS: dict[str, str] = {
     # Заявки на регистрацию в ILMORA (savdex/ilmora): ФИО, телефон, ПИНФЛ
     # или ИНН — персональные данные, поэтому не всем ролям
     "ilmora": "ILMORA — регистрации",
+    # Маркетплейс (savdex/market): продавцы и товары — модерация; категории
+    # и характеристики — справочник витрины. Денег здесь нет: касса
+    # маркетплейса — отдельным разделом, когда появятся заказы
+    "market": "Маркетплейс — продавцы и товары",
+    "market_catalog": "Маркетплейс — категории",
     "support": "Обращения в поддержку",
     "payments": "Счета и оплаты",
     "subscriptions": "Подписки",
@@ -122,6 +127,8 @@ _MATRIX: dict[str, dict[str, str]] = {
         # Заявки ILMORA — только смотреть (и выгрузить, ниже): заявка
         # с формы не правится
         "ilmora": "r",
+        # Маркетплейс: проверка продавцов и товаров, дерево категорий
+        "market": "m", "market_catalog": "w",
     },
     "sales": {
         "companies": "r", "listings": "r", "tenders": "r",
@@ -154,6 +161,8 @@ _MATRIX: dict[str, dict[str, str]] = {
         "leads": "r", "deals": "r",
         "catalogs": "r",
         "maintenance": "w",
+        # Маркетплейс: заявки продавцов и товары (ТЗ: модератор — без денег)
+        "market": "m", "market_catalog": "r",
     },
     "finance": {
         "audit": "r", "companies": "r",
@@ -165,10 +174,13 @@ _MATRIX: dict[str, dict[str, str]] = {
         "resumes": "r", "reviews": "r", "complaints": "r",
         "contacts": "r", "tasks": "wo", "communications": "wo",
         "support": "w", "subscriptions": "r",
+        "market": "r",
     },
     "content_manager": {
         "content": "w", "catalogs": "w", "broadcasts": "r",
         "maintenance": "w",
+        # Дерево категорий и характеристики витрины
+        "market_catalog": "w",
     },
 }  # fmt: skip
 
