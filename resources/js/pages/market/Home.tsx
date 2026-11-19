@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { MarketCard } from '@/components/market/MarketCard';
 import { Link } from '@/components/ui/Link';
 import { MarketLayout } from '@/layouts/MarketLayout';
@@ -10,8 +10,8 @@ const catalog = (query: string) => (query ? `${routes.marketCatalog}?${query}` :
 
 /**
  * Главная маркетплейса: подборки-кружки, «Скидки дня» с баннером,
- * купоны, категории и три подборки — «Хиты», «Распродажа», «Новинки»,
- * все с одной карточкой товара.
+ * купоны, категории, три подборки — «Хиты», «Распродажа», «Новинки» —
+ * и лента «Все товары», которая догружается при прокрутке.
  * Места под баннеры из админки — слайдер и (позже) полосы между
  * подборками; «Стать продавцом» — в конце страницы.
  */
@@ -67,6 +67,8 @@ export default function MarketHome() {
                 <Shelf title="Распродажа" query="only=sale" products={sale.slice(0, 5)} sale />
                 <Shelf title="Новинки" query="only=new" products={fresh.slice(0, 5)} />
 
+                <Feed />
+
                 <aside className="mk-strip">
                     <span>
                         Продавайте на SavdEx Market
@@ -91,6 +93,80 @@ function Shelf({ title, query, products, sale = false }: { title: string; query:
                     <MarketCard key={p.id} product={p} />
                 ))}
             </div>
+        </section>
+    );
+}
+
+/** Сколько карточек приходит за один раз: два ряда на компьютере */
+const FEED_STEP = 10;
+
+/**
+ * Лента «Все товары» в конце главной: догружается сама, когда до её
+ * низа докручивают, — и так до последнего товара. Пока сервера нет,
+ * следующая порция берётся из демо-каталога с короткой паузой, чтобы
+ * было видно состояние загрузки; с сервером здесь будет запрос
+ * следующей страницы. Без наблюдателя (старый браузер) — кнопка
+ * «Показать ещё».
+ */
+function Feed() {
+    const all = [...PRODUCTS].sort((a, b) => b.sold - a.sold);
+    const [shown, setShown] = useState(FEED_STEP);
+    const [loading, setLoading] = useState(false);
+    const sentinel = useRef<HTMLDivElement>(null);
+    const done = shown >= all.length;
+
+    const more = () => {
+        setLoading(true);
+        window.setTimeout(() => {
+            setShown((count) => Math.min(count + FEED_STEP, all.length));
+            setLoading(false);
+        }, 500);
+    };
+
+    useEffect(() => {
+        const target = sentinel.current;
+
+        if (!target || done || loading || typeof IntersectionObserver === 'undefined') return;
+
+        // Запас в 300 px: порция успевает приехать до того, как докрутят до края
+        const observer = new IntersectionObserver((entries) => entries[0]?.isIntersecting && more(), { rootMargin: '300px' });
+
+        observer.observe(target);
+
+        return () => observer.disconnect();
+    }, [done, loading, shown]);
+
+    return (
+        <section aria-busy={loading}>
+            <div className="mk-sh">
+                <h2>Все товары</h2>
+                <Link href={routes.marketCatalog}>В каталог →</Link>
+            </div>
+            <div className="mk-grid">
+                {all.slice(0, shown).map((p) => (
+                    <MarketCard key={p.id} product={p} />
+                ))}
+                {loading &&
+                    Array.from({ length: Math.min(5, all.length - shown) }, (_, i) => (
+                        <div key={i} className="mk-skel" aria-hidden>
+                            <i />
+                            <i />
+                            <i />
+                            <i />
+                        </div>
+                    ))}
+            </div>
+            {done ? (
+                <p className="mk-feed-end">Вы посмотрели все товары</p>
+            ) : (
+                <div ref={sentinel} className="mk-feed-more">
+                    {!loading && (
+                        <button type="button" className="mk-btn mk-btn--ghost" onClick={more}>
+                            Показать ещё
+                        </button>
+                    )}
+                </div>
+            )}
         </section>
     );
 }

@@ -477,3 +477,15 @@
   .mk-sell__hero h1{font-size:22px}
   .mk-kpi b{font-size:19px}
 }
+
+/* ---------- лента «Все товары»: догружается при прокрутке ---------- */
+.mk-skel{background:#fff;border-radius:16px;padding:8px;display:grid;gap:8px}
+.mk-skel i{display:block;border-radius:8px;background:linear-gradient(90deg,#e9eef5 25%,#f6f8fb 50%,#e9eef5 75%);background-size:200% 100%;animation:mk-shimmer 1.2s linear infinite}
+.mk-skel i:first-child{aspect-ratio:1;border-radius:12px}
+.mk-skel i:nth-child(2){height:22px;width:60%}
+.mk-skel i:nth-child(3){height:14px}
+.mk-skel i:nth-child(4){height:36px}
+@keyframes mk-shimmer{to{background-position:-200% 0}}
+.mk-feed-end{text-align:center;color:var(--text-muted);font-weight:600;padding:22px 0 4px}
+.mk-feed-more{display:flex;justify-content:center;padding-top:16px}
+@media (prefers-reduced-motion:reduce){.mk-skel i{animation:none}}
