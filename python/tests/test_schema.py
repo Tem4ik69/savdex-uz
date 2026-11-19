@@ -74,8 +74,9 @@ def manage(*args: str) -> str:
 
 def стереть() -> None:
     """
-    Пустая база, как после db:wipe: таблицы и последовательности удалены,
-    схема public и её права по умолчанию остались.
+    Пустая база, как после db:wipe: таблицы, последовательности и
+    расширения из миграций удалены, схема public и её права по умолчанию
+    остались.
     """
     sql(
         "do $$ declare r record; begin "
@@ -84,7 +85,12 @@ def стереть() -> None:
         "for r in select sequence_name from information_schema.sequences "
         "where sequence_schema = 'public' loop "
         "execute format('drop sequence if exists public.%%I cascade', r.sequence_name); "
-        "end loop; end $$"
+        "end loop; "
+        # Расширения, которые заводят миграции (pg_trgm у маркетплейса), — тоже:
+        # в снимке их нет, их ставит своя миграция
+        "for r in select extname from pg_extension where extname <> 'plpgsql' loop "
+        "execute format('drop extension if exists %%I cascade', r.extname); end loop; "
+        "end $$"
     )
 
 
