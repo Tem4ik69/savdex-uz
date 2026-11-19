@@ -122,7 +122,7 @@ jobs:
             echo "::error::Нет переменной STAGING_HOST_KEY — ключа тестового сервера (её подсказывает запуск staging)."
             exit 1
           fi
-          printf '%s %s\n' "$HOST" "$HOST_KEY" > ~/.ssh/known_hosts
+          printf '%s %s\n' "$HOST" "${HOST_KEY//$'\r'/}" > ~/.ssh/known_hosts
           cat > ~/.ssh/config <<CONF
           Host staging
             HostName $HOST

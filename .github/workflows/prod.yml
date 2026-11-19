@@ -345,7 +345,15 @@ jobs:
           # машин (машина сайта — напрямую, остальные — через неё, по
           # частной сети) и подсказка, что сохранить
           if [ -n "$KNOWN_HOSTS" ]; then
-            printf '%s\n' "$KNOWN_HOSTS" > ~/.ssh/known_hosts
+            # Из формы GitHub значение приходит с переносами Windows (\r), а
+            # ssh такие строки не читает; строка без адреса и типа ключа —
+            # скопирована не целиком, ssh её молча пропустит
+            printf '%s\n' "$KNOWN_HOSTS" | tr -d '\r' | sed '/^[[:space:]]*$/d' > ~/.ssh/known_hosts
+            bad=$(awk 'NF < 3 || $2 !~ /^(ssh-|ecdsa-)/ {print NR}' ~/.ssh/known_hosts | paste -sd, -)
+            if [ -n "$bad" ]; then
+              echo "::error::В переменной PROD_KNOWN_HOSTS строки $bad не похожи на «адрес ssh-ed25519 ключ» — скопированы не целиком. Удалите переменную и запустите релиз: он сам покажет верное значение в сводке."
+              exit 1
+            fi
           else
             ssh-keyscan -t ed25519 "$HOST" 2>/dev/null > ~/.ssh/known_hosts
             web_key=$(cut -d' ' -f2- ~/.ssh/known_hosts)
@@ -360,9 +368,12 @@ jobs:
               printf '%s\n' "$found" >> ~/.ssh/known_hosts
             done
             printf '%s %s\n' "$WEB_IP" "$web_key" >> ~/.ssh/known_hosts
+            # В блоке кода: обычным текстом сводка склеивает строки в одну
             {
-              echo "Ключи машин не закреплены. Сохраните переменную PROD_KNOWN_HOSTS:"
+              echo "Ключи машин не закреплены. Сохраните переменную PROD_KNOWN_HOSTS — всё из блока ниже, целиком:"
+              echo '```'
               cat ~/.ssh/known_hosts
+              echo '```'
             } >> "$GITHUB_STEP_SUMMARY"
             echo "::warning::Ключи машин не закреплены — значение для переменной PROD_KNOWN_HOSTS в сводке запуска (Summary)."
           fi
@@ -376,7 +387,7 @@ jobs:
           # HostName ssh считает ошибкой всего файла
           if [ -n "$STAGING_HOST" ] && [ -n "$STAGING_HOST_KEY" ]; then
             printf 'Host staging\n  HostName %s\n  User deploy\n  ConnectTimeout 20\n' "$STAGING_HOST" >> ~/.ssh/config
-            printf '%s %s\n' "$STAGING_HOST" "$STAGING_HOST_KEY" >> ~/.ssh/known_hosts
+            printf '%s %s\n' "$STAGING_HOST" "${STAGING_HOST_KEY//$'\r'/}" >> ~/.ssh/known_hosts
           fi
 
       - name: Подготовить машины
