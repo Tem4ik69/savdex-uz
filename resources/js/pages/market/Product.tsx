@@ -180,7 +180,7 @@ export default function MarketProductPage({ slug }: { slug: string }) {
                                     {seller.verified ? 'Проверенный продавец' : 'Продавец'} · ★ {rating(seller.rating)}
                                 </small>
                             </span>
-                            <Link href={routes.marketCatalog}>Все товары</Link>
+                            <Link href={routes.marketShop(seller.slug)}>Магазин продавца</Link>
                         </div>
                     </div>
                 </div>

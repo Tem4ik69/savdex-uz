@@ -353,3 +353,147 @@
 @media (max-width:860px){.mk-shelf .mk-card:nth-child(n+4){display:none}}
 @media (max-width:640px){.mk-shelf .mk-card:nth-child(4){display:flex}}
 @media (min-width:641px) and (max-width:1100px){.mk-grid--4.mk-shelf .mk-card:nth-child(n+4){display:none}}
+
+/* ============================================================
+   Оформление, заказы, продавец
+   ============================================================ */
+.mk-demo-btn{align-self:flex-start;font-size:12px;font-weight:700;color:var(--warning);border:1px dashed var(--warning);border-radius:8px;padding:5px 10px;background:var(--warning-bg)}
+.mk-demo-btn:hover{background:#fef3c7}
+.mk-pill{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;font-size:12px;font-weight:700;background:var(--primary-50);color:var(--primary-700);white-space:nowrap}
+.mk-pill--ok{background:var(--success-bg);color:var(--success-text)}
+.mk-pill--warn{background:var(--warning-bg);color:var(--gold-text)}
+.mk-pill--off{background:#f1f5f9;color:var(--text-muted)}
+
+/* формы */
+.mk-form{display:grid;gap:14px}
+.mk-form--2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.mk-field{display:grid;gap:5px;font-size:13px;font-weight:600}
+.mk-field input,.mk-field select,.mk-field textarea{height:42px;border:1.5px solid var(--border);border-radius:10px;padding:0 12px;font-size:14px;font-weight:500;background:#fff;min-width:0;width:100%}
+.mk-field textarea{height:auto;padding:10px 12px;resize:vertical}
+.mk-field input:focus,.mk-field select:focus,.mk-field textarea:focus{border-color:var(--primary-700);outline:0}
+.mk-field small{font-weight:500;color:var(--text-muted)}
+.mk-field .is-error{color:var(--danger)}
+.mk-field--wide{grid-column:1/-1}
+
+/* оформление */
+.mk-checkout{display:grid;grid-template-columns:minmax(0,1fr) 360px;gap:20px;align-items:start}
+.mk-checkout .mk-panel{margin-top:0}
+.mk-checkout>div{display:grid;gap:16px}
+.mk-step-title{display:flex;align-items:center;gap:10px}
+.mk-step-title i{font-style:normal;width:28px;height:28px;border-radius:50%;background:var(--primary-700);color:#fff;display:grid;place-items:center;font-size:14px;font-weight:800;flex-shrink:0}
+.mk-pickup{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+.mk-points{display:grid;gap:8px;max-height:380px;overflow-y:auto;padding-right:4px}
+.mk-choice{display:flex;gap:10px;align-items:flex-start;border:1.5px solid var(--border);border-radius:12px;padding:10px 12px;cursor:pointer;transition:border-color var(--t-fast),background var(--t-fast)}
+.mk-choice:hover{border-color:var(--text-muted)}
+.mk-choice:has(input:checked){border-color:var(--primary-700);background:var(--primary-50)}
+.mk-choice input{margin-top:3px;accent-color:var(--primary-700);width:16px;height:16px;flex-shrink:0}
+.mk-choice b{display:block;font-size:14px}
+.mk-choice small{display:block;color:var(--text-muted);line-height:1.45}
+.mk-map{border-radius:12px;overflow:hidden;border:1px solid var(--border);min-height:300px;background:#e2e8f0;display:flex;flex-direction:column}
+.mk-map iframe{flex:1;width:100%;min-height:300px;border:0}
+.mk-map p{padding:8px 12px;font-size:12px;background:#fff;color:var(--text-muted)}
+.mk-pay{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.mk-mini{display:flex;gap:10px;align-items:center;font-size:13px}
+.mk-mini span{width:40px;height:40px;border-radius:8px;display:grid;place-items:center;font-size:22px;flex-shrink:0}
+.mk-mini b{margin-left:auto;white-space:nowrap;font-variant-numeric:tabular-nums}
+.mk-gate{background:#fff;border-radius:16px;padding:28px 24px;display:flex;flex-direction:column;align-items:flex-start;gap:10px;max-width:560px}
+.mk-gate h2{font-size:20px;font-weight:800}
+.mk-gate p{color:var(--text-muted)}
+
+/* заказы */
+.mk-orders{display:grid;gap:16px}
+.mk-order{background:#fff;border-radius:16px;padding:18px 20px;display:grid;gap:14px}
+.mk-order.is-new{outline:2px solid var(--primary-700)}
+.mk-order__head{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.mk-order__head h2{font-size:17px;font-weight:800}
+.mk-order__head small{color:var(--text-muted);font-weight:500;margin-left:8px}
+.mk-steps{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:4px;font-size:12px;font-weight:600;color:var(--text-muted)}
+.mk-steps li{display:grid;gap:6px}
+.mk-steps li::before{content:"";height:5px;border-radius:3px;background:var(--border)}
+.mk-steps li.is-done{color:var(--text)}
+.mk-steps li.is-done::before{background:var(--primary-700)}
+.mk-steps li.is-now{color:var(--primary-700)}
+.mk-order__body{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:20px}
+.mk-order__items{display:grid;gap:8px}
+.mk-order__side{display:grid;gap:8px;align-content:start;font-size:13px}
+.mk-order__side dt{color:var(--text-muted);font-size:12px}
+.mk-order__side dd{font-weight:600}
+.mk-code{background:var(--success-bg);border:1.5px dashed var(--success);border-radius:12px;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap}
+.mk-code b{font-size:30px;letter-spacing:.2em;font-weight:800;font-variant-numeric:tabular-nums;color:var(--success-text)}
+.mk-code span{font-size:13px;color:var(--success-text);font-weight:600;max-width:340px}
+.mk-order__foot{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:12px}
+.mk-order__foot>b{font-size:17px;font-weight:800}
+.mk-order__foot div{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.mk-link-danger{color:var(--danger);font-weight:700;font-size:13px}
+
+/* страница продавца */
+.mk-shop{background:linear-gradient(110deg,var(--navy-900),var(--navy-700));color:#fff;border-radius:20px;padding:24px;display:flex;align-items:center;gap:18px;flex-wrap:wrap;margin-top:8px}
+.mk-shop__logo{width:72px;height:72px;border-radius:18px;background:#fff;color:var(--primary-700);display:grid;place-items:center;font-size:26px;font-weight:800;flex-shrink:0}
+.mk-shop h1{font-size:26px;font-weight:800;color:inherit}
+.mk-shop p{opacity:.85;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.mk-shop dl{margin-left:auto;display:flex;gap:28px}
+.mk-shop dt{font-size:12px;opacity:.7}
+.mk-shop dd{font-size:20px;font-weight:800}
+
+/* стать продавцом */
+.mk-sell{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:20px;align-items:start;margin-top:8px}
+.mk-sell .mk-panel{margin-top:0}
+.mk-sell__hero{background:linear-gradient(140deg,var(--primary-900),var(--primary-700));color:#fff;border-radius:20px;padding:28px;display:grid;gap:16px}
+.mk-sell__hero h1{font-size:30px;line-height:1.15;font-weight:800;color:inherit;text-wrap:balance}
+.mk-sell__hero p{opacity:.9;max-width:46ch}
+.mk-sell__steps{display:grid;gap:10px;counter-reset:s}
+.mk-sell__steps li{display:flex;gap:12px;align-items:flex-start;background:rgb(255 255 255/.1);border-radius:12px;padding:10px 12px;counter-increment:s}
+.mk-sell__steps li::before{content:counter(s);width:26px;height:26px;border-radius:50%;background:#fff;color:var(--primary-900);display:grid;place-items:center;font-weight:800;font-size:13px;flex-shrink:0}
+.mk-sell__steps b{display:block}
+.mk-sell__steps small{opacity:.8}
+.mk-oneid{display:flex;justify-content:space-between;align-items:center;gap:12px;border:1.5px solid var(--border);border-radius:12px;padding:12px 14px;margin-bottom:16px}
+.mk-oneid b{display:block}
+.mk-oneid small{color:var(--text-muted)}
+.mk-or{display:flex;align-items:center;gap:10px;color:var(--text-muted);font-size:12px;margin:0 0 14px}
+.mk-or::before,.mk-or::after{content:"";flex:1;height:1px;background:var(--border)}
+.mk-status{display:grid;gap:10px;justify-items:start}
+.mk-status>span{font-size:48px;line-height:1}
+
+/* кабинет продавца */
+.mk-tabs{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none;border-bottom:1px solid var(--border);margin:8px 0 16px}
+.mk-tabs a{padding:10px 14px;font-weight:700;font-size:14px;color:var(--text-muted);white-space:nowrap;border-bottom:2.5px solid transparent;margin-bottom:-1px}
+.mk-tabs a:hover{color:var(--text)}
+.mk-tabs a[aria-current="page"]{color:var(--primary-700);border-color:var(--primary-700)}
+.mk-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}
+.mk-kpi{background:#fff;border-radius:16px;padding:16px 18px;display:grid;gap:4px}
+.mk-kpi small{color:var(--text-muted);font-weight:600}
+.mk-kpi b{font-size:24px;font-weight:800;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.mk-kpi span{font-size:12px;color:var(--success-text);font-weight:700}
+.mk-bar{display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px}
+.mk-bar h2{font-size:20px;font-weight:800}
+.mk-table-wrap{background:#fff;border-radius:16px;overflow-x:auto}
+.mk-table{width:100%;border-collapse:collapse;font-size:13px;min-width:640px}
+.mk-table th{text-align:left;font-size:12px;color:var(--text-muted);font-weight:700;padding:12px 14px;border-bottom:1px solid var(--border);white-space:nowrap}
+.mk-table td{padding:11px 14px;border-bottom:1px solid var(--border);vertical-align:middle}
+.mk-table tr:last-child td{border-bottom:0}
+.mk-table .is-num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.mk-table tfoot td{font-weight:800;background:var(--bg)}
+.mk-table__item{display:flex;align-items:center;gap:10px;font-weight:600}
+.mk-table__item span{font-size:22px;width:36px;height:36px;border-radius:8px;background:var(--bg);display:grid;place-items:center;flex-shrink:0}
+.mk-table button{color:var(--primary-700);font-weight:700}
+.mk-low{color:var(--danger);font-weight:700}
+.mk-hint{font-size:13px;color:var(--text-muted);margin-top:10px;max-width:80ch}
+
+@media (max-width:1100px){
+  .mk-checkout,.mk-sell{grid-template-columns:minmax(0,1fr)}
+  .mk-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
+  .mk-order__body{grid-template-columns:minmax(0,1fr)}
+}
+@media (max-width:640px){
+  .mk-pickup,.mk-pay,.mk-form--2{grid-template-columns:minmax(0,1fr)}
+  .mk-points{max-height:260px}
+  .mk-map,.mk-map iframe{min-height:220px}
+  .mk-steps{font-size:10px}
+  .mk-order{padding:14px}
+  .mk-code b{font-size:24px}
+  .mk-shop dl{margin-left:0;gap:20px}
+  .mk-shop h1{font-size:20px}
+  .mk-sell__hero{padding:20px}
+  .mk-sell__hero h1{font-size:22px}
+  .mk-kpi b{font-size:19px}
+}

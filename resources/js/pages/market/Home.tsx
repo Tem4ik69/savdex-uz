@@ -70,7 +70,7 @@ export default function MarketHome() {
                         Продавайте на SavdEx Market
                         <small>Привезите товар на склад — хранение, выдача и оплата на нас</small>
                     </span>
-                    <Link href={routes.cabinet}>Стать продавцом</Link>
+                    <Link href={routes.marketSell}>Стать продавцом</Link>
                 </aside>
             </div>
         </MarketLayout>

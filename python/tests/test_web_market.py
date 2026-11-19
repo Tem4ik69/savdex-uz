@@ -38,6 +38,11 @@ def сайт() -> Iterator[str]:
         ("/en/market/catalog", "market/Catalog"),
         ("/market/product/kazan-chugunnyj-12l", "market/Product"),
         ("/market/cart", "market/Cart"),
+        ("/market/checkout", "market/Checkout"),
+        ("/market/orders", "market/Orders"),
+        ("/market/shop/technomir", "market/Shop"),
+        ("/tr/market/sell", "market/Sell"),
+        ("/market/seller", "market/Seller"),
     ],
 )
 def test_страницы_открываются(сайт, path, component):
@@ -67,3 +72,19 @@ def test_товар_получает_свой_адрес(сайт):
 
 def test_кривой_адрес_товара_не_открывается(сайт):
     assert открыть(сайт, "/market/product/Товар!")["status"] == 404
+
+
+@pytest.mark.parametrize(
+    ("адрес_вкладки", "вкладка"),
+    [("", "overview"), ("?tab=stock", "stock"), ("?tab=чужая", "overview")],
+)
+def test_кабинет_продавца_знает_только_свои_вкладки(сайт, адрес_вкладки, вкладка):
+    д = открыть(сайт, "/market/seller" + адрес_вкладки)
+
+    assert страница(д["body"])["props"]["tab"] == вкладка
+
+
+def test_на_боевом_демо_не_открывается(сайт):
+    д = открыть(сайт, "/market", env={"APP_ENV": "production", "DJANGO_ALLOWED_HOSTS": "*"})
+
+    assert д["status"] == 404

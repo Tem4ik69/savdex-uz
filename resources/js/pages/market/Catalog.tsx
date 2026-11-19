@@ -81,7 +81,7 @@ export default function MarketCatalog({ query }: { query: Query }) {
     };
 
     return (
-        <MarketLayout title={`${title} · SavdEx Market`} tab={query.only === 'fav' ? 'favorites' : 'catalog'} search={query.q ?? ''}>
+        <MarketLayout title={`${title} · SavdEx Market`} tab="catalog" search={query.q ?? ''}>
             <div className="mk-in">
                 <nav className="mk-bc" aria-label="Путь">
                     <Link href={routes.market}>Главная</Link>›<Link href={routes.marketCatalog}>Каталог</Link>

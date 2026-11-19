@@ -9,8 +9,7 @@ import type { SharedProps } from '@/types';
 
 /**
  * Корзина. Гость может собирать её свободно; оформить — только с
- * входом: кнопка ведёт на вход и возвращает сюда же. Само оформление
- * (пункт выдачи, оплата) — следующий экран, его ещё нет.
+ * входом: кнопка ведёт на вход, а после него — сразу на оформление.
  */
 export default function MarketCart() {
     const { auth } = usePage<SharedProps>().props;
@@ -108,21 +107,10 @@ export default function MarketCart() {
                                     <dd>{sum(total)} сум</dd>
                                 </div>
                             </dl>
-                            {auth.user ? (
-                                <>
-                                    <button type="button" className="mk-btn mk-btn--block" disabled>
-                                        Перейти к оформлению
-                                    </button>
-                                    <p className="mk-note">Оформление заказа откроется на следующем этапе: выбор пункта выдачи и оплата.</p>
-                                </>
-                            ) : (
-                                <>
-                                    <Link href={routes.loginBack()} className="mk-btn mk-btn--block">
-                                        Войти и оформить
-                                    </Link>
-                                    <p className="mk-note">Покупать можно только с входом. После входа вернём вас в корзину.</p>
-                                </>
-                            )}
+                            <Link href={auth.user ? routes.marketCheckout : routes.loginBack(routes.marketCheckout)} className="mk-btn mk-btn--block">
+                                {auth.user ? 'Перейти к оформлению' : 'Войти и оформить'}
+                            </Link>
+                            {!auth.user && <p className="mk-note">Покупать можно только с входом. После входа сразу откроется оформление.</p>}
                         </aside>
                     </div>
                 )}

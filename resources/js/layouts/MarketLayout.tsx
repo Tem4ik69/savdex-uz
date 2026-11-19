@@ -1,5 +1,5 @@
 import { Head, router, usePage } from '@inertiajs/react';
-import { Heart, Home, LayoutGrid, MapPin, Menu, Search, ShoppingCart, User } from 'lucide-react';
+import { Heart, Home, LayoutGrid, MapPin, Menu, Package, Search, ShoppingCart, User } from 'lucide-react';
 import { useState, type FormEvent, type ReactNode } from 'react';
 import { FlashToast } from '@/components/FlashToast';
 import { SiteFooter } from '@/components/SiteFooter';
@@ -26,7 +26,7 @@ export function MarketLayout({
 }: {
     title: string;
     /** Какой пункт нижней панели подсветить */
-    tab?: 'home' | 'catalog' | 'cart' | 'favorites';
+    tab?: 'home' | 'catalog' | 'cart' | 'orders';
     /** Текст в строке поиска — каталог возвращает сюда свой запрос */
     search?: string;
     children: ReactNode;
@@ -50,6 +50,7 @@ export function MarketLayout({
                         <b className="mk-demo">· Демо: товары и цены для примера</b>
                     </span>
                     <nav aria-label="Служебное меню">
+                        <Link href={routes.marketSell}>Стать продавцом</Link>
                         <Link href={routes.home}>savdex.uz</Link>
                         <Link href={routes.help}>Помощь</Link>
                     </nav>
@@ -73,6 +74,10 @@ export function MarketLayout({
                             <Heart size={20} aria-hidden />
                             Избранное
                             {liked > 0 && <span className="mk-count">{liked}</span>}
+                        </Link>
+                        <Link href={routes.marketOrders}>
+                            <Package size={20} aria-hidden />
+                            Заказы
                         </Link>
                         <Link href={routes.marketCart}>
                             <ShoppingCart size={20} aria-hidden />
@@ -108,9 +113,9 @@ export function MarketLayout({
                     Корзина
                     {inCart > 0 && <span className="mk-count">{inCart}</span>}
                 </Link>
-                <Link href={`${routes.marketCatalog}?only=fav`} aria-current={tab === 'favorites' ? 'page' : undefined}>
-                    <Heart size={20} aria-hidden />
-                    Избранное
+                <Link href={routes.marketOrders} aria-current={tab === 'orders' ? 'page' : undefined}>
+                    <Package size={20} aria-hidden />
+                    Заказы
                 </Link>
                 <Link href={account}>
                     <User size={20} aria-hidden />
