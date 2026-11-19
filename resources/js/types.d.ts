@@ -133,6 +133,8 @@ export interface SharedProps extends InertiaPageProps {
     localeLinks: LocaleLink[];
     /** Язык по настройкам браузера, если он ещё не выбирался. */
     localeSuggest?: string | null;
+    /** Маркетплейс открыт на этом сервере: на боевом до запуска — false, и пункта в шапке нет. */
+    market?: boolean;
     /**
      * Словарь интерфейса. Приходит только при полной загрузке
      * страницы — на переходах Inertia он у браузера уже есть.

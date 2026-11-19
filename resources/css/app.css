@@ -17,6 +17,8 @@
 @import './savdex-layout.css' layer(components);
 /* Мини-сайты компаний: свои токены --ms-*, классы с префиксом ms- */
 @import './microsite.css' layer(components);
+/* Маркетплейс: классы с префиксом mk- */
+@import './market.css' layer(components);
 
 /* ============================================================
    SAVDEX — дизайн-токены
