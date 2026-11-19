@@ -64,6 +64,14 @@ FROM = (
 #: Слово запроса для поиска: буквы и цифры любого алфавита
 _WORD = re.compile(r"\w+", re.UNICODE)
 
+# Похожие по написанию — только когда полнотекстовый поиск ничего не
+# нашёл: «смартфн» → «Смартфон», «samsng» → «Samsung». pg_trgm, индекс
+# market_products_title_trgm_index; порог 0.5 — настройка базы
+# (миграция 2026_11_19_120000_add_typo_search_to_market.sql)
+# «%%» — знак «%» оператора: запросы идут с параметрами psycopg
+_FUZZY = "%s <%% p.title"
+_FUZZY_RANK = "word_similarity(%s, p.title) desc"
+
 
 # ── Категории ───────────────────────────────────────────────────────
 
@@ -291,6 +299,13 @@ def _tsquery(text: str) -> str | None:
     return " & ".join(f"{w}:*" for w in words) if words else None
 
 
+def _needle(text: str) -> str | None:
+    """Запрос для поиска с опечатками: слова в нижнем регистре, не длиннее 60 знаков."""
+    words = " ".join(w.lower() for w in _WORD.findall(text))[:60].strip()
+
+    return words or None
+
+
 def search(query: Query, locale: str, user_id: int | None = None) -> dict[str, Any]:
     """
     Каталог: товары с поиском, фильтрами, сортировкой и страницами.
@@ -318,7 +333,10 @@ def search(query: Query, locale: str, user_id: int | None = None) -> dict[str, A
     if query.q and tsquery is None:
         return _empty(query)
 
+    match_at = param_at = -1
+
     if tsquery is not None:
+        match_at, param_at = len(where), len(params)
         where.append("p.search @@ to_tsquery('simple', %s)")
         params.append(tsquery)
 
@@ -382,11 +400,26 @@ def search(query: Query, locale: str, user_id: int | None = None) -> dict[str, A
     condition = " and ".join(where)
     total = int(rows(f"select count(*) as n {FROM} where {condition}", params)[0]["n"])
 
+    # Ничего не нашлось — то же самое, но по похожему написанию названия
+    # (те же фильтры); странице — fuzzy: «показаны похожие»
+    needle = _needle(query.q) if tsquery is not None and total == 0 else None
+    fuzzy = False
+
+    if needle is not None:
+        where[match_at] = price_where[match_at] = _FUZZY
+        params[param_at] = price_params[param_at] = needle
+        condition = " and ".join(where)
+        total = int(rows(f"select count(*) as n {FROM} where {condition}", params)[0]["n"])
+        fuzzy = total > 0
+
     order = SORTS[query.sort]
     order_params: list[Any] = []
 
     # Поиск без явной сортировки — сначала самые подходящие
-    if tsquery is not None and query.sort == "popular":
+    if fuzzy and query.sort == "popular":
+        order = f"{_FUZZY_RANK}, {order}"
+        order_params = [needle]
+    elif tsquery is not None and query.sort == "popular":
         order = f"ts_rank(p.search, to_tsquery('simple', %s)) desc, {order}"
         order_params = [tsquery]
 
@@ -406,6 +439,7 @@ def search(query: Query, locale: str, user_id: int | None = None) -> dict[str, A
         "page": query.page,
         "pages": min(MAX_PAGE, -(-total // PER_PAGE)),
         "sort": query.sort,
+        "fuzzy": fuzzy,
         "price": {"min": som(span["low"]), "max": som(span["high"])},
         "filters": _filters(category, attributes, locale) if category is not None else [],
         "category": (
@@ -427,6 +461,7 @@ def _empty(query: Query) -> dict[str, Any]:
         "page": query.page,
         "pages": 0,
         "sort": query.sort,
+        "fuzzy": False,
         "price": {"min": None, "max": None},
         "filters": [],
         "category": None,
@@ -505,6 +540,14 @@ def suggest(text: str, locale: str) -> dict[str, Any]:
         [tsquery, tsquery],
     )
     needle = " ".join(_WORD.findall(text.lower()))[:60]
+
+    # Ничего по началу слова — похожие по написанию («galxy» → «Galaxy»)
+    if not products:
+        products = rows(
+            f"select p.slug, p.title {FROM} where {VISIBLE} and {_FUZZY} "
+            f"order by {_FUZZY_RANK}, p.sold_count desc, p.id desc limit 8",
+            [needle, needle],
+        )
     categories = rows(
         "select slug, name, names from market_categories where is_active and ("
         "  lower(name) like %s or lower(names::text) like %s"

@@ -379,6 +379,35 @@ def test_каталог_фильтры_сортировка_поиск(сайт,
 
 
 @нужна_база
+def test_поиск_с_опечатками(сайт, витрина):
+    """Полнотекстовый ничего не нашёл — похожие по написанию (pg_trgm), с пометкой fuzzy."""
+
+    def found(query: str) -> tuple[list[str], bool]:
+        ответ = _json(_get(сайт, f"/market/api/catalog?{query}"))
+        return [item["slug"] for item in ответ["items"]], ответ["fuzzy"]
+
+    # Обычный поиск — как был, без пометки
+    assert found("q=galax") == (["galaxy-a55"], False)
+    # Опечатки — находятся, с пометкой «похожие»
+    assert found("q=смартфн") == (["galaxy-a55"], True)
+    assert found("q=galxy") == (["galaxy-a55"], True)
+    # Фильтры действуют и на похожие: в другом разделе — ничего
+    assert found("q=смартфн&category=smartphones") == (["galaxy-a55"], True)
+    assert found("q=смартфн&only=sale") == ([], False)
+    # Случайное слово — ничего, а не всё подряд
+    assert found("q=куртка") == ([], False)
+    # Невидимые товары не всплывают и через похожие
+    assert "draft-laptop" not in found("q=noutbuk")[0]
+    # Порог похожести — 0.5 у самой базы (миграция): с порогом pg_trgm по
+    # умолчанию 0.6 «samsng» не нашёл бы «Samsung» (0.57). Новое соединение —
+    # как у сайта после релиза
+    assert sql("show pg_trgm.word_similarity_threshold") == [("0.5",)]
+    assert sql("select word_similarity('samsng', 'Samsung Galaxy A15') between 0.5 and 0.6") == [
+        (True,)
+    ]
+
+
+@нужна_база
 def test_подсказки(сайт, витрина):
     подсказки = _json(_get(сайт, "/market/api/suggest?q=gal"))
     assert подсказки["products"] == [{"slug": "galaxy-a55", "title": "Смартфон Galaxy A55"}]
@@ -387,6 +416,10 @@ def test_подсказки(сайт, витрина):
     assert {"slug": "smartphones", "name": "Смартфоны"} in категории
 
     assert _json(_get(сайт, "/market/api/suggest?q=%20%20")) == {"products": [], "categories": []}
+    # Опечатка — тоже подсказка
+    assert _json(_get(сайт, "/market/api/suggest?q=galxy"))["products"] == [
+        {"slug": "galaxy-a55", "title": "Смартфон Galaxy A55"}
+    ]
 
 
 @нужна_база
