@@ -10,14 +10,16 @@ const catalog = (query: string) => (query ? `${routes.marketCatalog}?${query}` :
 
 /**
  * Главная маркетплейса: подборки-кружки, «Скидки дня» с баннером,
- * купоны, категории и три подборки — «Хиты», «Распродажа», «Новинки».
+ * купоны, категории и три подборки — «Хиты», «Распродажа», «Новинки»,
+ * все с одной карточкой товара.
  * Места под баннеры из админки — слайдер и (позже) полосы между
  * подборками; «Стать продавцом» — в конце страницы.
  */
 export default function MarketHome() {
     const hits = PRODUCTS.filter((p) => p.badge === 'hit');
     const sale = PRODUCTS.filter((p) => p.oldPrice).sort((a, b) => discount(b) - discount(a));
-    const fresh = PRODUCTS.filter((p) => p.badge === 'new');
+    // Новинок с меткой может быть меньше ряда — добираем самыми свежими из остальных
+    const fresh = [...PRODUCTS.filter((p) => p.badge === 'new'), ...PRODUCTS.filter((p) => p.badge !== 'new').sort((a, b) => b.id - a.id)];
     const deals = sale.slice(0, 3);
 
     return (
@@ -61,9 +63,9 @@ export default function MarketHome() {
                     ))}
                 </nav>
 
-                <Shelf title="Хиты продаж" query="only=hit" products={hits.slice(0, 5)} kind="hit" />
-                <Shelf title="Распродажа" query="only=sale" products={sale.slice(0, 5)} kind="sale" />
-                <Shelf title="Новинки" query="only=new" products={fresh.slice(0, 4)} kind="fresh" />
+                <Shelf title="Хиты продаж" query="only=hit" products={hits.slice(0, 5)} />
+                <Shelf title="Распродажа" query="only=sale" products={sale.slice(0, 5)} sale />
+                <Shelf title="Новинки" query="only=new" products={fresh.slice(0, 5)} />
 
                 <aside className="mk-strip">
                     <span>
@@ -77,26 +79,16 @@ export default function MarketHome() {
     );
 }
 
-function Shelf({
-    title,
-    query,
-    products,
-    kind,
-}: {
-    title: string;
-    query: string;
-    products: MarketProduct[];
-    kind: 'hit' | 'sale' | 'fresh';
-}) {
+function Shelf({ title, query, products, sale = false }: { title: string; query: string; products: MarketProduct[]; sale?: boolean }) {
     return (
         <section>
-            <div className={kind === 'sale' ? 'mk-sh mk-sh--sale' : 'mk-sh'}>
+            <div className={sale ? 'mk-sh mk-sh--sale' : 'mk-sh'}>
                 <h2>{title}</h2>
                 <Link href={catalog(query)}>Смотреть все →</Link>
             </div>
-            <div className={kind === 'fresh' ? 'mk-grid mk-grid--4 mk-shelf' : 'mk-grid mk-shelf'}>
+            <div className="mk-grid mk-shelf">
                 {products.map((p) => (
-                    <MarketCard key={p.id} product={p} kind={kind} />
+                    <MarketCard key={p.id} product={p} />
                 ))}
             </div>
         </section>
