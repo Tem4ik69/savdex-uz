@@ -8,7 +8,7 @@
    ============================================================ */
 
 .mk{--mk-sale:#dc2626;--mk-sale-bg:#fee2e2;--mk-d1:#dc2626;--mk-d2:#f97316;--mk-tag:#fde047;--mk-bg:#f1f4f9;
-  background:var(--mk-bg);min-height:100vh;font-size:14px;line-height:1.4;color:var(--text)}
+  background:var(--mk-bg);min-height:100vh;overflow-x:clip;font-size:14px;line-height:1.4;color:var(--text)}
 .mk a{color:inherit}
 .mk-in{max-width:1240px;margin:0 auto;padding:0 20px}
 .mk-main{padding-bottom:40px}
@@ -48,7 +48,12 @@
 .mk-tab{display:none}
 
 /* ---------- подборки-кружки ---------- */
-.mk-stories{display:flex;gap:20px;justify-content:space-between;padding-top:18px}
+/* Ряд прокручивается вбок, когда кружки не помещаются: 12 подборок
+   шире контейнера уже на экране 1260 px, и без прокрутки последний
+   кружок вылезал за край и растягивал страницу. Поля снизу и по бокам
+   — запас под тень при наведении: прокручиваемый блок её обрезает */
+.mk-stories{display:flex;gap:12px;justify-content:space-between;padding:18px 20px 30px;margin:0 -20px -30px;overflow-x:auto;scrollbar-width:none}
+.mk-stories::-webkit-scrollbar,.mk-cats::-webkit-scrollbar{display:none}
 .mk-story{display:flex;flex-direction:column;align-items:center;gap:6px;font-size:12px;font-weight:600;width:84px;text-align:center;line-height:1.25;flex-shrink:0}
 .mk-story span{position:relative;width:76px;height:76px;border-radius:50%;display:grid;place-items:center;font-size:34px;background:#fff;border:3px solid #fff;outline:2.5px solid transparent;transition:background .2s,border-color .2s,outline-color .2s}
 /* Тень позади кружка — два слоя: широкая синяя и короткая тёмная.
@@ -90,7 +95,7 @@
 .mk-coupon button[disabled]{background:var(--success);cursor:default}
 
 /* ---------- категории ---------- */
-.mk-cats{display:flex;justify-content:space-between;gap:10px;margin-top:24px}
+.mk-cats{display:flex;justify-content:space-between;gap:10px;padding:6px 20px 24px;margin:18px -20px -24px;overflow-x:auto;scrollbar-width:none}
 .mk-cat{display:flex;flex-direction:column;align-items:center;gap:8px;font-size:12px;font-weight:600;width:92px;text-align:center;line-height:1.25;flex-shrink:0}
 .mk-cat span{width:72px;height:72px;border-radius:50%;background:#fff;display:grid;place-items:center;font-size:32px;transition:transform var(--t-fast),box-shadow var(--t-fast)}
 .mk-cat:hover span{transform:translateY(-3px);box-shadow:var(--sh-hover)}
@@ -253,8 +258,6 @@
   .mk-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
   .mk-catalog .mk-grid,.mk-grid--4{grid-template-columns:repeat(3,minmax(0,1fr))}
   .mk-deal{grid-template-columns:minmax(0,1fr)}
-  .mk-stories,.mk-cats{overflow-x:auto;justify-content:flex-start;scrollbar-width:none;margin-inline:-20px;padding-inline:20px}
-  .mk-stories{padding-bottom:30px;margin-bottom:-30px}
   .mk-cart{grid-template-columns:minmax(0,1fr)}
   .mk-sum{position:static}
 }
@@ -286,7 +289,7 @@
   .mk-story,.mk-cat{width:64px;font-size:10.5px}
   .mk-story span{width:58px;height:58px;font-size:26px}
   .mk-cat span{width:56px;height:56px;font-size:26px}
-  .mk-cats{margin-top:16px}
+  .mk-cats{margin-top:10px}
   .mk-deal{gap:10px;margin-top:14px}
   .mk-flash{padding:12px;gap:10px;border-radius:16px}
   .mk-flash h2{font-size:16px}
