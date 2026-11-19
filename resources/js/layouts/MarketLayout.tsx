@@ -1,10 +1,10 @@
 import { Head, router, usePage } from '@inertiajs/react';
-import { Heart, Home, LayoutGrid, MapPin, Menu, Package, Search, ShoppingCart, User } from 'lucide-react';
-import { useState, type FormEvent, type ReactNode } from 'react';
+import { ChevronRight, Heart, Home, LayoutGrid, MapPin, Package, Search, ShoppingCart, User, X } from 'lucide-react';
+import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import { FlashToast } from '@/components/FlashToast';
 import { SiteFooter } from '@/components/SiteFooter';
 import { Link } from '@/components/ui/Link';
-import { PRODUCTS } from '@/market/demo';
+import { CATEGORIES, PRODUCTS } from '@/market/demo';
 import { sum } from '@/market/format';
 import { cartCount, useCart, useFavorites } from '@/market/store';
 import { routes } from '@/routes';
@@ -65,9 +65,7 @@ export function MarketLayout({
                         </span>
                         <i>Market</i>
                     </Link>
-                    <Link href={routes.marketCatalog} className="mk-catbtn">
-                        <Menu size={20} aria-hidden /> Каталог
-                    </Link>
+                    <CatalogMenu />
                     <SearchBox initial={search} />
                     <nav className="mk-nav" aria-label="Покупателю">
                         <Link href={`${routes.marketCatalog}?only=fav`}>
@@ -176,6 +174,83 @@ function SearchBox({ initial }: { initial: string }) {
                             </Link>
                         ))
                     )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+/**
+ * Кнопка «Каталог»: значок-плитка (не «бургер» — тот читается как меню
+ * сайта) и окно с деревом категорий. Слева — разделы, справа —
+ * подразделы того, на который навели или перешли с клавиатуры.
+ * Закрывается по Escape, нажатию мимо и после перехода.
+ */
+function CatalogMenu() {
+    const [open, setOpen] = useState(false);
+    const [active, setActive] = useState(CATEGORIES[0].slug);
+    const box = useRef<HTMLDivElement>(null);
+    const current = CATEGORIES.find((c) => c.slug === active) ?? CATEGORIES[0];
+    const href = (slug: string) => `${routes.marketCatalog}?category=${slug}`;
+
+    useEffect(() => {
+        if (!open) return;
+
+        const onKey = (event: KeyboardEvent) => event.key === 'Escape' && setOpen(false);
+        const onDown = (event: PointerEvent) => {
+            if (!box.current?.contains(event.target as Node)) setOpen(false);
+        };
+
+        document.addEventListener('keydown', onKey);
+        document.addEventListener('pointerdown', onDown);
+
+        return () => {
+            document.removeEventListener('keydown', onKey);
+            document.removeEventListener('pointerdown', onDown);
+        };
+    }, [open]);
+
+    return (
+        <div className="mk-catmenu" ref={box}>
+            <button type="button" className="mk-catbtn" aria-expanded={open} aria-controls="mk-catalog-panel" onClick={() => setOpen(!open)}>
+                {open ? <X size={20} aria-hidden /> : <LayoutGrid size={20} aria-hidden />} Каталог
+            </button>
+            {open && (
+                <div className="mk-catpanel" id="mk-catalog-panel">
+                    <ul className="mk-catpanel__list">
+                        {CATEGORIES.map((c) => (
+                            <li key={c.slug}>
+                                <Link
+                                    href={href(c.slug)}
+                                    aria-current={c.slug === active}
+                                    onMouseEnter={() => setActive(c.slug)}
+                                    onFocus={() => setActive(c.slug)}
+                                    onClick={() => setOpen(false)}
+                                >
+                                    <span aria-hidden>{c.emoji}</span>
+                                    {c.name}
+                                    <ChevronRight size={16} aria-hidden />
+                                </Link>
+                            </li>
+                        ))}
+                    </ul>
+                    <div className="mk-catpanel__sub">
+                        <h3>
+                            <span aria-hidden>{current.emoji}</span> {current.name}
+                        </h3>
+                        <ul>
+                            {current.children.map((name) => (
+                                <li key={name}>
+                                    <Link href={href(current.slug)} onClick={() => setOpen(false)}>
+                                        {name}
+                                    </Link>
+                                </li>
+                            ))}
+                        </ul>
+                        <Link href={href(current.slug)} className="mk-catpanel__all" onClick={() => setOpen(false)}>
+                            Все товары раздела →
+                        </Link>
+                    </div>
                 </div>
             )}
         </div>
