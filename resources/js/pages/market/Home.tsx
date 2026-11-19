@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { MarketCard } from '@/components/market/MarketCard';
 import { Link } from '@/components/ui/Link';
 import { MarketLayout } from '@/layouts/MarketLayout';
@@ -25,14 +26,14 @@ export default function MarketHome() {
     return (
         <MarketLayout title="SavdEx Market" tab="home">
             <div className="mk-in">
-                <nav className="mk-stories" aria-label="Подборки">
+                <Row className="mk-stories" label="Подборки">
                     {STORIES.map((story) => (
                         <Link key={story.label} href={catalog(story.query)} className="mk-story">
                             <span aria-hidden>{story.emoji}</span>
                             {story.label}
                         </Link>
                     ))}
-                </nav>
+                </Row>
 
                 <div className="mk-deal">
                     <section className="mk-flash" aria-label="Скидки дня">
@@ -54,14 +55,14 @@ export default function MarketHome() {
 
                 <Coupons />
 
-                <nav className="mk-cats" aria-label="Категории">
+                <Row className="mk-cats" label="Категории">
                     {CATEGORIES.slice(0, 11).map((c) => (
                         <Link key={c.slug} href={catalog(`category=${c.slug}`)} className="mk-cat">
                             <span aria-hidden>{c.emoji}</span>
                             {c.name}
                         </Link>
                     ))}
-                </nav>
+                </Row>
 
                 <Shelf title="Хиты продаж" query="only=hit" products={hits.slice(0, 5)} />
                 <Shelf title="Распродажа" query="only=sale" products={sale.slice(0, 5)} sale />
@@ -78,6 +79,69 @@ export default function MarketHome() {
                 </aside>
             </div>
         </MarketLayout>
+    );
+}
+
+/**
+ * Ряд, который прокручивается вбок, — со стрелками по краям.
+ *
+ * Стрелка видна, только когда в её сторону есть что листать: на широком
+ * экране, где ряд помещается целиком, стрелок нет вовсе. Нажатие
+ * прокручивает примерно на три четверти видимой ширины. На телефоне
+ * стрелки скрыты стилями — там ряд листают пальцем.
+ */
+function Row({ className, label, children }: { className: string; label: string; children: ReactNode }) {
+    const track = useRef<HTMLElement>(null);
+    const [can, setCan] = useState({ back: false, forward: false });
+
+    useEffect(() => {
+        const el = track.current;
+
+        if (!el) return;
+
+        const update = () => {
+            const back = el.scrollLeft > 4;
+            const forward = el.scrollLeft + el.clientWidth < el.scrollWidth - 4;
+
+            setCan((prev) => (prev.back === back && prev.forward === forward ? prev : { back, forward }));
+        };
+
+        update();
+        el.addEventListener('scroll', update, { passive: true });
+        window.addEventListener('resize', update);
+
+        return () => {
+            el.removeEventListener('scroll', update);
+            window.removeEventListener('resize', update);
+        };
+    }, []);
+
+    const scroll = (direction: 1 | -1) => {
+        const el = track.current;
+
+        if (!el) return;
+
+        const smooth = !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+        el.scrollBy({ left: direction * el.clientWidth * 0.75, behavior: smooth ? 'smooth' : 'auto' });
+    };
+
+    return (
+        <div className={`mk-row mk-row--${className.replace('mk-', '')}`}>
+            {can.back && (
+                <button type="button" className="mk-row__arrow mk-row__arrow--back" aria-label={`${label}: назад`} onClick={() => scroll(-1)}>
+                    <ChevronLeft size={20} aria-hidden />
+                </button>
+            )}
+            <nav ref={track} className={className} aria-label={label}>
+                {children}
+            </nav>
+            {can.forward && (
+                <button type="button" className="mk-row__arrow mk-row__arrow--forward" aria-label={`${label}: вперёд`} onClick={() => scroll(1)}>
+                    <ChevronRight size={20} aria-hidden />
+                </button>
+            )}
+        </div>
     );
 }
 

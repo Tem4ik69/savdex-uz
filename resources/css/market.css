@@ -521,3 +521,14 @@
   .mk-nav{margin-left:auto}
   .mk-catpanel{grid-template-columns:230px minmax(0,1fr)}
 }
+
+/* ---------- стрелки по краям прокручиваемого ряда ---------- */
+.mk-row{position:relative}
+.mk-row__arrow{position:absolute;z-index:3;top:var(--mk-arrow-top);width:40px;height:40px;margin-top:-20px;border-radius:50%;background:#fff;color:var(--text);display:grid;place-items:center;box-shadow:0 2px 10px rgb(15 23 42/.18);border:1px solid var(--border);transition:background var(--t-fast),color var(--t-fast),transform var(--t-fast)}
+.mk-row__arrow:hover{background:var(--primary-700);color:#fff;border-color:var(--primary-700);transform:scale(1.06)}
+.mk-row__arrow--back{left:-12px}
+.mk-row__arrow--forward{right:-12px}
+/* Стрелка стоит по центру кружка: отступ ряда сверху плюс половина кружка */
+.mk-row--stories{--mk-arrow-top:59px}
+.mk-row--cats{--mk-arrow-top:60px}
+@media (max-width:640px){.mk-row__arrow{display:none}}
