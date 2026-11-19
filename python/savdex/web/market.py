@@ -12,14 +12,12 @@
 
 from __future__ import annotations
 
-import os
-
 from django.http import HttpRequest, HttpResponse
 
 from savdex.web import fallback, inertia
 from savdex.web.request import context
 from savdex.web.seo import Seo
-from savdex.web.shared import Context
+from savdex.web.shared import Context, market_open
 
 #: Параметры каталога, которые понимает страница; остальное отбрасывается
 _CATALOG_KEYS = ("q", "category", "sort", "only", "max")
@@ -40,7 +38,7 @@ def _page(
 ) -> HttpResponse:
     # На боевом демо с выдуманными товарами не показывается: адреса
     # отвечают «страница не найдена», пока маркетплейс не запущен
-    if os.environ.get("APP_ENV", "local") == "production":
+    if not market_open():
         return fallback.page_not_found(request)
 
     ctx = context(request)

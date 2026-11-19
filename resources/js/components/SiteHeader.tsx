@@ -65,10 +65,13 @@ interface MenuItem {
  * заказчика — тот же запрос, и отдельный пункт в ленте разделов
  * заставлял искать её дважды.
  */
-function menu(): MenuItem[] {
+function menu(market: boolean): MenuItem[] {
     const rfq = `${routes.catalog}?type=demand`;
 
     return [
+        // Маркетплейс — первым: на видном месте (ТЗ 18.11). Пока он не
+        // запущен, на боевом пункта нет — сервер присылает market: false
+        ...(market ? [{ href: routes.market, label: t('nav.market') }] : []),
         { href: routes.companies, label: t('nav.companies') },
         {
             href: routes.catalog,
@@ -718,7 +721,7 @@ export function SiteHeader() {
     const locale = props.locale ?? 'ru';
     const localeLinks = props.localeLinks ?? [];
     const brandLogo = useBrandLogo();
-    const items = menu();
+    const items = menu(props.market === true);
     /*
      * Язык из адреса убирается: пути в routes.* записаны без него,
      * и на узбекской версии активный пункт меню не подсвечивался бы.

@@ -88,3 +88,11 @@ def test_на_боевом_демо_не_открывается(сайт):
     д = открыть(сайт, "/market", env={"APP_ENV": "production", "DJANGO_ALLOWED_HOSTS": "*"})
 
     assert д["status"] == 404
+
+
+def test_пункт_в_шапке_есть_везде_кроме_боевого(сайт):
+    assert страница(открыть(сайт, "/about")["body"])["props"]["market"] is True
+
+    боевой = открыть(сайт, "/about", env={"APP_ENV": "production", "DJANGO_ALLOWED_HOSTS": "*"})
+
+    assert страница(боевой["body"])["props"]["market"] is False
