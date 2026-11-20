@@ -26,7 +26,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from savdex.audit import client_ip
 from savdex.market import banners as market_banners
 from savdex.market import cart, cash, catalog, oneid, orders, products, sellers
-from savdex.market.common import t
+from savdex.market.common import one, t
 from savdex.web import session, throttle
 from savdex.web.actions import form
 from savdex.web.cabinet import _authenticate, company_of
@@ -729,10 +729,14 @@ def _my_requisites_view(request: HttpRequest) -> HttpResponse:
 @form()
 def _my_requisites_save(request: HttpRequest) -> HttpResponse:
     """
-    POST {bankAccount, bankMfo, bankName, recipientName, recipientTin}.
-    Каждая смена — строка истории; выплата на новые реквизиты — через сутки
-    или после отдельной сверки кассой.
+    POST {bankAccount, bankMfo, bankName, recipientName, recipientTin,
+    password}. Пароль от входа — ещё раз (как при входе, guard.check):
+    чужая открытая сессия реквизиты не подменит. Каждая смена — строка
+    истории и уведомление владельцам; выплата на новые реквизиты — через
+    сутки или после отдельной сверки кассой.
     """
+    from savdex.web import guard
+
     ctx = action(
         request, auth=False, throttle=10, throttle_minutes=60, throttle_prefix="market-requisites"
     )
@@ -742,17 +746,27 @@ def _my_requisites_save(request: HttpRequest) -> HttpResponse:
         return refused
 
     assert seller is not None and ctx.user is not None
-    _, errors = cash.save_requisites(
-        int(seller["id"]),
-        int(ctx.user["id"]),
-        input_of(request),
-        ip=client_ip(ctx.request),
-    )
+    data = input_of(request)
+    _, errors = cash.validate_requisites(data)
 
     if errors:
         texts = {field: [t(key, ctx.locale)] for field, key in errors.items()}
 
         return _json({"message": next(iter(texts.values()))[0], "errors": texts}, 422)
+
+    hashed = one("select password from users where id = %s", [ctx.user["id"]])
+
+    if not guard.check(str(data.get("password") or ""), (hashed or {}).get("password")):
+        text = t("cash.password", ctx.locale)
+
+        return _json({"message": text, "errors": {"password": [text]}}, 422)
+
+    changed, _ = cash.save_requisites(
+        int(seller["id"]), int(ctx.user["id"]), data, ip=client_ip(ctx.request)
+    )
+
+    if changed:
+        cash.notify_requisites_changed(int(seller["id"]), ctx.locale)
 
     return _json(
         {

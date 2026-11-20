@@ -6,12 +6,18 @@
   в работе, выплачено; реквизиты и последние выплаты. Отсюда кассир
   создаёт выплату (шаг 1).
 - **Выплаты продавцам** — подтвердить (шаг 2, другой кассир; на свежие
-  реквизиты — с отметкой «реквизиты сверены»), отметить выплаченной
-  (номер платёжки — проводка в журнале денег), отменить.
-- **Реквизиты продавцов** — только смотреть, с историей смен: меняет их
-  только владелец компании из кабинета.
-- **Возвраты покупателям** — заказы в «ждёт возврата»: касса вернула
-  деньги в кабинете провайдера и отмечает возврат здесь.
+  реквизиты — с отметкой «реквизиты сверены» и заметкой, как сверили),
+  отметить выплаченной (номер платёжки — проводка в журнале денег),
+  отменить (подтверждённую — только подтвердивший, с отметкой «платёжка
+  не отправлялась»).
+- **Наличные к сверке** — выданные заказы «при получении»: касса сверяет
+  их с отчётом BTS (по одному или пачкой), и только тогда деньги идут
+  продавцу «к выплате».
+- **Реквизиты продавцов** — только смотреть, с историей смен; в списке
+  счёт скрыт: меняет реквизиты только владелец компании из кабинета.
+- **Возвраты покупателям** — заказы в «ждёт возврата»: касса берёт
+  возврат на себя, возвращает деньги в кабинете провайдера и отмечает
+  возврат с его номером.
 
 Каждое действие — POST с CSRF на свой адрес, право проверяется и здесь,
 и в cash.py; итог — строка журнала действий (cash.py).
@@ -24,6 +30,7 @@ from typing import Any
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied
 from django.db.models import QuerySet
+from django.db.models.expressions import RawSQL
 from django.http import HttpRequest, HttpResponse, HttpResponseRedirect
 from django.urls import path, reverse
 from django.utils.html import format_html, format_html_join
@@ -34,7 +41,14 @@ from savdex.crm.admin import _badge, when
 from savdex.market import cash, orders
 from savdex.market.admin import _company_name
 from savdex.market.common import one, rows, tiyin
-from savdex.market.models import Payout, RefundOrder, RequisitesLog, SellerBalance, SellerRequisites
+from savdex.market.models import (
+    CashOrder,
+    Payout,
+    RefundOrder,
+    RequisitesLog,
+    SellerBalance,
+    SellerRequisites,
+)
 
 _TEMPLATE = "admin/market/cash_change_form.html"
 
@@ -72,20 +86,20 @@ class _ReadOnly(SavdexModelAdmin):
     def cash_forms(self, request: HttpRequest, obj: Any) -> list[dict[str, Any]]:  # noqa: ANN401
         return []
 
-    def change_view(
+    def render_change_form(
         self,
         request: HttpRequest,
-        object_id: str,
+        context: dict[str, Any],
+        add: bool = False,
+        change: bool = False,
         form_url: str = "",
-        extra_context: Any = None,  # noqa: ANN401
+        obj: Any = None,  # noqa: ANN401
     ) -> HttpResponse:
-        obj = self.get_object(request, object_id)
-        extra = dict(extra_context or {})
-
+        """Формы действий — по записи, которую карточка уже прочитала."""
         if obj is not None:
-            extra["cash_forms"] = self.cash_forms(request, obj)
+            context["cash_forms"] = self.cash_forms(request, obj)
 
-        return super().change_view(request, object_id, form_url, extra)
+        return super().render_change_form(request, context, add, change, form_url, obj)
 
     def _post(self, request: HttpRequest, object_id: str, ability: str) -> Any:  # noqa: ANN401
         """Общая проверка действия: только POST, право, запись есть."""
@@ -133,10 +147,13 @@ class SellerBalanceAdmin(_ReadOnly):
     readonly_fields = fields
 
     def get_queryset(self, request: HttpRequest) -> QuerySet[SellerBalance]:
+        """Баланс каждой строки — подзапросами в том же запросе, а не запросом на строку."""
         found: QuerySet[SellerBalance] = super().get_queryset(request)
+        parts = cash.balance_parts('"market_sellers"."id"')
 
         return found.filter(status__in=("approved", "blocked")).annotate(
-            company_title=_company_name()
+            company_title=_company_name(),
+            **{f"cash_{name}": RawSQL(sql, params) for name, sql, params in parts},
         )
 
     def get_urls(self) -> list[Any]:
@@ -149,18 +166,23 @@ class SellerBalanceAdmin(_ReadOnly):
             *super().get_urls(),
         ]
 
-    def _balance(self, obj: SellerBalance) -> cash.Balance:
-        cached = getattr(obj, "_cash_balance", None)
-
-        if cached is None:
-            cached = cash.balance(obj.pk)
-            obj._cash_balance = cached  # type: ignore[attr-defined]
-
-        return cached
+    @staticmethod
+    def _balance(obj: SellerBalance) -> cash.Balance:
+        return cash.Balance(
+            accrued=int(getattr(obj, "cash_accrued", 0) or 0),
+            released=int(getattr(obj, "cash_released", 0) or 0),
+            in_work=int(getattr(obj, "cash_in_work", 0) or 0),
+            paid=int(getattr(obj, "cash_paid", 0) or 0),
+        )
 
     @admin.display(description="компания", ordering="company_title")
     def company(self, obj: SellerBalance) -> str:
-        return format_html("{} <small>№{}</small>", getattr(obj, "company_title", "—"), obj.pk)
+        return format_html(
+            "{} <small>№{}{}</small>",
+            getattr(obj, "company_title", "—"),
+            obj.pk,
+            "" if obj.status == "approved" else " · заблокирован",
+        )
 
     @admin.display(description="начислено")
     def accrued(self, obj: SellerBalance) -> str:
@@ -183,8 +205,8 @@ class SellerBalanceAdmin(_ReadOnly):
         found = self._balance(obj)
 
         return format_html(
-            "начислено {} · держится {} (выдача + {} дн.)<br>к выплате {} · в работе {} · "
-            "выплачено {}<br><b>доступно {}</b>",
+            "начислено {} · держится {} (выдача + {} дн., наличные — после сверки с BTS)<br>"
+            "к выплате {} · в работе {} · выплачено {}<br><b>доступно {}</b>",
             cash.money(found.accrued),
             cash.money(found.on_hold),
             cash.hold_days(),
@@ -238,7 +260,7 @@ class SellerBalanceAdmin(_ReadOnly):
         )
 
     def cash_forms(self, request: HttpRequest, obj: Any) -> list[dict[str, Any]]:  # noqa: ANN401
-        if not _admin_of(request).can(f"{cash.SECTION}.create"):
+        if not _admin_of(request).can(f"{cash.SECTION}.create") or obj.status != "approved":
             return []
 
         return [
@@ -363,16 +385,19 @@ class PayoutAdmin(_ReadOnly):
     @admin.display(description="кто")
     def people(self, obj: Payout) -> str:
         return format_html(
-            "создал {} {}<br>подтвердил {} {}{}<br>отметил выплату {} {}<br>отменил {} {}",
+            "создал {} {}<br>подтвердил {} {}{}<br>отметил выплату {} {}<br>отменил {} {}{}",
             _staff_name(obj.created_by),
             when(obj.created_at),
             _staff_name(obj.approved_by),
             when(obj.approved_at),
-            " — на свежие реквизиты, сверены" if obj.fresh_requisites else "",
+            f" — на свежие реквизиты, сверены: {obj.fresh_check_note}"
+            if obj.fresh_requisites
+            else "",
             _staff_name(obj.paid_by),
             when(obj.paid_at),
             _staff_name(obj.cancelled_by),
             when(obj.cancelled_at),
+            " — платёжка не отправлялась" if obj.cancel_not_sent else "",
         )
 
     @admin.display(description="реквизиты")
@@ -419,7 +444,8 @@ class PayoutAdmin(_ReadOnly):
                 {
                     "title": "Подтвердить выплату (шаг 2 из 2)",
                     "help": "Подтверждает другой кассир — не тот, кто создал. Реквизиты, "
-                    "сменённые меньше суток назад, сверьте с продавцом по известному телефону.",
+                    "сменённые меньше суток назад, сверьте с продавцом по известному телефону "
+                    "и напишите, как сверили.",
                     "url": url,
                     "code": "approve",
                     "button": "Подтвердить",
@@ -428,7 +454,8 @@ class PayoutAdmin(_ReadOnly):
                             "name": "fresh_ok",
                             "label": "Реквизиты сверены с продавцом",
                             "type": "checkbox",
-                        }
+                        },
+                        {"name": "fresh_note", "label": "Как сверили", "type": "textarea"},
                     ],
                 }
             )
@@ -448,15 +475,40 @@ class PayoutAdmin(_ReadOnly):
                 }
             )
 
-        if obj.status in cash.IN_WORK and admin_.can(f"{cash.SECTION}.edit"):
+        can_cancel = admin_.can(f"{cash.SECTION}.edit") and (
+            obj.status == cash.DRAFT
+            or (
+                obj.status == cash.APPROVED
+                and (obj.approved_by == admin_.id or admin_.is_superadmin)
+            )
+        )
+
+        if can_cancel:
+            fields: list[dict[str, str]] = [
+                {"name": "reason", "label": "Причина", "type": "textarea"}
+            ]
+
+            if obj.status == cash.APPROVED:
+                fields.insert(
+                    0,
+                    {
+                        "name": "not_sent",
+                        "label": "Платёжка в банк не отправлялась",
+                        "type": "checkbox",
+                    },
+                )
+
             found.append(
                 {
                     "title": "Отменить выплату",
-                    "help": "",
+                    "help": "Подтверждённую отменяет только тот, кто её подтвердил, — и только "
+                    "если платёжка в банк не уходила."
+                    if obj.status == cash.APPROVED
+                    else "",
                     "url": url,
                     "code": "cancel",
                     "button": "Отменить",
-                    "fields": [{"name": "reason", "label": "Причина", "type": "textarea"}],
+                    "fields": fields,
                 }
             )
 
@@ -476,19 +528,135 @@ class PayoutAdmin(_ReadOnly):
         try:
             if do == "approve":
                 cash.approve_payout(
-                    admin_, obj.pk, fresh_ok=request.POST.get("fresh_ok") == "1", ip=ip
+                    admin_,
+                    obj.pk,
+                    fresh_ok=request.POST.get("fresh_ok") == "1",
+                    fresh_note=request.POST.get("fresh_note"),
+                    ip=ip,
                 )
                 done = f"Выплата №{obj.pk} подтверждена."
             elif do == "paid":
                 cash.mark_paid(admin_, obj.pk, request.POST.get("bank_reference") or "", ip=ip)
                 done = f"Выплата №{obj.pk} отмечена выплаченной."
             else:
-                cash.cancel_payout(admin_, obj.pk, request.POST.get("reason") or "", ip=ip)
+                cash.cancel_payout(
+                    admin_,
+                    obj.pk,
+                    request.POST.get("reason") or "",
+                    not_sent=request.POST.get("not_sent") == "1",
+                    ip=ip,
+                )
                 done = f"Выплата №{obj.pk} отменена."
         except cash.CashRefused as refused:
             return self._back(request, obj, None, str(refused))
 
         return self._back(request, obj, done, None)
+
+
+# ── Наличные к сверке с отчётом BTS ────────────────────────────────
+
+
+@register(CashOrder, section="market_cash")
+class CashOrderAdmin(_ReadOnly):
+    laravel_model = "Savdex\\Market\\Order"
+    title_list = "Наличные к сверке с отчётом BTS"
+    title_change = "Наличные заказа"
+
+    list_display = ("number", "total_text", "point", "issued")
+    search_fields = ("number",)
+    ordering = ("issued_at", "id")
+    list_per_page = 100
+    fields = ("number", "total_text", "point", "issued")
+    readonly_fields = fields
+
+    def get_queryset(self, request: HttpRequest) -> QuerySet[CashOrder]:
+        found: QuerySet[CashOrder] = super().get_queryset(request)
+
+        return found.filter(
+            payment_method="cash", status=orders.ISSUED, cash_reconciled_at__isnull=True
+        )
+
+    def get_actions(self, request: HttpRequest) -> dict[str, Any]:
+        """Сверка пачкой — отмеченные строки списка (POST с CSRF, как у Django)."""
+        if not _admin_of(request).can(f"{cash.SECTION}.moderate"):
+            return {}
+
+        return {
+            "reconcile": (
+                type(self).reconcile_action,
+                "reconcile",
+                "Сверено с отчётом BTS",
+            )
+        }
+
+    def reconcile_action(self, request: HttpRequest, queryset: QuerySet[CashOrder]) -> None:
+        try:
+            done = cash.reconcile_cash(
+                _admin_of(request),
+                [order.pk for order in queryset],
+                note="пачкой из списка",
+                ip=audit.client_ip(request),
+            )
+        except cash.CashRefused as refused:
+            self.message_user(request, str(refused), messages.ERROR)
+
+            return
+
+        self.message_user(request, f"Сверено с отчётом BTS: {done}.", messages.SUCCESS)
+
+    def get_urls(self) -> list[Any]:
+        return [
+            path(
+                "<path:object_id>/reconcile/",
+                self.admin_site.admin_view(self.reconcile_view),
+                name="market_cashorder_reconcile",
+            ),
+            *super().get_urls(),
+        ]
+
+    @admin.display(description="сумма", ordering="total")
+    def total_text(self, obj: CashOrder) -> str:
+        return cash.money(obj.total)
+
+    @admin.display(description="пункт выдачи")
+    def point(self, obj: CashOrder) -> str:
+        return obj.pickup_point_name
+
+    @admin.display(description="выдан", ordering="issued_at")
+    def issued(self, obj: CashOrder) -> str:
+        return when(obj.issued_at)
+
+    def cash_forms(self, request: HttpRequest, obj: CashOrder) -> list[dict[str, Any]]:
+        if not _admin_of(request).can(f"{cash.SECTION}.moderate"):
+            return []
+
+        return [
+            {
+                "title": "Сверено с отчётом BTS",
+                "help": "Сумма заказа есть в отчёте пункта выдачи: деньги пойдут продавцу "
+                "«к выплате».",
+                "url": reverse("savdex_admin:market_cashorder_reconcile", args=[obj.pk]),
+                "code": "reconcile",
+                "button": "Сверено",
+                "fields": [{"name": "note", "label": "Отчёт BTS (номер, дата)", "type": "text"}],
+            }
+        ]
+
+    def reconcile_view(self, request: HttpRequest, object_id: str) -> HttpResponse:
+        obj = self._post(request, object_id, f"{cash.SECTION}.moderate")
+        done = cash.reconcile_cash(
+            _admin_of(request),
+            [obj.pk],
+            note=request.POST.get("note"),
+            ip=audit.client_ip(request),
+        )
+        self.message_user(
+            request,
+            f"Заказ {obj.number}: сверено." if done else "Заказ уже сверен.",
+            messages.SUCCESS if done else messages.WARNING,
+        )
+
+        return HttpResponseRedirect(reverse("savdex_admin:market_cashorder_changelist"))
 
 
 # ── Реквизиты ───────────────────────────────────────────────────────
@@ -500,8 +668,9 @@ class SellerRequisitesAdmin(_ReadOnly):
     title_list = "Реквизиты продавцов"
     title_change = "Реквизиты продавца"
 
-    list_display = ("seller_id", "bank_name", "bank_account", "recipient_name", "changed")
-    search_fields = ("bank_account", "recipient_tin", "recipient_name")
+    #: Счёт в списке — скрыт (последние 4 цифры); поиска по счёту нет
+    list_display = ("seller_id", "bank_name", "account_masked", "recipient_name", "changed")
+    search_fields = ("recipient_name",)
     list_per_page = 50
     fields = (
         "seller_id",
@@ -514,6 +683,10 @@ class SellerRequisitesAdmin(_ReadOnly):
         "history",
     )
     readonly_fields = fields
+
+    @admin.display(description="счёт")
+    def account_masked(self, obj: SellerRequisites) -> str:
+        return cash.masked(obj.bank_account)
 
     @admin.display(description="сменены", ordering="changed_at")
     def changed(self, obj: SellerRequisites) -> str:
@@ -575,17 +748,22 @@ class RefundOrderAdmin(_ReadOnly):
             *super().get_urls(),
         ]
 
+    @staticmethod
+    def _payment(obj: RefundOrder) -> dict[str, Any] | None:
+        return one(
+            "select provider, provider_transaction_id, refund_requested_at, note, "
+            "rejection_checked_at "
+            "from market_payments where order_id = %s and status = 'paid' order by id desc limit 1",
+            [obj.pk],
+        )
+
     @admin.display(description="сумма", ordering="total")
     def total_text(self, obj: RefundOrder) -> str:
         return cash.money(obj.total)
 
     @admin.display(description="оплата")
     def payment(self, obj: RefundOrder) -> str:
-        found = one(
-            "select provider, provider_transaction_id, refund_requested_at, note "
-            "from market_payments where order_id = %s and status = 'paid' order by id desc limit 1",
-            [obj.pk],
-        )
+        found = self._payment(obj)
 
         if found is None:
             return "проведённой оплаты картой нет"
@@ -605,30 +783,94 @@ class RefundOrderAdmin(_ReadOnly):
         )
 
     def cash_forms(self, request: HttpRequest, obj: RefundOrder) -> list[dict[str, Any]]:
-        if not _admin_of(request).can(f"{cash.SECTION}.moderate"):
+        found = self._payment(obj)
+
+        if not _admin_of(request).can(f"{cash.SECTION}.moderate") or found is None:
             return []
+
+        url = reverse("savdex_admin:market_refundorder_refund", args=[obj.pk])
+        checked: list[dict[str, Any]] = (
+            []
+            if found["rejection_checked_at"] is not None
+            else [
+                {
+                    "title": "Проверено у провайдера",
+                    "help": "Возврат завис (ошибка связи, ждём отмену от провайдера): "
+                    "проверили в кабинете провайдера — сверка больше не покажет его "
+                    "расхождением. Заказ остаётся «ждёт возврата».",
+                    "url": url,
+                    "code": "check",
+                    "button": "Проверено",
+                    "fields": [{"name": "note", "label": "Что проверили", "type": "textarea"}],
+                }
+            ]
+        )
+
+        if found["refund_requested_at"] is None:
+            return [
+                {
+                    "title": "Возвращаю вручную",
+                    "help": "Возврат ещё не запрашивали. Возьмите его на себя до того, как "
+                    "вернуть деньги в кабинете провайдера, — тогда расписание не вернёт их "
+                    "второй раз через API.",
+                    "url": url,
+                    "code": "claim",
+                    "button": "Беру возврат на себя",
+                    "fields": [],
+                },
+                *checked,
+            ]
 
         return [
             {
                 "title": "Деньги вернули в кабинете провайдера",
                 "help": "Только после возврата в кабинете Uzum, Payme или Click: заказ станет "
                 "«деньги возвращены», в журнале денег — проводка возврата.",
-                "url": reverse("savdex_admin:market_refundorder_refund", args=[obj.pk]),
+                "url": url,
                 "code": "refund",
                 "button": "Отметить возврат",
-                "fields": [{"name": "note", "label": "Где и когда вернули", "type": "textarea"}],
-            }
+                "fields": [
+                    {
+                        "name": "refund_reference",
+                        "label": "Номер возврата у провайдера",
+                        "type": "text",
+                    },
+                    {"name": "note", "label": "Где и когда вернули", "type": "textarea"},
+                ],
+            },
+            *checked,
         ]
 
     def refund_view(self, request: HttpRequest, object_id: str) -> HttpResponse:
         obj = self._post(request, object_id, f"{cash.SECTION}.moderate")
+        admin_ = _admin_of(request)
+        ip = audit.client_ip(request)
 
         try:
+            if request.POST.get("do") == "check":
+                if not cash.acknowledge_refund(
+                    admin_, obj.pk, request.POST.get("note") or "", ip=ip
+                ):
+                    return self._back(request, obj, None, "Уже отмечено — обновите страницу.")
+
+                return self._back(request, obj, "Отмечено: проверено у провайдера.", None)
+
+            if request.POST.get("do") == "claim":
+                if not cash.claim_refund(admin_, obj.pk, ip=ip):
+                    return self._back(
+                        request, obj, None, "Возврат уже запрошен — обновите страницу."
+                    )
+
+                return self._back(
+                    request, obj, "Возврат за вами: верните деньги в кабинете провайдера.", None
+                )
+
             done = cash.mark_refunded(
-                _admin_of(request),
+                admin_,
                 obj.pk,
+                request.POST.get("refund_reference") or "",
                 request.POST.get("note") or "",
-                ip=audit.client_ip(request),
+                ip=ip,
             )
         except cash.CashRefused as refused:
             return self._back(request, obj, None, str(refused))

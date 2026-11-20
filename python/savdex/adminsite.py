@@ -187,6 +187,7 @@ ICONS = {
     "market.Payout": "paper-airplane",
     "market.SellerRequisites": "identification",
     "market.RefundOrder": "arrow-uturn-left",
+    "market.CashOrder": "check-circle",
 }
 DEFAULT_ICON = "rectangle-stack"
 
@@ -430,6 +431,7 @@ MENU_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
         (
             "market.sellerbalance",
             "market.payout",
+            "market.cashorder",
             "market.sellerrequisites",
             "market.refundorder",
         ),

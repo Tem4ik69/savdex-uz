@@ -267,6 +267,9 @@ class Order(models.Model):
     cancel_reason = models.CharField("причина отмены", max_length=500, null=True)
     issued_at = UTCDateTimeField("выдан", null=True)
     reserve_released_at = UTCDateTimeField("резерв снят", null=True)
+    #: Касса сверила наличные заказа с отчётом BTS (миграция 2026_11_21_120000)
+    cash_reconciled_at = UTCDateTimeField("наличные сверены", null=True)
+    cash_reconciled_by = models.BigIntegerField("сверил", null=True)
     stock_written_off_at = UTCDateTimeField("остаток списан", null=True)
     created_at = UTCDateTimeField("оформлен", auto_now_add=True)
     updated_at = UTCDateTimeField("изменён", auto_now=True)
@@ -350,9 +353,11 @@ class Payout(models.Model):
     cancelled_by = models.BigIntegerField("отменил", null=True)
     requisites_log_id = models.BigIntegerField("реквизиты (история)", null=True)
     fresh_requisites = models.BooleanField("на свежие реквизиты", default=False)
+    fresh_check_note = models.CharField("как сверили реквизиты", max_length=500, null=True)
     bank_reference = models.CharField("платёжное поручение", max_length=64, null=True)
     ledger_group = models.UUIDField("группа журнала денег", null=True)
     cancel_reason = models.CharField("причина отмены", max_length=500, null=True)
+    cancel_not_sent = models.BooleanField("платёжка не отправлялась", default=False)
     created_at = UTCDateTimeField("создана", auto_now_add=True)
     updated_at = UTCDateTimeField(auto_now=True)
     approved_at = UTCDateTimeField("подтверждена", null=True)
@@ -386,3 +391,12 @@ class RefundOrder(Order):
         proxy = True
         verbose_name = "возврат покупателю"
         verbose_name_plural = "возвраты покупателям"
+
+
+class CashOrder(Order):
+    """Выданные заказы «при получении», ждущие сверки наличных с отчётом BTS."""
+
+    class Meta:
+        proxy = True
+        verbose_name = "наличные к сверке"
+        verbose_name_plural = "наличные к сверке"

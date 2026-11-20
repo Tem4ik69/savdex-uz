@@ -36,6 +36,17 @@ ACTIONS = {
     "refunded": "Возврат средств",
     "paid": "Проведение оплаты",
     "sent": "Отправка",
+    # Маркетплейс: шаги заказа и касса (savdex/market/admin.py, cash.py)
+    "status_changed": "Смена статуса заказа",
+    "cancelled": "Отмена",
+    "payout_created": "Выплата: создана",
+    "payout_approved": "Выплата: подтверждена",
+    "payout_paid": "Выплата: выплачено",
+    "payout_cancelled": "Выплата: отменена",
+    "cash_reconciled": "Наличные сверены с BTS",
+    "refund_claimed": "Возврат взят вручную",
+    "refund_marked": "Возврат отмечен вручную",
+    "refund_checked": "Возврат проверен у провайдера",
 }
 
 

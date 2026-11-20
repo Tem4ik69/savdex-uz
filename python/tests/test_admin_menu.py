@@ -68,6 +68,7 @@ def test_у_суперадмина_нет_групп_из_одного_пунк�
     assert меню["Касса маркетплейса"] == [
         "SellerBalance",
         "Payout",
+        "CashOrder",
         "SellerRequisites",
         "RefundOrder",
     ]
@@ -109,7 +110,13 @@ def test_сотруднику_только_свои_группы():
 def test_касса_и_склад_маркетплейса():
     """Касса видит только кассу; склад — заказы (шаги заказа, без денег) и пункты выдачи."""
     assert _меню("cashier") == {
-        "Касса маркетплейса": ["SellerBalance", "Payout", "SellerRequisites", "RefundOrder"]
+        "Касса маркетплейса": [
+            "SellerBalance",
+            "Payout",
+            "CashOrder",
+            "SellerRequisites",
+            "RefundOrder",
+        ]
     }
     # Пункты выдачи — только смотреть (правка — market_orders.edit)
     assert _меню("warehouse") == {"Маркетплейс": ["Order", "PickupPoint"]}

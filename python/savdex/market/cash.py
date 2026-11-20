@@ -1,7 +1,7 @@
 """
 Касса маркетплейса, этап 3 (docs/marketplace.md, «Касса — этап 3»;
 docs/marketplace-security.md, разделы 3 и 4): баланс продавца, реквизиты,
-выплаты в два шага и ручная отметка возврата.
+выплаты в два шага, сверка наличных и ручная отметка возврата.
 
 Выплата пока ручная (ТЗ: выплаты по оферте — позже): продавец видит
 начисления в кабинете, касса переводит деньги платёжкой из банка и
@@ -10,32 +10,42 @@ docs/marketplace-security.md, разделы 3 и 4): баланс продав�
 - **Баланс** — из журнала денег: ``seller_payable`` по заказам продавца
   (начисление — минус, обратная группа отмены — плюс). К выплате — только
   выданные заказы старше N дней (настройка ``market_payout_hold_days``, по
-  умолчанию 7): срок на возврат. Заказы в «ждёт возврата» и «деньги
-  возвращены» — не в счёт. Доступно = к выплате − выплаты в работе
-  (готовится, подтверждена) − выплаченное.
+  умолчанию 7, не меньше 1): срок на возврат; заказ «при получении» — ещё и
+  только после отметки кассы «сверено с отчётом BTS»
+  (``cash_reconciled_at``). Заказы в «ждёт возврата» и «деньги возвращены»
+  — не в счёт. Доступно = к выплате − выплаты в работе (создана,
+  подтверждена) − выплаченное. Допущение: деньги картой идут «к выплате»
+  до того, как пришли на наш счёт (до ночной сверки с выпиской).
 - **Два шага**: один кассир создаёт, другой подтверждает (не тот же — и
-  база: market_payouts_two_people_check). Выплату на реквизиты, сменённые
-  меньше суток назад, подтверждают только отдельной отметкой «реквизиты
-  сверены» (повторное подтверждение). Реквизиты сменились после
-  подтверждения — выплату не отметить: отменить и создать заново.
+  база: market_payouts_two_people_check); продавец должен быть
+  подтверждён (не заблокирован). Выплату на реквизиты, сменённые меньше
+  суток назад, подтверждают только отметкой «реквизиты сверены» с
+  заметкой, как сверили. Реквизиты сменились после подтверждения —
+  выплату не отметить: отменить и создать заново.
 - **Выплачено** — одна группа журнала: ``seller_payable`` плюс (долг
   продавцу закрыт), ``payout_clearing`` минус (деньги ушли с нашего
-  счёта); ровно один раз — условным переходом approved → paid.
+  счёта); ровно один раз — условным переходом approved → paid; номер
+  платёжки уникален. Доступное перепроверяется и здесь.
+- **Отмена подтверждённой** — только тот, кто подтверждал (или
+  суперадмин), с отметкой «платёжка в банк не отправлялась» и причиной:
+  иначе выплату можно было бы провести второй раз.
 - Порядок замков везде один: строка продавца (``for update``), затем
   строка выплаты. Каждое действие — ``audit.record`` (кто, что, сумма,
-  продавец).
+  продавец) в той же транзакции.
 """
 
 from __future__ import annotations
 
+import html
 import logging
 import re
-from collections.abc import Mapping
+import unicodedata
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from django.db import connection, transaction
+from django.db import IntegrityError, connection, transaction
 
 from savdex import audit
 from savdex.access import Admin
@@ -55,6 +65,7 @@ APPROVED = "approved"
 PAID = "paid"
 CANCELLED = "cancelled"
 
+#: Те же слова, что в кабинете продавца (словарь market.cash.status)
 STATUSES: dict[str, str] = {
     DRAFT: "Создана, ждёт подтверждения",
     APPROVED: "Подтверждена, ждёт перевода",
@@ -77,6 +88,9 @@ HOLD_DEFAULT = 7
 #: Реквизиты моложе стольких часов — выплата только с отдельной отметкой
 FRESH_HOURS = 24
 
+#: Короче — не объяснение (как сверили реквизиты, почему отменили)
+MIN_NOTE = 10
+
 _SUBJECT = "Savdex\\Market\\Payout"
 
 
@@ -85,13 +99,13 @@ class CashRefused(Exception):  # noqa: N818 — отказ кассиру, а н
 
 
 def hold_days() -> int:
-    """Срок удержания в днях; не число или меньше нуля — по умолчанию."""
+    """Срок удержания в днях; не число или меньше одного дня — по умолчанию."""
     try:
         number = int(str(settings_values().get(HOLD_KEY)))
     except (TypeError, ValueError):
         return HOLD_DEFAULT
 
-    return number if number >= 0 else HOLD_DEFAULT
+    return number if number >= 1 else HOLD_DEFAULT
 
 
 def _ago(delta: timedelta, moment: datetime | None = None) -> str:
@@ -105,6 +119,10 @@ def money(value: int | None) -> str:
     return f"{amount:,}".replace(",", " ") + " сум" if amount is not None else "—"
 
 
+def _text(value: Any, limit: int = 500) -> str:  # noqa: ANN401
+    return " ".join(str(value or "").split())[:limit]
+
+
 # ── Баланс ──────────────────────────────────────────────────────────
 
 
@@ -114,16 +132,16 @@ class Balance:
 
     #: Начислено по живым заказам (без отменённых и возвращённых)
     accrued: int
-    #: Из них к выплате: выданы и срок удержания прошёл
+    #: Из них к выплате: выданы, срок удержания прошёл, наличные сверены
     released: int
-    #: Выплаты в работе (готовится, подтверждена)
+    #: Выплаты в работе (создана, подтверждена)
     in_work: int
     #: Выплачено
     paid: int
 
     @property
     def on_hold(self) -> int:
-        """Начислено, но ещё держится: не выдан или срок не прошёл."""
+        """Начислено, но ещё держится: не выдан, срок не прошёл, наличные не сверены."""
         return self.accrued - self.released
 
     @property
@@ -136,29 +154,53 @@ class Balance:
         return max(0, self.free)
 
 
-def balance(seller_id: int, *, moment: datetime | None = None) -> Balance:
-    """Баланс продавца: журнал денег по его заказам и его выплаты."""
-    owed = one(
-        "select coalesce(sum(-l.amount) filter (where o.status <> all(%s)), 0) as accrued, "
-        "coalesce(sum(-l.amount) filter (where o.status = %s and o.issued_at < %s), 0) "
-        "as released "
+def balance_parts(seller: str) -> list[tuple[str, str, list[Any]]]:
+    """
+    Четыре подзапроса баланса — (имя, SQL, параметры) для продавца
+    ``seller`` (выражение SQL: «%s» или столбец внешнего запроса): одни и
+    те же условия для карточки (balance) и для списка «Балансы продавцов»
+    (одним запросом, cash_admin.py).
+    """
+    owed = (
+        "(select coalesce(sum(-l.amount) filter (where {cond}), 0) "
         "from market_ledger l join market_orders o on o.id = l.order_id "
-        "where l.account = 'seller_payable' and l.seller_id = %s",
-        [list(_NOT_OWED), orders.ISSUED, _ago(timedelta(days=hold_days()), moment), seller_id],
+        "where l.account = 'seller_payable' and l.seller_id = {seller})"
     )
-    payouts = one(
-        "select coalesce(sum(amount) filter (where status = any(%s)), 0) as in_work, "
-        "coalesce(sum(amount) filter (where status = %s), 0) as paid "
-        "from market_payouts where seller_id = %s",
-        [list(IN_WORK), PAID, seller_id],
+    payouts = (
+        "(select coalesce(sum(p.amount) filter (where {cond}), 0) "
+        "from market_payouts p where p.seller_id = {seller})"
     )
-    assert owed is not None and payouts is not None
+    released = (
+        "o.status = %s and o.issued_at < %s "
+        "and (o.payment_method <> 'cash' or o.cash_reconciled_at is not null)"
+    )
+
+    return [
+        ("accrued", owed.format(cond="o.status <> all(%s)", seller=seller), [list(_NOT_OWED)]),
+        (
+            "released",
+            owed.format(cond=released, seller=seller),
+            [orders.ISSUED, _ago(timedelta(days=hold_days()))],
+        ),
+        ("in_work", payouts.format(cond="p.status = any(%s)", seller=seller), [list(IN_WORK)]),
+        ("paid", payouts.format(cond="p.status = %s", seller=seller), [PAID]),
+    ]
+
+
+def balance(seller_id: int) -> Balance:
+    """Баланс продавца: журнал денег по его заказам и его выплаты."""
+    parts = balance_parts("%s")
+    found = one(
+        "select " + ", ".join(f"{sql} as {name}" for name, sql, _ in parts),
+        [value for _, _, params in parts for value in [*params, seller_id]],
+    )
+    assert found is not None
 
     return Balance(
-        accrued=int(owed["accrued"]),
-        released=int(owed["released"]),
-        in_work=int(payouts["in_work"]),
-        paid=int(payouts["paid"]),
+        accrued=int(found["accrued"]),
+        released=int(found["released"]),
+        in_work=int(found["in_work"]),
+        paid=int(found["paid"]),
     )
 
 
@@ -170,10 +212,18 @@ _REQUISITES = "bank_account, bank_mfo, bank_name, recipient_name, recipient_tin"
 _FIELDS: dict[str, tuple[str, re.Pattern[str]]] = {
     "bankAccount": ("bank_account", re.compile(r"[0-9]{20}")),
     "bankMfo": ("bank_mfo", re.compile(r"[0-9]{5}")),
-    "bankName": ("bank_name", re.compile(r"[^\x00-\x1f\x7f]{2,200}")),
-    "recipientName": ("recipient_name", re.compile(r"[^\x00-\x1f\x7f]{2,200}")),
+    "bankName": ("bank_name", re.compile(r".{2,200}")),
+    "recipientName": ("recipient_name", re.compile(r".{2,200}")),
     "recipientTin": ("recipient_tin", re.compile(r"[0-9]{9}|[0-9]{14}")),
 }
+
+
+def _invisible(text: str) -> bool:
+    """
+    Управляющие и невидимые символы (категории Cc и Cf: RLO, нулевой
+    ширины…) — ими подменяют, как название выглядит в админке.
+    """
+    return any(unicodedata.category(char) in ("Cc", "Cf") for char in text)
 
 
 def requisites_of(seller_id: int) -> dict[str, Any] | None:
@@ -186,33 +236,42 @@ def requisites_of(seller_id: int) -> dict[str, Any] | None:
 
 
 def _clean(field: str, value: Any) -> str:  # noqa: ANN401
-    text = " ".join(str(value or "").split())
+    raw = str(value or "")
 
     # Счёт, МФО и ИНН пишут с пробелами и дефисами — оставляем цифры
-    return (
-        re.sub(r"[\s-]", "", text) if field in ("bankAccount", "bankMfo", "recipientTin") else text
-    )
+    if field in ("bankAccount", "bankMfo", "recipientTin"):
+        return re.sub(r"[\s-]", "", raw)
+
+    # Невидимые символы не чистим, а отклоняем: так их видно в ответе
+    return raw if _invisible(raw.replace("\n", "").replace("\t", "")) else " ".join(raw.split())
 
 
-def save_requisites(
-    seller_id: int, user_id: int, data: Mapping[str, Any], *, ip: str | None = None
-) -> tuple[bool, dict[str, str]]:
-    """
-    Владелец компании сохраняет реквизиты (кабинет). Возвращает (изменились
-    ли, ошибки: поле → ключ словаря market.cash.*). Каждая смена — строка
-    истории; changed_at — время смены (от него — сутки до выплаты без
-    отдельной отметки кассы).
-    """
+def validate_requisites(data: Mapping[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
+    """Значения по столбцам и ошибки: поле API → ключ словаря market.cash.*."""
     values: dict[str, str] = {}
     errors: dict[str, str] = {}
 
     for field, (column, pattern) in _FIELDS.items():
         value = _clean(field, data.get(field))
 
-        if not pattern.fullmatch(value):
+        if _invisible(value) or not pattern.fullmatch(value):
             errors[field] = f"cash.{column}"
         else:
             values[column] = value
+
+    return values, errors
+
+
+def save_requisites(
+    seller_id: int, user_id: int, data: Mapping[str, Any], *, ip: str | None = None
+) -> tuple[bool, dict[str, str]]:
+    """
+    Владелец компании сохраняет реквизиты (кабинет; пароль проверяет
+    api.py). Возвращает (изменились ли, ошибки: поле → ключ словаря
+    market.cash.*). Каждая смена — строка истории; changed_at — время смены
+    (от него — сутки до выплаты без отдельной отметки кассы).
+    """
+    values, errors = validate_requisites(data)
 
     if errors:
         return False, errors
@@ -256,6 +315,32 @@ def save_requisites(
     return True, {}
 
 
+def notify_requisites_changed(seller_id: int, locale: str) -> None:
+    """
+    Реквизиты сменились — владельцам компании: в ленту кабинета и письмом.
+    Самих реквизитов в тексте нет — только «изменены, если это не вы —
+    напишите в поддержку». Сбой уведомления не отменяет смену.
+    """
+    from savdex.moderation.services import notify_user
+    from savdex.web import mail
+
+    title = t("cash.changed_title", locale)
+    body = t("cash.changed_body", locale)
+
+    for owner in rows(
+        "select u.id, u.email from users u join market_sellers s on s.company_id = u.company_id "
+        "where s.id = %s and u.company_role = 'owner' and u.deleted_at is null",
+        [seller_id],
+    ):
+        try:
+            notify_user(int(owner["id"]), "billing", title, "warning", "/cabinet", body)
+
+            if owner["email"]:
+                mail.send(str(owner["email"]), title, f"<p>{html.escape(body)}</p>", body)
+        except Exception:
+            log.exception("market.cash.requisites_notify_failed seller=%s", seller_id)
+
+
 def _last_log_id(seller_id: int) -> int | None:
     found = one(
         "select id from market_seller_requisites_log where seller_id = %s order by id desc limit 1",
@@ -273,14 +358,31 @@ def _need(admin: Admin, ability: str) -> None:
         raise CashRefused("Нет права на это действие в кассе.")
 
 
-def _lock(payout_id: int) -> dict[str, Any]:
+def _seller(seller_id: int) -> dict[str, Any]:
+    """Строка продавца под замком; не подтверждён (заблокирован) — отказ."""
+    seller = one("select id, status from market_sellers where id = %s for update", [seller_id])
+
+    if seller is None:
+        raise CashRefused("Продавец не найден.")
+
+    if seller["status"] != "approved":
+        raise CashRefused("Продавец не подтверждён или заблокирован — выплаты остановлены.")
+
+    return seller
+
+
+def _lock(payout_id: int, *, seller_must_be_active: bool = True) -> dict[str, Any]:
     """Строка продавца, затем строка выплаты — под замком (порядок везде один)."""
     found = one("select seller_id from market_payouts where id = %s", [payout_id])
 
     if found is None:
         raise CashRefused("Выплата не найдена.")
 
-    one("select id from market_sellers where id = %s for update", [found["seller_id"]])
+    if seller_must_be_active:
+        _seller(int(found["seller_id"]))
+    else:
+        one("select id from market_sellers where id = %s for update", [found["seller_id"]])
+
     payout = one("select * from market_payouts where id = %s for update", [payout_id])
     assert payout is not None
 
@@ -324,10 +426,7 @@ def create_payout(
         raise CashRefused("Сумма выплаты — больше нуля.")
 
     with transaction.atomic():
-        seller = one("select id from market_sellers where id = %s for update", [seller_id])
-
-        if seller is None:
-            raise CashRefused("Продавец не найден.")
+        _seller(seller_id)
 
         if requisites_of(seller_id) is None:
             raise CashRefused("У продавца нет реквизитов — выплатить некуда.")
@@ -338,11 +437,12 @@ def create_payout(
             raise CashRefused(f"Больше доступного: доступно {money(free)}.")
 
         moment = now()
+        text = _text(note) or None
         payout_id = int(
             write(
                 "insert into market_payouts (seller_id, amount, status, note, created_by, "
                 "created_at, updated_at) values (%s, %s, %s, %s, %s, %s, %s) returning id",
-                [seller_id, amount, DRAFT, (note or "")[:500] or None, admin.id, moment, moment],
+                [seller_id, amount, DRAFT, text, admin.id, moment, moment],
             )
         )
         _record(
@@ -350,7 +450,7 @@ def create_payout(
             "payout_created",
             {"id": payout_id, "seller_id": seller_id, "amount": amount},
             after={"status": DRAFT},
-            note=note,
+            note=text,
             ip=ip,
         )
 
@@ -360,12 +460,18 @@ def create_payout(
 
 
 def approve_payout(
-    admin: Admin, payout_id: int, *, fresh_ok: bool = False, ip: str | None = None
+    admin: Admin,
+    payout_id: int,
+    *,
+    fresh_ok: bool = False,
+    fresh_note: str | None = None,
+    ip: str | None = None,
 ) -> None:
     """
     Шаг 2: другой кассир подтверждает. Реквизиты сменены меньше суток назад
-    — только с fresh_ok (отметка «реквизиты сверены с продавцом»). Сумма —
-    ещё раз против доступного: с создания могла смениться настройка срока.
+    — только с fresh_ok (отметка «реквизиты сверены») и заметкой, как
+    сверили (fresh_note, в журнал действий). Сумма — ещё раз против
+    доступного: с создания могла смениться настройка срока.
     """
     _need(admin, f"{SECTION}.moderate")
 
@@ -388,10 +494,14 @@ def approve_payout(
         if fresh is None or log_id is None:
             raise CashRefused("У продавца нет реквизитов — выплатить некуда.")
 
-        if fresh["fresh"] and not fresh_ok:
+        is_fresh = bool(fresh["fresh"])
+        check_note = _text(fresh_note)
+
+        if is_fresh and (not fresh_ok or len(check_note) < MIN_NOTE):
             raise CashRefused(
                 f"Реквизиты продавца сменены меньше {FRESH_HOURS} часов назад. Сверьте их с "
-                "продавцом по известному телефону и подтвердите с отметкой «реквизиты сверены»."
+                "продавцом по известному телефону, отметьте «реквизиты сверены» и напишите, "
+                f"как сверили (не короче {MIN_NOTE} знаков)."
             )
 
         # Эта выплата уже в «в работе» — свободное не должно уйти в минус
@@ -400,9 +510,19 @@ def approve_payout(
 
         changed = write(
             "update market_payouts set status = %s, approved_by = %s, approved_at = %s, "
-            "requisites_log_id = %s, fresh_requisites = %s, updated_at = %s "
-            "where id = %s and status = %s",
-            [APPROVED, admin.id, now(), log_id, bool(fresh["fresh"]), now(), payout_id, DRAFT],
+            "requisites_log_id = %s, fresh_requisites = %s, fresh_check_note = %s, "
+            "updated_at = %s where id = %s and status = %s",
+            [
+                APPROVED,
+                admin.id,
+                now(),
+                log_id,
+                is_fresh,
+                check_note if is_fresh else None,
+                now(),
+                payout_id,
+                DRAFT,
+            ],
         )
 
         if not changed:
@@ -413,8 +533,10 @@ def approve_payout(
             "payout_approved",
             payout,
             before={"status": DRAFT},
-            after={"status": APPROVED, "fresh_requisites": bool(fresh["fresh"])},
-            note="реквизиты сменены меньше суток назад, сверены" if fresh["fresh"] else None,
+            after={"status": APPROVED, "fresh_requisites": is_fresh},
+            note=f"реквизиты сменены меньше суток назад, сверены: {check_note}"
+            if is_fresh
+            else None,
             ip=ip,
         )
 
@@ -427,16 +549,19 @@ _BANK_REF = re.compile(r"[0-9A-Za-zА-Яа-яЁё/._ -]{1,64}")
 def mark_paid(admin: Admin, payout_id: int, bank_reference: str, *, ip: str | None = None) -> str:
     """
     Деньги ушли платёжкой: approved → paid и группа журнала денег —
-    ровно один раз. Возвращает номер группы журнала.
+    ровно один раз. Номер платёжки — один на выплату. Возвращает номер
+    группы журнала.
     """
     _need(admin, f"{SECTION}.moderate")
-    reference = " ".join(str(bank_reference or "").split())
+    reference = _text(bank_reference, 200)
 
     if not _BANK_REF.fullmatch(reference):
         raise CashRefused("Укажите номер платёжного поручения (до 64 знаков).")
 
     with transaction.atomic():
-        payout = _lock(payout_id)
+        # Выплата, подтверждённая до блокировки продавца, ещё может уйти:
+        # платёжка могла быть уже в банке
+        payout = _lock(payout_id, seller_must_be_active=False)
 
         if payout["status"] != APPROVED:
             raise CashRefused("Выплата не подтверждена или уже отмечена.")
@@ -449,6 +574,13 @@ def mark_paid(admin: Admin, payout_id: int, bank_reference: str, *, ip: str | No
                 "создайте заново."
             )
 
+        # Пока выплата ждала перевода, заказ могли вернуть — доступное не в минус
+        if balance(seller_id).free < 0:
+            raise CashRefused("Сумма больше доступного — отмените выплату и создайте новую.")
+
+        if one("select id from market_payouts where bank_reference = %s", [reference]):
+            raise CashRefused("Платёжка с таким номером уже отмечена в другой выплате.")
+
         amount = int(payout["amount"])
         memo = f"выплата №{payout_id}: {reference}"[:200]
         group = orders.post(
@@ -458,12 +590,18 @@ def mark_paid(admin: Admin, payout_id: int, bank_reference: str, *, ip: str | No
                 orders.Entry("payout_clearing", -amount, seller_id=seller_id, memo=memo),
             ],
         )
-        changed = write(
-            "update market_payouts set status = %s, paid_by = %s, paid_at = %s, "
-            "bank_reference = %s, ledger_group = %s::uuid, updated_at = %s "
-            "where id = %s and status = %s",
-            [PAID, admin.id, now(), reference, group, now(), payout_id, APPROVED],
-        )
+
+        try:
+            with transaction.atomic():
+                changed = write(
+                    "update market_payouts set status = %s, paid_by = %s, paid_at = %s, "
+                    "bank_reference = %s, ledger_group = %s::uuid, updated_at = %s "
+                    "where id = %s and status = %s",
+                    [PAID, admin.id, now(), reference, group, now(), payout_id, APPROVED],
+                )
+        except IntegrityError as error:
+            # Тот же номер платёжки успела отметить другая выплата — откат всего
+            raise CashRefused("Платёжка с таким номером уже отмечена в другой выплате.") from error
 
         if not changed:
             # Под замком статус не мог смениться — ошибка в коде; откат проводки
@@ -483,70 +621,205 @@ def mark_paid(admin: Admin, payout_id: int, bank_reference: str, *, ip: str | No
     return group
 
 
-def cancel_payout(admin: Admin, payout_id: int, reason: str, *, ip: str | None = None) -> None:
-    """Отменить выплату до перевода (готовится или подтверждена)."""
+def cancel_payout(
+    admin: Admin,
+    payout_id: int,
+    reason: str,
+    *,
+    not_sent: bool = False,
+    ip: str | None = None,
+) -> None:
+    """
+    Отменить выплату до перевода. Созданную — любой кассир с правом
+    market_cash.edit. Подтверждённую — только тот, кто подтверждал (или
+    суперадмин), с отметкой «платёжка в банк не отправлялась» (not_sent):
+    отменённую выплату можно создать заново, и если платёжка уже ушла —
+    продавец получил бы деньги дважды.
+    """
     _need(admin, f"{SECTION}.edit")
-    text = " ".join(str(reason or "").split())[:500]
+    text = _text(reason)
 
     if len(text) < 5:
         raise CashRefused("Напишите причину отмены — не короче 5 знаков.")
 
     with transaction.atomic():
-        payout = _lock(payout_id)
+        payout = _lock(payout_id, seller_must_be_active=False)
 
         if payout["status"] not in IN_WORK:
             raise CashRefused("Выплату уже нельзя отменить.")
 
+        if payout["status"] == APPROVED:
+            if int(payout["approved_by"]) != admin.id and not admin.is_superadmin:
+                raise CashRefused("Подтверждённую выплату отменяет только тот, кто её подтвердил.")
+
+            if not not_sent:
+                raise CashRefused(
+                    "Отметьте, что платёжка в банк не отправлялась: иначе продавец получит "
+                    "деньги дважды. Ушла — отметьте выплату выплаченной."
+                )
+
         write(
             "update market_payouts set status = %s, cancelled_by = %s, cancelled_at = %s, "
-            "cancel_reason = %s, updated_at = %s where id = %s and status = %s",
-            [CANCELLED, admin.id, now(), text, now(), payout_id, payout["status"]],
+            "cancel_reason = %s, cancel_not_sent = %s, updated_at = %s "
+            "where id = %s and status = %s",
+            [
+                CANCELLED,
+                admin.id,
+                now(),
+                text,
+                payout["status"] == APPROVED,
+                now(),
+                payout_id,
+                payout["status"],
+            ],
         )
         _record(
             admin,
             "payout_cancelled",
             payout,
             before={"status": payout["status"]},
-            after={"status": CANCELLED},
+            after={"status": CANCELLED, "not_sent": payout["status"] == APPROVED},
             note=text,
             ip=ip,
         )
 
 
+# ── Сверка наличных с отчётом BTS ───────────────────────────────────
+
+
+def reconcile_cash(
+    admin: Admin, order_ids: Iterable[int], *, note: str | None = None, ip: str | None = None
+) -> int:
+    """
+    Касса сверила наличные выданных заказов «при получении» с отчётом BTS:
+    ставит ``cash_reconciled_at`` — с этого момента деньги заказа идут
+    продавцу «к выплате». Каждый заказ — условно (ещё не сверен) и строкой
+    журнала действий. Возвращает, сколько отмечено.
+    """
+    _need(admin, f"{SECTION}.moderate")
+    text = _text(note) or None
+    done = 0
+
+    with transaction.atomic():
+        for order_id in sorted({int(pk) for pk in order_ids}):
+            found = write(
+                "update market_orders set cash_reconciled_at = %s, cash_reconciled_by = %s "
+                "where id = %s and payment_method = 'cash' and status = %s "
+                "and cash_reconciled_at is null returning number",
+                [now(), admin.id, order_id, orders.ISSUED],
+            )
+
+            if found is None:
+                continue
+
+            done += 1
+            total = one("select total from market_orders where id = %s", [order_id])
+            audit.record(
+                connection,
+                action="cash_reconciled",
+                section=SECTION,
+                actor=admin,
+                subject_type="Savdex\\Market\\Order",
+                subject_id=order_id,
+                subject_label=str(found),
+                changes={"after": {"amount": total["total"] if total else None}},
+                note=text,
+                ip=ip,
+            )
+
+    return done
+
+
 # ── Ручной возврат ──────────────────────────────────────────────────
 
+_REFUND_REF = re.compile(r"[0-9A-Za-z/._:-]{3,64}")
 
-def mark_refunded(admin: Admin, order_id: int, note: str, *, ip: str | None = None) -> bool:
+
+def claim_refund(admin: Admin, order_id: int, *, ip: str | None = None) -> bool:
     """
-    Касса вернула деньги в кабинете провайдера (Click без API возврата,
-    Uzum или Payme, если отмена не пришла колбэком) и отмечает это:
-    payments.base.refund_payment — оплата paid → refunded и заказ
-    refund_pending → refunded ровно один раз. False — заказ не ждёт
-    возврата или оплату уже вернули.
+    «Возвращаю вручную»: касса берёт возврат на себя, пока расписание его
+    не запросило (refund_requested_at — условным обновлением). После этого
+    API провайдера возврат уже не запросит — двух возвратов не будет.
+    False — уже запрошен (расписанием или другим кассиром).
     """
     from savdex.market.payments import base
 
     _need(admin, f"{SECTION}.moderate")
-    text = " ".join(str(note or "").split())[:400]
+
+    with transaction.atomic():
+        order = base.order_by_id(order_id, lock=True)
+
+        if order is None or order["status"] != orders.REFUND_PENDING:
+            raise CashRefused("Заказ не ждёт возврата.")
+
+        claimed = write(
+            "update market_payments set refund_requested_at = %s, note = %s, updated_at = %s "
+            "where order_id = %s and status = %s and refund_requested_at is null",
+            [now(), f"возврат вручную берёт касса: {admin.name}"[:500], now(), order_id, base.PAID],
+        )
+
+        if claimed:
+            audit.record(
+                connection,
+                action="refund_claimed",
+                section=SECTION,
+                actor=admin,
+                subject_type="Savdex\\Market\\Order",
+                subject_id=order_id,
+                subject_label=str(order["number"]),
+                ip=ip,
+            )
+
+    return bool(claimed)
+
+
+def mark_refunded(
+    admin: Admin, order_id: int, refund_reference: str, note: str, *, ip: str | None = None
+) -> bool:
+    """
+    Касса вернула деньги в кабинете провайдера и отмечает это: только по
+    оплате, возврат по которой уже запрошен (refund_requested_at: итог
+    расписания manual или error, либо касса взяла возврат на себя —
+    claim_refund), и с номером возврата у провайдера.
+    payments.base.refund_payment (оплата paid → refunded, заказ
+    refund_pending → refunded, проводка — один раз) и строка журнала
+    действий — одной транзакцией. False — заказ уже не ждёт возврата.
+    """
+    from savdex.market.payments import base
+
+    _need(admin, f"{SECTION}.moderate")
+    reference = _text(refund_reference, 100)
+    text = _text(note, 400)
+
+    if not _REFUND_REF.fullmatch(reference):
+        raise CashRefused("Укажите номер возврата у провайдера (латиница, цифры, до 64 знаков).")
 
     if len(text) < 5:
         raise CashRefused("Напишите, где и когда вернули деньги — не короче 5 знаков.")
 
-    found = one(
-        "select id from market_payments where order_id = %s and status = %s "
-        "order by id desc limit 1",
-        [order_id, base.PAID],
-    )
-    payment = base.payment(int(found["id"])) if found else None
+    with transaction.atomic():
+        order = base.order_by_id(order_id, lock=True)
+        found = one(
+            "select id from market_payments where order_id = %s and status = %s "
+            "order by id desc limit 1",
+            [order_id, base.PAID],
+        )
+        payment = base.payment(int(found["id"]), lock=True) if found else None
 
-    if payment is None:
-        raise CashRefused("У заказа нет проведённой оплаты картой.")
+        if order is None or payment is None:
+            raise CashRefused("У заказа нет проведённой оплаты картой.")
 
-    done = base.refund_payment(payment, note=f"возврат отмечен кассой: {text}")
+        if payment["refund_requested_at"] is None:
+            raise CashRefused(
+                "Возврат ещё не запрошен: сначала «Возвращаю вручную» — иначе расписание "
+                "вернёт деньги через API провайдера второй раз."
+            )
 
-    if done:
-        order = one("select id, number, total from market_orders where id = %s", [order_id])
-        assert order is not None
+        if not base.refund_payment(
+            payment, note=f"возврат отмечен кассой: {reference}; {text}"[:500]
+        ):
+            return False
+
         audit.record(
             connection,
             action="refund_marked",
@@ -561,13 +834,57 @@ def mark_refunded(admin: Admin, order_id: int, note: str, *, ip: str | None = No
                     "status": orders.REFUNDED,
                     "amount": order["total"],
                     "provider": payment["provider"],
+                    "refund_reference": reference,
                 },
             },
             note=text,
             ip=ip,
         )
 
-    return done
+    return True
+
+
+def acknowledge_refund(admin: Admin, order_id: int, note: str, *, ip: str | None = None) -> bool:
+    """
+    «Проверено у провайдера»: зависший возврат разобран (payments.base.acknowledge
+    — сверка больше не считает его расхождением) — и строка журнала
+    действий, одной транзакцией. False — уже отмечено или оплаты нет.
+    """
+    from savdex.market.payments import base
+
+    _need(admin, f"{SECTION}.moderate")
+    text = _text(note)
+
+    if len(text) < 5:
+        raise CashRefused("Напишите, что проверили у провайдера — не короче 5 знаков.")
+
+    found = one(
+        "select id from market_payments where order_id = %s and status = %s "
+        "order by id desc limit 1",
+        [order_id, base.PAID],
+    )
+
+    if found is None:
+        return False
+
+    with transaction.atomic():
+        if not base.acknowledge(int(found["id"]), admin.id, text):
+            return False
+
+        order = one("select number from market_orders where id = %s", [order_id])
+        audit.record(
+            connection,
+            action="refund_checked",
+            section=SECTION,
+            actor=admin,
+            subject_type="Savdex\\Market\\Order",
+            subject_id=order_id,
+            subject_label=str(order["number"]) if order else None,
+            note=text,
+            ip=ip,
+        )
+
+    return True
 
 
 # ── Кабинет продавца ────────────────────────────────────────────────
@@ -621,3 +938,8 @@ def requisites_view(seller_id: int) -> dict[str, Any] | None:
         **{field: found[column] for field, (column, _) in _FIELDS.items()},
         "changedAt": _when(found["changed_at"]),
     }
+
+
+def masked(account: str | None) -> str:
+    """Счёт в списках админки: только последние 4 цифры."""
+    return f"•••• {str(account)[-4:]}" if account else "—"

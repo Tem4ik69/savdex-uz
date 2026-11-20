@@ -624,6 +624,15 @@ def checkout(user_id: int, data: Mapping[str, Any]) -> str:
         if not lines:
             raise OrderRefused("order.cart_empty", 422)
 
+        # У своей компании не покупают: сотрудник продавца накрутил бы
+        # продажи и вывел деньги выплатой (docs/marketplace-security.md, раздел 3)
+        if one(
+            "select 1 as x from users u join market_sellers s on s.company_id = u.company_id "
+            "where u.id = %s and s.id = any(%s) limit 1",
+            [user_id, sorted({int(line["seller_id"]) for line in lines})],
+        ):
+            raise OrderRefused("order.own_company", 422)
+
         # После блокировки корзины: параллельное оформление того же
         # покупателя уже закончилось, его заказ здесь виден. В лимите — и
         # отменённые самим покупателем за последние сутки: цикл «оформить —

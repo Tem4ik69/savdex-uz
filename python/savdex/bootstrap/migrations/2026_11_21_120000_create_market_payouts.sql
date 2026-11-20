@@ -32,8 +32,9 @@ create table market_seller_requisites (
         check (recipient_tin ~ '^([0-9]{9}|[0-9]{14})$')
 );
 
--- История реквизитов — только дописывается (как журнал денег): по ней
--- разбирают, куда ушла выплата, и видят подмену счёта.
+-- История реквизитов — только дописывается (как журнал денег, построчным
+-- триггером на update и delete): по ней разбирают, куда ушла выплата, и
+-- видят подмену счёта.
 create table market_seller_requisites_log (
     id bigserial primary key,
     seller_id bigint not null references market_sellers (id) on delete restrict,
@@ -54,10 +55,6 @@ create trigger market_seller_requisites_log_append_only
     before update or delete on market_seller_requisites_log
     for each row execute function market_append_only();
 
-create trigger market_seller_requisites_log_no_truncate
-    before truncate on market_seller_requisites_log
-    for each statement execute function market_append_only();
-
 -- ── Выплаты продавцам ──────────────────────────────────────────────
 -- status: draft — создана кассиром; approved — подтвердил другой кассир
 -- (approved_by <> created_by — держит и база); paid — деньги ушли
@@ -66,7 +63,9 @@ create trigger market_seller_requisites_log_no_truncate
 -- requisites_log_id — реквизиты, на которые подтвердили выплату (строка
 -- истории): сменились после подтверждения — выплату не отмечают, а
 -- отменяют и создают заново. fresh_requisites — подтверждена на реквизиты,
--- сменённые меньше суток назад (повторное подтверждение).
+-- сменённые меньше суток назад (повторное подтверждение), fresh_check_note
+-- — как их сверили. cancel_not_sent — отменяя подтверждённую, сотрудник
+-- отметил, что платёжка в банк не отправлялась.
 create table market_payouts (
     id bigserial primary key,
     seller_id bigint not null references market_sellers (id) on delete restrict,
@@ -79,9 +78,11 @@ create table market_payouts (
     cancelled_by bigint references users (id) on delete restrict,
     requisites_log_id bigint references market_seller_requisites_log (id) on delete restrict,
     fresh_requisites boolean not null default false,
+    fresh_check_note varchar(500),
     bank_reference varchar(64),
     ledger_group uuid,
     cancel_reason varchar(500),
+    cancel_not_sent boolean not null default false,
     created_at timestamp(0) without time zone not null default (now() at time zone 'utc'),
     updated_at timestamp(0) without time zone not null default (now() at time zone 'utc'),
     approved_at timestamp(0) without time zone,
@@ -105,18 +106,60 @@ create table market_payouts (
     constraint market_payouts_ledger_group_unique unique (ledger_group)
 );
 
+-- Одна платёжка — одна выплата: тот же номер второй раз не отметить
+create unique index market_payouts_bank_reference_unique on market_payouts (bank_reference)
+    where bank_reference is not null;
 create index market_payouts_seller_index on market_payouts (seller_id, status);
 create index market_payouts_status_index on market_payouts (status, created_at desc);
+
+-- Выплата не переписывается задним числом, даже владельцем базы: продавец,
+-- сумма и автор — только при создании; из «выплачено» и «отменена» не
+-- выходят, у выплаченной не меняются платёжка и группа журнала
+create or replace function market_payouts_guard() returns trigger
+language plpgsql as $$
+begin
+    if new.seller_id <> old.seller_id or new.amount <> old.amount
+        or new.created_by <> old.created_by
+    then
+        raise exception 'market_payouts %: продавец, сумма и автор не меняются', old.id
+            using errcode = 'insufficient_privilege';
+    end if;
+
+    if old.status in ('paid', 'cancelled') and (
+        new.status <> old.status
+        or new.bank_reference is distinct from old.bank_reference
+        or new.ledger_group is distinct from old.ledger_group
+    ) then
+        raise exception 'market_payouts %: выплата уже закрыта (%)', old.id, old.status
+            using errcode = 'insufficient_privilege';
+    end if;
+
+    return new;
+end $$;
+
+create trigger market_payouts_guard
+    before update on market_payouts
+    for each row execute function market_payouts_guard();
+
+-- ── Наличные: сверка с отчётом BTS ─────────────────────────────────
+-- Заказ «при получении» попадает продавцу «к выплате» только после
+-- отметки кассы «сверено с отчётом BTS»: пока деньги не пришли от пункта
+-- выдачи, выплачивать их рано.
+alter table market_orders add column cash_reconciled_at timestamp(0) without time zone;
+alter table market_orders add column cash_reconciled_by bigint
+    references users (id) on delete restrict;
 
 -- ── Журнал денег: счёт выплат ──────────────────────────────────────
 -- payout_clearing — деньги, ушедшие продавцам платёжкой с нашего счёта:
 -- выплата — seller_payable плюс (долг продавцу закрыт), payout_clearing
 -- минус. Список счетов — savdex/market/orders.py, ACCOUNTS.
+-- not valid + validate: проверка старых строк — без замка на запись
 alter table market_ledger drop constraint market_ledger_account_check;
 alter table market_ledger add constraint market_ledger_account_check check (account in (
         'buyer_receivable', 'gateway_clearing', 'cash_collected', 'seller_payable',
         'commission_revenue', 'refund_payable', 'delivery_revenue', 'payout_clearing'
-    ));
+    )) not valid;
+alter table market_ledger validate constraint market_ledger_account_check;
 
 -- ── Права роли Django ──────────────────────────────────────────────
 -- Реквизиты и выплаты — читать, заводить, менять; удалять — нет. История
