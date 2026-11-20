@@ -753,15 +753,28 @@ def add_image(
     path = images.write(binary, "market/products")
     thumb_path = images.write(thumb, "market/products/thumbs")
 
-    if needs_review(seller):
-        _to_draft(product_id)
+    # Предел — под блокировкой строки товара: параллельные загрузки иначе
+    # проходят проверку выше вместе и добавляют фото сверх MAX_IMAGES
+    with transaction.atomic():
+        one("select id from market_products where id = %s for update", [product_id])
+        count = one(
+            "select count(*) as n from market_product_images where product_id = %s", [product_id]
+        )
 
-    write(
-        "insert into market_product_images (product_id, variant_id, path, thumb_path, sort) "
-        "values (%s, %s, %s, %s, (select coalesce(max(sort), -1) + 1 "
-        "from market_product_images where product_id = %s))",
-        [product_id, variant_id, path, thumb_path, product_id],
-    )
+        if count is not None and int(count["n"]) >= MAX_IMAGES:
+            images.delete(path, thumb_path)
+
+            return None, "product.images_limit"
+
+        if needs_review(seller):
+            _to_draft(product_id)
+
+        write(
+            "insert into market_product_images (product_id, variant_id, path, thumb_path, sort) "
+            "values (%s, %s, %s, %s, (select coalesce(max(sort), -1) + 1 "
+            "from market_product_images where product_id = %s))",
+            [product_id, variant_id, path, thumb_path, product_id],
+        )
 
     # Фото — часть содержания: решение модератора — по увиденной версии
     write("update market_products set updated_at = %s where id = %s", [now(), product_id])

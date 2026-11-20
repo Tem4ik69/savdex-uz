@@ -77,6 +77,12 @@ def checks(user: dict[str, Any], company: dict[str, Any] | None) -> dict[str, bo
     }
 
 
+def _oneid_enabled() -> bool:
+    from savdex.market import oneid  # oneid импортирует sellers
+
+    return oneid.enabled()
+
+
 def state(user: dict[str, Any], company: dict[str, Any] | None) -> dict[str, Any]:
     """Для кабинета: статус заявки, причина отказа и что ещё нужно сделать."""
     seller = of_company(company["id"]) if company is not None else None
@@ -89,6 +95,9 @@ def state(user: dict[str, Any], company: dict[str, Any] | None) -> dict[str, Any
         "checks": need,
         "canApply": all(need.values()) and status in (None, "rejected"),
         "offerVersion": OFFER_VERSION,
+        # Кнопка «Подтвердить через OneID» — только когда он подключён
+        "oneid": _oneid_enabled(),
+        "verifiedVia": seller["verified_via"] if seller is not None else None,
     }
 
 

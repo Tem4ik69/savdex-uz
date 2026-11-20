@@ -24,8 +24,9 @@ from typing import Any
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
 from savdex.market import banners as market_banners
-from savdex.market import cart, catalog, products, sellers
+from savdex.market import cart, catalog, oneid, products, sellers
 from savdex.market.common import t
+from savdex.web import session
 from savdex.web.actions import form
 from savdex.web.cabinet import _authenticate, company_of
 from savdex.web.forms import action, input_of
@@ -335,6 +336,53 @@ def seller_apply(request: HttpRequest) -> HttpResponse:
         return _message(ctx, key, 422)
 
     return _json({"message": t(key, ctx.locale), "seller": sellers.state(user, company)})
+
+
+@form()
+def oneid_start(request: HttpRequest) -> HttpResponse:
+    """
+    POST {offer: true}: подтверждение продавца через OneID — ответ
+    {redirect: адрес OneID}; state — в сессии (savdex/market/oneid.py).
+    """
+    ctx = action(
+        request, auth=False, throttle=10, throttle_minutes=60, throttle_prefix="market-oneid"
+    )
+    user = ctx.user
+
+    if user is None:
+        return _guest(ctx)
+
+    cfg = oneid.config()
+    started = session.start(request)
+
+    if cfg is None or started is None:
+        return _message(ctx, "oneid.off", 409)
+
+    if input_of(request).get("offer") not in (True, 1, "1", "true", "on", "yes"):
+        return _json(
+            {
+                "message": t("seller.need_offer", ctx.locale),
+                "errors": {"offer": [t("seller.need_offer", ctx.locale)]},
+            },
+            422,
+        )
+
+    company = company_of(ctx)
+    need = sellers.checks(user, company)
+
+    for key in ("company", "owner", "tin"):
+        if not need[key]:
+            return _message(ctx, f"seller.need_{key}", 422)
+
+    assert company is not None
+    seller = sellers.of_company(company["id"])
+
+    if seller is not None and seller["status"] == "blocked":
+        return _message(ctx, "seller.blocked", 422)
+
+    state = oneid.issue_state(started[0], int(user["id"]), int(company["id"]))
+
+    return _json({"redirect": oneid.authorize_url(cfg, state)})
 
 
 # ── «Мои товары» (кабинет продавца) ─────────────────────────────────

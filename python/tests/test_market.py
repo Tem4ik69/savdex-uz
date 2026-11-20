@@ -1160,6 +1160,53 @@ def test_фото_товара(сайт, витрина):
 
 
 @нужна_база
+def test_фото_не_больше_предела(сайт, витрина):
+    """Одиннадцатое фото — 422, файлы на диске не остаются; не картинка — 422."""
+    from pathlib import Path
+
+    from savdex.market.products import MAX_IMAGES
+
+    from .pg_admin import КОРЕНЬ
+    from .test_web_company_profile_actions import multipart, картинка
+
+    компания = _компания("Foto Limit", "foto-limit")
+    владелец = _человек("owner@foto-limit.uz", компания)
+    товар, _ = _товар(
+        _продавец(компания), "textile", "Ковёр", "kovyor", status="draft", price=500_000
+    )
+    for номер in range(MAX_IMAGES):
+        sql(
+            "insert into market_product_images (product_id, path, thumb_path, sort) "
+            "values (%s, %s, %s, %s)",
+            [
+                товар,
+                f"market/products/x{номер}.webp",
+                f"market/products/thumbs/x{номер}.webp",
+                номер,
+            ],
+        )
+    диск = Path(КОРЕНЬ) / "storage/app/public/market/products"
+    было = set(диск.rglob("*.webp")) if диск.exists() else set()
+
+    тело, тип = multipart({"file": ("photo.png", картинка(800, 800))})
+    ответ = отправить(
+        сайт,
+        f"/market/api/me/products/{товар}/images",
+        lambda: None,
+        uid=владелец,
+        body=тело,
+        content_type=тип,
+        headers={**JSON, "X-XSRF-TOKEN": xsrf()},
+    )["ответ"]
+
+    assert ответ["status"] == 422, ответ["body"]
+    assert sql("select count(*) from market_product_images where product_id = %s", [товар]) == [
+        (MAX_IMAGES,)
+    ]
+    assert (set(диск.rglob("*.webp")) if диск.exists() else set()) == было
+
+
+@нужна_база
 def test_характеристика_да_нет(сайт, витрина):
     """Тип bool: значение '1' / '0', в карточке — «Да» / «Нет», фильтр attr.<код>=1."""
     наушники = _категория("headphones")
