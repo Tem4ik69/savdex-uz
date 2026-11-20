@@ -18,7 +18,7 @@ from collections.abc import Callable
 
 from django.http import HttpRequest, HttpResponse
 
-FRAME_ANCESTORS = "frame-ancestors 'self'"
+FRAME_ANCESTORS = "frame-ancestors 'self'; object-src 'none'; base-uri 'self'"
 PERMISSIONS = "camera=(), microphone=(), payment=(), usb=(), geolocation=(self)"
 
 

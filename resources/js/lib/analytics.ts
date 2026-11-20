@@ -35,7 +35,8 @@ export function track(name: string, params: Params = {}): void {
 const PRIVATE_PATH = /^\/(?:(?:uz|en|zh|tr)\/)?(?:reset-password\/|verify-email\/[^/]+\/|card\/|unsubscribe\/)/;
 
 /** Параметры адреса, которые в аналитику не уходят: токены, подписи, почта, телефон. */
-const SECRET_PARAMS = ['token', 'email', 'signature', 'expires', 'code', 'phone', 'hash'];
+// q — текст поиска: в аналитику уходит только факт поиска, не запрос
+const SECRET_PARAMS = ['token', 'email', 'signature', 'expires', 'code', 'phone', 'hash', 'q'];
 
 /** Адрес страницы для аналитики — без секретных параметров. */
 export function safeLocation(href: string): string {
