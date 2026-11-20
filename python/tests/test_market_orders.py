@@ -22,7 +22,8 @@ docs/marketplace-security.md, разделы 1, 3 и 5.
 - пользователя с заказами админка навсегда не удаляет — понятный отказ;
 - в лимите — и отменённые самим покупателем за сутки;
 - сотрудник (market_orders.moderate) ведёт заказ до выдачи и отменяет
-  заказ при получении до отгрузки; поддержке — 403.
+  заказ до отгрузки (оплаченный картой — к возврату); поддержке — 403;
+- выдача списывает остаток и резерв ровно один раз, продажи растут.
 
 Нужен PostgreSQL (SAVDEX_PARITY_PG_URL).
 """
@@ -949,3 +950,133 @@ def test_сборка_не_истекает_и_отмена_сотруднико
         in (_шаг(администратор, _id(отменяемый), "cancel:cash_on_pickup")["body"])
     )
     assert _резерв(вариант) == 1
+
+
+def test_неудачный_шаг_заказа_предупреждение(monkeypatch):
+    """Шаг не прошёл (статус уже сменили, остатка не хватило) — DecisionRefused, не «готово»."""
+    import contextlib
+    from types import SimpleNamespace
+
+    from savdex.adminsite import site
+    from savdex.market import admin as market_admin
+    from savdex.market.models import Order
+
+    раздел = site._registry[Order]
+    заказ: Any = SimpleNamespace(pk=1, number="ABCDEFGH23")
+    monkeypatch.setattr(market_admin.transaction, "atomic", contextlib.nullcontext)
+    monkeypatch.setattr(market_admin, "_admin_of", lambda request: SimpleNamespace(id=1))
+    monkeypatch.setattr(market_admin.orders, "advance", lambda *a, **k: False)
+    monkeypatch.setattr(market_admin.orders, "staff_cancel", lambda *a, **k: None)
+
+    for решение in ("to:assembling:in_transit", "cancel:paid"):
+        with pytest.raises(market_admin.DecisionRefused, match="уже изменился"):
+            раздел.decide(object(), заказ, решение, "", None)
+
+    def нехватка(*a: Any, **k: Any) -> bool:
+        raise orders.WriteOffError("нет остатка")
+
+    monkeypatch.setattr(market_admin.orders, "advance", нехватка)
+
+    with pytest.raises(market_admin.DecisionRefused, match="не выдан"):
+        раздел.decide(object(), заказ, "to:ready:issued", "", None)
+
+
+@нужна_база
+def test_выдача_списывает_остаток_один_раз(сайт, магазин):
+    товар, вариант = _товар(
+        магазин["продавец"], "toys", "Машинка на пульте", "rc-car", price=70_000, stock=10
+    )
+    администратор = _сотрудник("admin")
+    покупатель = _покупатель()
+    _в_корзину(покупатель, вариант, 3)
+    number = _json(_оформить(сайт, покупатель, 210_000))["order"]["number"]
+    pk = _id(number)
+    assert sql("select stock, reserved from market_product_variants where id = %s", [вариант]) == [
+        (10, 3)
+    ]
+    assert _сводка(товар) == 7
+
+    for before, after in (
+        ("cash_on_pickup", "assembling"),
+        ("assembling", "in_transit"),
+        ("in_transit", "ready"),
+    ):
+        assert _шаг(администратор, pk, f"to:{before}:{after}")["status"] == 302
+
+    # До выдачи остаток не тронут — только резерв
+    assert sql("select stock, reserved from market_product_variants where id = %s", [вариант]) == [
+        (10, 3)
+    ]
+
+    assert _шаг(администратор, pk, "to:ready:issued")["status"] == 302
+    assert _статус(number) == "issued"
+    assert sql("select stock, reserved from market_product_variants where id = %s", [вариант]) == [
+        (7, 0)
+    ]
+    assert sql("select sold_count from market_products where id = %s", [товар]) == [(3,)]
+    assert _сводка(товар) == 7
+    assert sql(
+        "select stock_written_off_at is not null, reserve_released_at is null "
+        "from market_orders where id = %s",
+        [pk],
+    ) == [(True, True)]
+
+    # Повтор шага — предупреждение, второй раз не списывает
+    повтор = _шаг(администратор, pk, "to:ready:issued")
+    assert 'class="warning"' in повтор["body"]
+    assert "Это решение уже недоступно" in повтор["body"]
+    # Резерв у выданного не снимается: его уже нет
+    assert _python(f"from savdex.market import orders; print(orders.release_reserve({pk}))") == (
+        "False"
+    )
+    assert sql("select stock, reserved from market_product_variants where id = %s", [вариант]) == [
+        (7, 0)
+    ]
+    assert sql("select sold_count from market_products where id = %s", [товар]) == [(3,)]
+
+
+@нужна_база
+def test_сотрудник_отменяет_оплаченный_картой(сайт, магазин):
+    _, вариант = _товар(
+        магазин["продавец"], "toys", "Набор красок", "paints", price=40_000, stock=10
+    )
+    администратор = _сотрудник("admin")
+    покупатель = _покупатель()
+    номера = []
+
+    for _ in range(2):
+        _в_корзину(покупатель, вариант)
+        number = _json(_оформить(сайт, покупатель, 40_000, method="card"))["order"]["number"]
+        pk = _id(number)
+        assert _python(
+            f"from savdex.market import orders; print(orders.mark_paid({pk}, 4000000))"
+        ) == ("True")
+        номера.append(number)
+
+    assert _резерв(вариант) == 2
+    оплачен, собирается = номера
+    assert _шаг(администратор, _id(собирается), "to:paid:assembling")["status"] == 302
+
+    _, карточка = django(
+        администратор, ("get", f"/py/admin/market/order/{_id(оплачен)}/change/", None)
+    )
+    assert "Отменить заказ (деньги — к возврату)" in карточка["body"]
+
+    for number, before in ((оплачен, "paid"), (собирается, "assembling")):
+        шаг = _шаг(администратор, _id(number), f"cancel:{before}", "нет в наличии у продавца")
+        assert шаг["status"] == 302
+        assert _статус(number) == "refund_pending"
+        assert журнал("cancelled")["changes"]["after"] == {"status": "refund_pending"}
+        # Обратная проводка — как у отмены покупателем: долг покупателю
+        assert sql(
+            "select account, sum(amount) from market_ledger where order_id = %s "
+            "group by account order by account",
+            [_id(number)],
+        ) == [
+            ("commission_revenue", 0),
+            ("gateway_clearing", 4_000_000),
+            ("refund_payable", -4_000_000),
+            ("seller_payable", 0),
+        ]
+
+    assert _резерв(вариант) == 0
