@@ -15,14 +15,18 @@ badge 'hit' | 'new' | 'sale' | null, у товара specs — пары
 
 from __future__ import annotations
 
+import logging
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from savdex import laravel_cache
 from savdex.market.common import localized, one, rows, som, t, tiyin, write
 from savdex.web.shared import public_url
+
+log = logging.getLogger(__name__)
 
 #: Карточек на странице каталога
 PER_PAGE = 24
@@ -719,8 +723,28 @@ def product(slug: str, locale: str, user_id: int | None = None) -> dict[str, Any
     }
 
 
-def seen(product_id: int) -> None:
-    """Просмотр карточки — для сортировки «Популярные»."""
+def seen(product_id: int, visitor: str | None) -> None:
+    """
+    Просмотр карточки — для сортировки «Популярные». Один посетитель
+    (вошедший — по номеру, гость — по адресу) засчитывается товару не чаще
+    раза в сутки: иначе обновлением страницы товар накручивался бы в
+    «Популярные». Пометка «уже посчитан» — в файловом кэше, как у
+    статистики объявлений (web/catalog.without_recent).
+    """
+    if visitor is not None:
+        day = datetime.now(UTC).strftime("%Y-%m-%d")
+
+        try:
+            first = laravel_cache.add(f"market:seen:{day}:{product_id}:{visitor}", True, 86400)
+        except OSError:
+            # Кэш недоступен — карточка открывается, просмотр не считается
+            log.exception("Просмотр товара %s не засчитан: кэш недоступен", product_id)
+
+            return
+
+        if not first:
+            return
+
     write("update market_products set views_count = views_count + 1 where id = %s", [product_id])
 
 
