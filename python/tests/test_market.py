@@ -181,6 +181,13 @@ def _версия(table: str, pk: int) -> str:
     Версия записи для решения модератора, как в форме решения: updated_at;
     у заявки продавца — ещё число и время документов компании.
     """
+    if table == "market_products":
+        from savdex.market.products import VERSION_SQL
+
+        [(отпечаток,)] = sql(VERSION_SQL, [pk])
+
+        return str(отпечаток)
+
     [(версия,)] = sql(
         f"select to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS') from {table} where id = %s", [pk]
     )
@@ -839,21 +846,21 @@ def test_решение_по_той_версии_что_видел_модера�
     sql("update market_products set updated_at = '2026-11-01 10:00:00' where id = %s", [товар])
     адрес_товара = f"/py/admin/market/product/{товар}/"
 
+    увиденная = _версия("market_products", товар)
+    assert увиденная.startswith("2026-11-01 10:00:00|")
     _, карточка = django(модератор, ("get", адрес_товара + "change/", None))
-    assert 'name="version" value="2026-11-01 10:00:00"' in карточка["body"]
+    assert f'name="version" value="{увиденная}"' in карточка["body"]
 
-    # Продавец поменял товар, пока модератор смотрел старую версию
-    sql(
-        "update market_products set title = 'Подменённая скатерть', "
-        "updated_at = '2026-11-01 10:05:00' where id = %s",
-        [товар],
-    )
+    # Продавец поменял товар в ту же секунду — время то же, отпечаток другой
+    sql("update market_products set title = 'Подменённая скатерть' where id = %s", [товар])
+    assert _версия("market_products", товар) != увиденная
+    assert _версия("market_products", товар).startswith("2026-11-01 10:00:00|")
     _, по_старой, без_версии = django(
         модератор,
         (
             "post",
             адрес_товара + "decide/",
-            {"decision": "approve", "version": "2026-11-01 10:00:00"},
+            {"decision": "approve", "version": увиденная},
         ),
         ("post", адрес_товара + "decide/", {"decision": "approve"}),
     )
@@ -869,7 +876,7 @@ def test_решение_по_той_версии_что_видел_модера�
         (
             "post",
             адрес_товара + "decide/",
-            {"decision": "approve", "version": "2026-11-01 10:05:00"},
+            {"decision": "approve", "version": _версия("market_products", товар)},
         ),
     )
     assert sql("select status from market_products where id = %s", [товар]) == [("active",)]
