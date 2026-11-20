@@ -41,6 +41,7 @@ GROUPS: dict[str, str] = {
     "moderation": "Модерация",
     "currency": "Валюты",
     "integrations": "Интеграции",
+    "market": "Маркетплейс",
 }
 
 #: Типы значения. «boolean» — так флаг премодерации отзывов завела
@@ -98,6 +99,9 @@ SYSTEM_KEYS: frozenset[str] = frozenset(
         # Ссылка для MEYOS (savdex/data/meyos.py)
         "meyos_feed_enabled",
         "meyos_feed_key",
+        # Сколько первых товаров нового продавца — через модерацию
+        # (savdex/market/common.py)
+        "market_premoderated_products",
     }
 )
 
@@ -160,6 +164,11 @@ class Setting(Timestamped):
 PLACEMENTS: dict[str, str] = {
     "home": "Главная страница",
     "catalog": "Каталог объявлений",
+    # Маркетплейс (ТЗ, раздел 3): слайдер сверху главной, полосы между
+    # подборками, каталог товаров
+    "market_slider": "Маркетплейс — слайдер на главной",
+    "market_strip": "Маркетплейс — полоса между подборками",
+    "market_catalog": "Маркетплейс — каталог товаров",
 }
 
 #: Banner::DISMISS_DAYS — закрытый баннер не показывается трое суток

@@ -65,6 +65,9 @@ def _own_host(host: str) -> bool:
 
     name = match.group(1).lower()
     allowed = {urlsplit(os.environ.get("APP_URL", "")).hostname or ""}
+    # Свой адрес маркетплейса: ссылки его страниц — на нём (savdex/market/domain.py)
+    market = (os.environ.get("MARKET_DOMAIN") or "").strip().lower()
+    allowed.add(urlsplit(market if "//" in market else f"//{market}").hostname or "")
     allowed.update(h.strip().lower() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(","))
     allowed -= {"", "*"}
     microsites = (os.environ.get("MICROSITE_DOMAIN") or "").strip().lower()

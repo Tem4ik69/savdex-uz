@@ -151,6 +151,16 @@ STAGES: tuple[Stage, ...] = (
             "telegram_feed_items",
             # Заявки на регистрацию в ILMORA: появилась после ухода Laravel
             "ilmora_registrations",
+            # Маркетплейс (savdex/market): появились после ухода Laravel
+            "market_categories",
+            "market_attributes",
+            "market_sellers",
+            "market_products",
+            "market_product_images",
+            "market_product_variants",
+            "market_product_values",
+            "market_favorites",
+            "market_cart_items",
         ),
     ),
     Stage(

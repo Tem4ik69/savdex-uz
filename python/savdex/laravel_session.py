@@ -111,12 +111,49 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
 
 
+def session_domain() -> str | None:
+    """
+    Домен куки сессии. SESSION_DOMAIN (config/session.php) — как задан.
+    Без него, если у маркетплейса свой адрес под основным (APP_URL
+    savdex.uz, MARKET_DOMAIN market.savdex.uz), — их общий домен
+    «.savdex.uz»: один вход на обоих адресах (savdex/market/domain.py).
+    Иначе — None: кука только своего адреса, как было.
+    """
+    explicit = (os.environ.get("SESSION_DOMAIN") or "").strip()
+
+    if explicit and explicit.lower() != "null":
+        return explicit
+
+    from urllib.parse import urlsplit
+
+    site = (urlsplit(os.environ.get("APP_URL", "")).hostname or "").lower()
+    market = (os.environ.get("MARKET_DOMAIN") or "").strip().lower()
+    market = urlsplit(market if "//" in market else f"//{market}").hostname or ""
+
+    if site and market and market.endswith("." + site):
+        return "." + site
+
+    return None
+
+
 def cookie_name() -> str:
-    """config/session.php: SESSION_COOKIE или «<slug(APP_NAME)>-session»."""
-    return (
-        os.environ.get("SESSION_COOKIE")
-        or f"{_slug(os.environ.get('APP_NAME', 'laravel'))}-session"
-    )
+    """
+    config/session.php: SESSION_COOKIE или «<slug(APP_NAME)>-session».
+
+    Кука на несколько адресов (session_domain) — с окружением в имени:
+    «savdex-production-session», «savdex-staging-session». Кука боевого на
+    .savdex.uz доходит и до адресов тестового (staging.savdex.uz): с тем же
+    именем браузер прислал бы туда две куки, и вход на тестовом путался бы.
+    """
+    if explicit := os.environ.get("SESSION_COOKIE"):
+        return explicit
+
+    app = _slug(os.environ.get("APP_NAME", "laravel"))
+
+    if session_domain() is not None:
+        return f"{app}-{_slug(os.environ.get('APP_ENV', 'local')) or 'local'}-session"
+
+    return f"{app}-session"
 
 
 def lifetime() -> int:

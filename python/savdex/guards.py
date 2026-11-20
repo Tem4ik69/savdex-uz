@@ -220,6 +220,18 @@ OWNED_TABLES: frozenset[str] = frozenset(
         # 2026_10_26_100000, savdex/ilmora): таблица появилась после ухода
         # Laravel, ведёт её только Django
         "ilmora_registrations",
+        # Маркетплейс, этап 1 (миграция 2026_11_19_100000, savdex/market):
+        # каталог товаров, продавцы, избранное и корзина — таблицы
+        # появились после ухода Laravel, ведёт их только Django
+        "market_categories",
+        "market_attributes",
+        "market_sellers",
+        "market_products",
+        "market_product_images",
+        "market_product_variants",
+        "market_product_values",
+        "market_favorites",
+        "market_cart_items",
     }
 )
 

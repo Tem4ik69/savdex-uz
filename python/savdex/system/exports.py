@@ -153,9 +153,17 @@ def book_path(run_id: str, file: str) -> Path | None:
 
 
 def _save(run_id: str, run: dict[str, Any]) -> None:
+    """
+    run.json — целиком или никак: сначала во временный файл рядом, потом
+    подмена одним шагом (os.replace). Запись поверх (write_text) на миг
+    оставляла файл пустым: страница выгрузки или _update в этот миг
+    читали пустоту, и _update переписывал выгрузку без её полей.
+    """
     folder = root() / run_id
     folder.mkdir(parents=True, exist_ok=True)
-    (folder / "run.json").write_text(json.dumps(run, ensure_ascii=False, indent=4))
+    temp = folder / f".run.json.{os.getpid()}.tmp"
+    temp.write_text(json.dumps(run, ensure_ascii=False, indent=4))
+    os.replace(temp, folder / "run.json")
 
 
 def _update(run_id: str, changes: dict[str, Any]) -> None:
