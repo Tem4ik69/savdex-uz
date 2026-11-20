@@ -53,6 +53,7 @@ from savdex.market.common import (
     rows,
     som,
     tiyin,
+    unchanged_since,
     write,
 )
 from savdex.tenders.slug import numbered_slug
@@ -845,15 +846,31 @@ def add_image(
     path = images.write(binary, "market/products")
     thumb_path = images.write(thumb, "market/products/thumbs")
 
-    if needs_review(seller):
-        _to_draft(product_id)
+    # Предел — под блокировкой строки товара: параллельные загрузки иначе
+    # проходят проверку выше вместе и добавляют фото сверх MAX_IMAGES
+    with transaction.atomic():
+        one("select id from market_products where id = %s for update", [product_id])
+        count = one(
+            "select count(*) as n from market_product_images where product_id = %s", [product_id]
+        )
 
-    write(
-        "insert into market_product_images (product_id, variant_id, path, thumb_path, sort) "
-        "values (%s, %s, %s, %s, (select coalesce(max(sort), -1) + 1 "
-        "from market_product_images where product_id = %s))",
-        [product_id, variant_id, path, thumb_path, product_id],
-    )
+        if count is not None and int(count["n"]) >= MAX_IMAGES:
+            images.delete(path, thumb_path)
+
+            return None, "product.images_limit"
+
+        if needs_review(seller):
+            _to_draft(product_id)
+
+        write(
+            "insert into market_product_images (product_id, variant_id, path, thumb_path, sort) "
+            "values (%s, %s, %s, %s, (select coalesce(max(sort), -1) + 1 "
+            "from market_product_images where product_id = %s))",
+            [product_id, variant_id, path, thumb_path, product_id],
+        )
+
+    # Фото — часть содержания: решение модератора — по увиденной версии
+    write("update market_products set updated_at = %s where id = %s", [now(), product_id])
 
     return path, ""
 
@@ -878,6 +895,9 @@ def set_image_variant(
         [variant_id, image_id, product_id],
     )
 
+    if changed:
+        write("update market_products set updated_at = %s where id = %s", [now(), product_id])
+
     return "" if changed else "not_found"
 
 
@@ -896,6 +916,9 @@ def remove_image(seller: dict[str, Any], product_id: int, image_id: int) -> bool
         return False
 
     write("delete from market_product_images where id = %s", [image_id])
+
+    # Фото — часть содержания: решение модератора — по увиденной версии
+    write("update market_products set updated_at = %s where id = %s", [now(), product_id])
     images.delete(found["path"], found["thumb_path"])
 
     if needs_review(seller):
@@ -1008,24 +1031,30 @@ def detail(seller: dict[str, Any], product_id: int) -> dict[str, Any] | None:
 
 
 # ── Решения модератора ──────────────────────────────────────────────
+#
+# seen — версия товара, которую видел модератор (время правки, как его
+# пишет now()): решение пишется, только если товар с тех пор не менялся.
+# Иначе продавец успел бы подменить товар между открытием карточки и
+# нажатием «Одобрить».
 
 
-def approve(product_id: int, admin_id: int) -> bool:
+def approve(product_id: int, admin_id: int, *, seen: str | None = None) -> bool:
     """Модератор пропустил товар: в продаже, засчитан продавцу в «проверенные»."""
     moment = now()
+    same, version = unchanged_since(seen)
 
     return bool(
         write(
             "update market_products set status = 'active', published_at = coalesce("
             "published_at, %s), approved_at = coalesce(approved_at, %s), moderated_by = %s, "
             "moderated_at = %s, reject_reason = null, updated_at = %s "
-            "where id = %s and status = 'pending'",
-            [moment, moment, admin_id, moment, moment, product_id],
+            "where id = %s and status = 'pending'" + same,
+            [moment, moment, admin_id, moment, moment, product_id, *version],
         )
     )
 
 
-def reject(product_id: int, admin_id: int, reason: str) -> bool:
+def reject(product_id: int, admin_id: int, reason: str, *, seen: str | None = None) -> bool:
     """Отклонить с причиной: продавец исправит и отправит снова."""
     reason = reason.strip()
 
@@ -1033,18 +1062,19 @@ def reject(product_id: int, admin_id: int, reason: str) -> bool:
         raise ValueError("Причина — не короче 10 знаков")
 
     moment = now()
+    same, version = unchanged_since(seen)
 
     return bool(
         write(
             "update market_products set status = 'rejected', reject_reason = %s, "
             "moderated_by = %s, moderated_at = %s, updated_at = %s "
-            "where id = %s and status = 'pending'",
-            [reason[:1000], admin_id, moment, moment, product_id],
+            "where id = %s and status = 'pending'" + same,
+            [reason[:1000], admin_id, moment, moment, product_id, *version],
         )
     )
 
 
-def block(product_id: int, admin_id: int, reason: str) -> bool:
+def block(product_id: int, admin_id: int, reason: str, *, seen: str | None = None) -> bool:
     """Модератор снимает любой товар (ТЗ, раздел 5). Продавец его больше не правит."""
     reason = reason.strip()
 
@@ -1052,30 +1082,32 @@ def block(product_id: int, admin_id: int, reason: str) -> bool:
         raise ValueError("Причина — не короче 10 знаков")
 
     moment = now()
+    same, version = unchanged_since(seen)
 
     return bool(
         write(
             "update market_products set status = 'blocked', reject_reason = %s, "
             "moderated_by = %s, moderated_at = %s, updated_at = %s "
-            "where id = %s and status <> 'blocked'",
-            [reason[:1000], admin_id, moment, moment, product_id],
+            "where id = %s and status <> 'blocked'" + same,
+            [reason[:1000], admin_id, moment, moment, product_id, *version],
         )
     )
 
 
-def unblock(product_id: int, admin_id: int) -> bool:
+def unblock(product_id: int, admin_id: int, *, seen: str | None = None) -> bool:
     """
     Вернуть снятый модератором товар — в черновик: продавец проверит и
     отправит. Причина снятия остаётся: продавец видит, что исправить, а
     отправка идёт через модератора (submit), пока тот не одобрит.
     """
     moment = now()
+    same, version = unchanged_since(seen)
 
     return bool(
         write(
             "update market_products set status = 'draft', "
             "moderated_by = %s, moderated_at = %s, updated_at = %s "
-            "where id = %s and status = 'blocked'",
-            [admin_id, moment, moment, product_id],
+            "where id = %s and status = 'blocked'" + same,
+            [admin_id, moment, moment, product_id, *version],
         )
     )

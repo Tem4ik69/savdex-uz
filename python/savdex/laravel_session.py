@@ -131,6 +131,12 @@ def session_domain() -> str | None:
     market = urlsplit(market if "//" in market else f"//{market}").hostname or ""
 
     if site and market and market.endswith("." + site):
+        # Мини-сайты компаний под тем же доменом получили бы куку входа
+        microsites = (os.environ.get("MICROSITE_DOMAIN") or "").strip().lower().lstrip(".")
+
+        if microsites and (microsites == site or microsites.endswith("." + site)):
+            return None
+
         return "." + site
 
     return None

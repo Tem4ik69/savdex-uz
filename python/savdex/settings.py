@@ -100,6 +100,13 @@ def _allowed_hosts() -> list[str]:
     given = [h.strip() for h in os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",") if h.strip()]
 
     if given:
+        # Свой адрес маркетплейса — и при явном списке: иначе включённый
+        # MARKET_DOMAIN отвечал бы 400, пока его не допишут руками
+        if market := (os.environ.get("MARKET_DOMAIN") or "").strip().lower():
+            host = urlsplit(market if "//" in market else f"//{market}").hostname
+            if host and host not in given:
+                given.append(host)
+
         return given
 
     if DEBUG:

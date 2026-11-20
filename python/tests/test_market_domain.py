@@ -32,7 +32,7 @@ from .web_site import адрес, завести, кука, открыть, ст
 
 @pytest.fixture
 def окружение(monkeypatch: pytest.MonkeyPatch) -> pytest.MonkeyPatch:
-    for name in ("SESSION_DOMAIN", "SESSION_COOKIE", "MARKET_DOMAIN"):
+    for name in ("SESSION_DOMAIN", "SESSION_COOKIE", "MARKET_DOMAIN", "MICROSITE_DOMAIN"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("APP_NAME", "SAVDEX")
 
@@ -56,6 +56,47 @@ def test_домен_куки_по_адресу_маркетплейса(окру
     окружение.setenv("MARKET_DOMAIN", market)
 
     assert laravel_session.session_domain() == домен
+
+
+def test_мини_сайты_под_доменом_без_общей_куки(окружение):
+    окружение.setenv("APP_URL", "https://savdex.uz")
+    окружение.setenv("MARKET_DOMAIN", "market.savdex.uz")
+    окружение.setenv("MICROSITE_DOMAIN", "site.savdex.uz")
+    assert laravel_session.session_domain() is None
+
+    окружение.setenv("MICROSITE_DOMAIN", "savdex.site")
+    assert laravel_session.session_domain() == ".savdex.uz"
+
+
+def test_адрес_маркетплейса_в_разрешённых_хостах(окружение):
+    from savdex import settings
+
+    окружение.setenv("DJANGO_ALLOWED_HOSTS", "savdex.uz,www.savdex.uz")
+    окружение.setenv("MARKET_DOMAIN", "https://market.savdex.uz")
+    assert settings._allowed_hosts() == ["savdex.uz", "www.savdex.uz", "market.savdex.uz"]
+
+
+@pytest.mark.parametrize(
+    ("адрес_назад", "свой"),
+    [
+        ("/cabinet", True),
+        ("https://savdex.uz/cabinet?x=1", True),
+        ("https://savdex.uz", True),
+        ("//evil.com", False),
+        ("/\evil.com", False),
+        ("https://evil.com/", False),
+        ("https://savdex.uz.evil.com/", False),
+        ("https://savdex.uz@evil.com/", False),
+        ("/x\r\nSet-Cookie: a=b", False),
+    ],
+)
+def test_назад_только_на_свой_адрес(адрес_назад, свой):
+    from types import SimpleNamespace
+
+    from savdex.web import forms
+
+    ctx = SimpleNamespace(root="https://savdex.uz")
+    assert forms._own(ctx, адрес_назад) is свой  # type: ignore[arg-type]
 
 
 def test_имя_куки_с_окружением_только_у_общей(окружение):
@@ -153,6 +194,9 @@ def test_каталог_с_корня_берёт_параметры(сайт):
         ("/market/catalog?q=a", "/catalog?q=a"),
         ("/uz/market", "/uz"),
         ("/uz/market/cart", "/uz/cart"),
+        # Лишние «/» — не адрес чужого сайта
+        ("/market//evil.com", "/evil.com"),
+        ("/market///evil.com/x?a=1", "/evil.com/x?a=1"),
     ],
 )
 def test_старый_вид_адреса_на_корневой(сайт, path, куда):
@@ -180,6 +224,31 @@ def test_вход_и_json_работают_как_есть(сайт):
 
 
 @нужна_база
+def test_админка_только_на_основном_адресе(сайт):
+    """Админка и вход в неё — на основном адресе; статика и проверка — на обоих."""
+    for path in (
+        "/py/admin/",
+        "/py/admin/market/product/?status=pending",
+        "/py/login",
+        "/py/logout",
+    ):
+        ответ = _на_рынке(сайт, path)
+
+        assert ответ["status"] == 302, path
+        assert ответ["headers"]["location"] == f"{сайт}{path}"
+
+    вход = _на_рынке(
+        сайт,
+        "/py/login",
+        method="POST",
+        body="token=x",
+        content_type="application/x-www-form-urlencoded",
+    )
+    assert вход["status"] == 404
+    assert _на_рынке(сайт, "/py/up")["status"] == 200
+
+
+@нужна_база
 def test_основной_адрес_ведёт_на_маркетплейс(сайт):
     ответ = открыть(сайт, "/uz/market/catalog?q=a", env=_env(сайт))
 
@@ -188,6 +257,26 @@ def test_основной_адрес_ведёт_на_маркетплейс(са
 
     # JSON на основном адресе — как есть
     assert открыть(сайт, "/market/api/categories", env=_env(сайт))["status"] == 200
+
+
+@нужна_база
+def test_ссылки_inertia_между_адресами(сайт):
+    # Ссылка Inertia — фоновый запрос: на чужой домен браузер его не пустит,
+    # поэтому вместо 302 — 409 и X-Inertia-Location (Inertia сам откроет адрес)
+    inertia = {"X-Inertia": "true", "X-Requested-With": "XMLHttpRequest"}
+
+    туда = открыть(сайт, "/uz/market/catalog?q=a", headers=inertia, env=_env(сайт))
+    assert туда["status"] == 409
+    assert туда["headers"]["x-inertia-location"] == f"http://{РЫНОК}/uz/catalog?q=a"
+
+    рынок = {"Host": РЫНОК, **inertia}
+    обратно = открыть(сайт, "/companies?page=2", headers=рынок, env=_env(сайт))
+    assert обратно["status"] == 409
+    assert обратно["headers"]["x-inertia-location"] == f"{сайт}/companies?page=2"
+
+    # Внутри одного адреса — обычный 302: его Inertia проходит сам
+    свой = открыть(сайт, "/market/catalog", headers=рынок, env=_env(сайт))
+    assert свой["status"] == 302 and свой["headers"]["location"] == "/catalog"
 
 
 @нужна_база
