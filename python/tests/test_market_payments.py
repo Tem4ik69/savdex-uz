@@ -22,9 +22,11 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import subprocess
+import sys
 import time
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
@@ -32,7 +34,7 @@ import pytest
 
 from savdex.market.payments import base, click, payme
 
-from .pg_admin import sql, нужна_база, свежая_база
+from .pg_admin import PYTHON, КОРЕНЬ, ОКРУЖЕНИЕ, sql, нужна_база, свежая_база
 from .test_market import _json, _post, _компания, _продавец, _товар
 from .test_market_orders import (
     _id,
@@ -112,13 +114,85 @@ def test_провайдер_без_ключей_выключен(monkeypatch):
     monkeypatch.setenv("APP_ENV", "local")
     assert all(base.enabled(name) for name in base.PROVIDERS)
 
-    # Uzum на боевом — только со списком адресов (docs/marketplace-security.md, раздел 3)
+    # На боевом — только со списком адресов провайдера (docs/marketplace-security.md,
+    # раздел 3): у Uzum, Payme и Click одинаково
     monkeypatch.setenv("APP_ENV", "production")
-    monkeypatch.delenv("MARKET_UZUM_CALLBACK_IPS", raising=False)
-    assert not uzum.PROVIDER.enabled()
-    monkeypatch.setenv("MARKET_UZUM_CALLBACK_IPS", "10.0.0.1, 10.0.0.2")
-    assert uzum.PROVIDER.enabled()
+
+    for name in base.PROVIDERS:
+        monkeypatch.delenv(f"MARKET_{name.upper()}_CALLBACK_IPS", raising=False)
+
+    assert not any(base.enabled(name) for name in base.PROVIDERS)
+
+    for name in base.PROVIDERS:
+        monkeypatch.setenv(f"MARKET_{name.upper()}_CALLBACK_IPS", "10.0.0.1, 10.0.0.2")
+
+    assert uzum.PROVIDER.enabled() and all(base.enabled(name) for name in base.PROVIDERS)
     assert base.callback_ips("uzum") == ["10.0.0.1", "10.0.0.2"]
+
+
+def test_кривые_значения_не_роняют(monkeypatch):
+    from savdex.market.payments import uzum
+
+    # «²» и арабские цифры isdigit считает цифрами — сумма из них не число
+    for плохая in ("²", "٣٤", "1" * 30, -1, 2**70, True, 1.5, None):
+        assert uzum._amount(плохая) is None, плохая
+    assert uzum._amount("9000000") == 9_000_000
+
+    # Переполнение Decimal и длинные строки — не сумма, а не 500
+    for плохая in ("1e999999999", "9" * 40, "1e-999999999", "sNaN"):
+        assert base.tiyin_exact(плохая) is None, плохая
+
+    # reason — smallint, from/to — bigint: всё вне — не число для нас
+    assert payme._int(2**70) is None and payme._int(-1) is None and payme._int(5) == 5
+
+    # Эхо — только строки до 64 знаков и целые в пределах bigint
+    assert base.echo("x" * 64) == "x" * 64
+    assert base.echo("x" * 65) is None and base.echo(2**70) is None
+    assert base.echo({"a": 1}) is None and base.echo(True) is None
+
+
+def test_адрес_возврата_без_точки_с_запятой(monkeypatch):
+    for name, value in ОПЛАТА.items():
+        monkeypatch.setenv(name, value)
+
+    monkeypatch.setenv("MARKET_PAYMENT_RETURN_URL", "https://x.example/o/{number};c=evil")
+    assert base.return_url("ABCDEFGH23", "https://site/o") == "https://site/o"
+    monkeypatch.setenv("MARKET_PAYMENT_RETURN_URL", "https://x.example/o/{number}")
+    assert base.return_url("ABCDEFGH23", "https://site/o") == "https://x.example/o/ABCDEFGH23"
+
+    # Адрес с «=» в ссылку Payme не попадает вовсе
+    url = payme.PROVIDER.create_invoice(
+        {"number": "ABCDEFGH23"}, {"amount": ЦЕНА}, locale="ru", back="https://x.example/?a=b"
+    )
+    params = base64.b64decode(url.rsplit("/", 1)[1]).decode()
+    assert params == "m=65a1b2c3d4e5f6a7b8c9d0e1;ac.order=ABCDEFGH23;a=9000000;l=ru"
+
+
+def test_сигнал_сверки_только_цифры(monkeypatch):
+    from datetime import date
+
+    from savdex.market.payments import reconcile
+
+    отчёты = [
+        reconcile.Report("payme", payments=3, problems=["ABCDEFGH23", "оплата 5 …"]),
+        reconcile.Report("*", problems=[]),
+    ]
+    итог = reconcile.summary(отчёты, date(2026, 11, 20))
+    assert итог == "сверка оплат за 2026-11-20: расхождений 2 (payme 2, общее 0)"
+    assert "ABCDEFGH23" not in итог
+
+    # Адрес не задан — сигнала нет, сверка не падает
+    monkeypatch.delenv(reconcile.PING_KEY, raising=False)
+    assert reconcile.signal(отчёты, date(2026, 11, 20)) is None
+
+
+def test_адрес_тестового_клиента():
+    """Колбэки проверок ниже ходят с 127.0.0.1 — на этом держатся белые списки в них."""
+    from django.test import RequestFactory
+
+    from savdex import audit
+
+    assert audit.client_ip(RequestFactory().post("/")) == "127.0.0.1"
 
 
 def test_ссылка_payme(monkeypatch):
@@ -183,18 +257,45 @@ def _платить(
     )["ответ"]
 
 
-def _payme(
-    сайт: str, method: str, params: dict[str, Any], key: str = "payme-test-key", who: str = "Paycom"
+#: Как на боевом: маркетплейс закрыт (market_open ложно), у провайдеров —
+#: белые списки с адресом тестового клиента
+ЗАКРЫТ = {
+    "APP_ENV": "production",
+    "DJANGO_ALLOWED_HOSTS": "*",
+    "MARKET_UZUM_CALLBACK_IPS": "127.0.0.1",
+    "MARKET_PAYME_CALLBACK_IPS": "127.0.0.1",
+    "MARKET_CLICK_CALLBACK_IPS": "127.0.0.1",
+}
+
+
+def _payme_raw(
+    сайт: str,
+    method: str,
+    params: dict[str, Any],
+    key: str = "payme-test-key",
+    who: str = "Paycom",
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    ответ = открыть(
+    return открыть(
         сайт,
         "/market/api/payments/payme",
         headers={"Authorization": "Basic " + base64.b64encode(f"{who}:{key}".encode()).decode()},
-        env=ОПЛАТА,
+        env={**ОПЛАТА, **(env or {})},
         method="POST",
         body=json.dumps({"id": 7, "method": method, "params": params}),
         content_type="application/json",
     )
+
+
+def _payme(
+    сайт: str,
+    method: str,
+    params: dict[str, Any],
+    key: str = "payme-test-key",
+    who: str = "Paycom",
+    env: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    ответ = _payme_raw(сайт, method, params, key, who, env)
     assert ответ["status"] == 200, ответ["body"]
 
     return dict(json.loads(ответ["body"]))
@@ -205,22 +306,30 @@ def _uzum(
     operation: str,
     body: dict[str, Any],
     auth: tuple[str, str] = ("uzum-market", "uzum-market-pass"),
+    env: dict[str, str] | None = None,
 ) -> tuple[int, dict[str, Any]]:
     ответ = открыть(
         сайт,
         f"/market/api/payments/uzum/{operation}",
         headers={"Authorization": "Basic " + base64.b64encode(":".join(auth).encode()).decode()},
-        env=ОПЛАТА,
+        env={**ОПЛАТА, **(env or {})},
         method="POST",
         body=json.dumps({"serviceId": "777001", "timestamp": 1, **body}),
         content_type="application/json",
     )
 
+    if ответ["status"] == 404:
+        return 404, {}
+
     return ответ["status"], dict(json.loads(ответ["body"]))
 
 
 def _click(
-    сайт: str, step: str, поля: dict[str, str], secret: str = "click-test-secret"
+    сайт: str,
+    step: str,
+    поля: dict[str, str],
+    secret: str = "click-test-secret",
+    env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Запрос Click формой: подпись — md5 по правилам SHOP API, считаем здесь же."""
     action = "0" if step == "prepare" else "1"
@@ -247,14 +356,32 @@ def _click(
     ответ = открыть(
         сайт,
         f"/market/api/payments/click/{step}",
-        env=ОПЛАТА,
+        env={**ОПЛАТА, **(env or {})},
         method="POST",
         body=urlencode(form),
         content_type="application/x-www-form-urlencoded",
     )
+
+    if ответ["status"] == 404:
+        return {"status": 404}
+
     assert ответ["status"] == 200, ответ["body"]
 
     return dict(json.loads(ответ["body"]))
+
+
+def _python_env(code: str, env: dict[str, str] | None = None) -> str:
+    """Код в процессе с ключами провайдеров (ОПЛАТА), как на сервере."""
+    итог = subprocess.run(
+        [sys.executable, "manage.py", "shell", "-c", code],
+        cwd=PYTHON,
+        env={**ОКРУЖЕНИЕ, **ОПЛАТА, **(env or {}), "PYTHONPATH": str(PYTHON)},
+        capture_output=True,
+        text=True,
+    )
+    assert итог.returncode == 0, итог.stderr[-3000:]
+
+    return итог.stdout.strip().splitlines()[-1]
 
 
 def _журнал(pk: int) -> dict[str, int]:
@@ -385,6 +512,18 @@ def test_payme_оплата_повтор_и_возврат(сайт, магаз�
     assert создана["state"] == 1
     # Повтор с тем же id — тот же ответ, строка одна
     assert _payme(сайт, "CreateTransaction", создать)["result"] == создана
+    # Тот же id, но другой заказ или другая сумма — понятный отказ, не 500
+    _, другой, _ = _заказ(сайт, магазин)
+    assert (
+        _payme(сайт, "CreateTransaction", {**создать, "account": {"order": другой}})["error"][
+            "code"
+        ]
+        == -31099
+    )
+    assert (
+        _payme(сайт, "CreateTransaction", {**создать, "amount": ЦЕНА + 100})["error"]["code"]
+        == -31001
+    )
     # Другая транзакция того же заказа — отказ, второго живого счёта нет
     assert _payme(сайт, "CreateTransaction", {**создать, "id": "pm-2"})["error"]["code"] == -31053
     assert (
@@ -444,8 +583,27 @@ def test_payme_истёкший_отменённый_и_12_часов(сайт, 
         "update market_orders set created_at = created_at - interval '2 hours' where id = %s",
         [ждёт_pk],
     )
+    # А брошенная давно попытка заказ не держит: отсрочка — не дольше срока
+    _, брошен, брошен_pk = _заказ(сайт, магазин)
+    _payme(
+        сайт,
+        "CreateTransaction",
+        {"id": "pm-old", "time": _ms(), "amount": ЦЕНА, "account": {"order": брошен}},
+    )
+    sql(
+        "update market_orders set created_at = created_at - interval '3 hours' where id = %s",
+        [брошен_pk],
+    )
+    sql(
+        "update market_payments set created_at = created_at - interval '2 hours' "
+        "where provider_transaction_id = 'pm-old'"
+    )
     assert _manage("market_expire_orders").returncode == 0
     assert _статус(истёк) == "cancelled" and _статус(ждёт) == "created"
+    assert _статус(брошен) == "cancelled"
+    # Payme всё же пришёл провести брошенную — отказ, денег не принимаем
+    assert _payme(сайт, "PerformTransaction", {"id": "pm-old"})["error"]["code"] == -31008
+    assert _журнал(брошен_pk) == {}
 
     for method, params in (
         ("CheckPerformTransaction", {"amount": ЦЕНА, "account": {"order": истёк}}),
@@ -504,9 +662,13 @@ def test_click_подпись_сумма_и_повтор(сайт, магази�
     assert готов["error"] == 0 and готов["merchant_prepare_id"]
     # Повтор Prepare — тот же номер, строка одна
     assert _click(сайт, "prepare", поля)["merchant_prepare_id"] == готов["merchant_prepare_id"]
-    # Другая транзакция того же заказа — отказ
-    assert _click(сайт, "prepare", {**поля, "click_trans_id": "9002"})["error"] == -8
+    # Другая транзакция того же заказа — отказ (у Click — «отменена»)
+    assert _click(сайт, "prepare", {**поля, "click_trans_id": "9002"})["error"] == -9
     assert _оплаты(pk) == [("click", "pending")]
+    # Повтор с известным id, но на другой заказ или с другой суммой — отказ
+    _, чужой, _ = _заказ(сайт, магазин)
+    assert _click(сайт, "prepare", {**поля, "merchant_trans_id": чужой})["error"] == -6
+    assert _click(сайт, "prepare", {**поля, "amount": "90001.00"})["error"] == -2
 
     итог = {**поля, "merchant_prepare_id": str(готов["merchant_prepare_id"])}
     assert _click(сайт, "complete", {**итог, "merchant_prepare_id": "999999"})["error"] == -6
@@ -645,6 +807,204 @@ def test_колбэки_выключенного_провайдера_и_чуж�
     assert _статус(number) == "created"
 
 
+@нужна_база
+def test_по_заведённым_транзакциям_колбэки_работают_и_при_закрытом(сайт, магазин):
+    """Маркетплейс закрыт (как на боевом): новые транзакции — 404, заведённые доводятся."""
+    _, payme_заказ, _ = _заказ(сайт, магазин)
+    _payme(
+        сайт,
+        "CreateTransaction",
+        {"id": "pm-s5", "time": _ms(), "amount": ЦЕНА, "account": {"order": payme_заказ}},
+    )
+    _, click_заказ, _ = _заказ(сайт, магазин)
+    click_поля = {"click_trans_id": "9501", "merchant_trans_id": click_заказ, "amount": "90000.00"}
+    готов = _click(сайт, "prepare", click_поля)
+    _, uzum_заказ, _ = _заказ(сайт, магазин)
+    _uzum(сайт, "create", {"transId": "uz-s5", "params": {"order": uzum_заказ}, "amount": ЦЕНА})
+    _, новый, новый_pk = _заказ(сайт, магазин)
+
+    # Новые — как будто адреса нет
+    for method, params in (
+        ("CheckPerformTransaction", {"amount": ЦЕНА, "account": {"order": новый}}),
+        (
+            "CreateTransaction",
+            {"id": "pm-s5-new", "time": _ms(), "amount": ЦЕНА, "account": {"order": новый}},
+        ),
+    ):
+        assert _payme_raw(сайт, method, params, env=ЗАКРЫТ)["status"] == 404
+    assert _uzum(сайт, "check", {"params": {"order": новый}}, env=ЗАКРЫТ)[0] == 404
+    создать = {"transId": "uz-s5-new", "params": {"order": новый}, "amount": ЦЕНА}
+    assert _uzum(сайт, "create", создать, env=ЗАКРЫТ)[0] == 404
+    новые_click = {"click_trans_id": "9502", "merchant_trans_id": новый, "amount": "90000.00"}
+    assert _click(сайт, "prepare", новые_click, env=ЗАКРЫТ) == {"status": 404}
+    assert _оплаты(новый_pk) == []
+
+    # Заведённые — проводятся
+    assert _payme(сайт, "PerformTransaction", {"id": "pm-s5"}, env=ЗАКРЫТ)["result"]["state"] == 2
+    assert _payme(сайт, "CheckTransaction", {"id": "pm-s5"}, env=ЗАКРЫТ)["result"]["state"] == 2
+    итог = {**click_поля, "merchant_prepare_id": str(готов["merchant_prepare_id"])}
+    assert _click(сайт, "complete", итог, env=ЗАКРЫТ)["error"] == 0
+    статус, проведена = _uzum(сайт, "confirm", {"transId": "uz-s5"}, env=ЗАКРЫТ)
+    assert статус == 200 and проведена["status"] == "CONFIRMED", проведена
+    assert _uzum(сайт, "status", {"transId": "uz-s5"}, env=ЗАКРЫТ)[1]["status"] == "CONFIRMED"
+    assert {_статус(payme_заказ), _статус(click_заказ), _статус(uzum_заказ)} == {"paid"}
+
+
+def _сбросить_счётчики() -> None:
+    """Счётчики частоты колбэков адреса 127.0.0.1 в файловом кэше — с нуля."""
+    ip = hashlib.sha1(b"127.0.0.1").hexdigest()
+
+    for key in (f"market-pay:{ip}", f"market-pay-auth:{ip}"):
+        for name in (key, f"{key}:timer"):
+            digest = hashlib.sha1(name.encode()).hexdigest()
+            (
+                Path(КОРЕНЬ) / "storage/framework/cache/data" / digest[:2] / digest[2:4] / digest
+            ).unlink(missing_ok=True)
+
+
+@нужна_база
+def test_лимит_колбэков_и_неудачных_подписей(сайт, магазин):
+    счётчик = {"CACHE_STORE": "file", "MARKET_CALLBACK_AUTH_FAILS": "2"}
+    _сбросить_счётчики()
+
+    try:
+        # Две неудачные подписи — и с адреса больше не пускают даже с верным ключом
+        for _ in range(2):
+            ответ = _payme(сайт, "CheckTransaction", {"id": "x"}, key="wrong", env=счётчик)
+            assert ответ["error"]["code"] == -32504
+        верный = _payme(сайт, "CheckTransaction", {"id": "x"}, env=счётчик)
+        assert верный["error"]["code"] == -32504
+
+        # Общий предел запросов с адреса в минуту
+        _сбросить_счётчики()
+        предел = {"CACHE_STORE": "file", "MARKET_CALLBACK_RATE": "2"}
+        for _ in range(2):
+            ответ = _payme(сайт, "CheckTransaction", {"id": "x"}, env=предел)
+            assert ответ["error"]["code"] == -31003
+        assert _payme(сайт, "CheckTransaction", {"id": "x"}, env=предел)["error"]["code"] == -32504
+    finally:
+        _сбросить_счётчики()
+
+
+@нужна_база
+def test_кривые_значения_при_верной_подписи_не_500(сайт, магазин):
+    _, number, _ = _заказ(сайт, магазин)
+
+    # Uzum: «²» — не сумма; длинное эхо не возвращается
+    статус, ответ = _uzum(
+        сайт,
+        "create",
+        {"transId": "uz-bad", "params": {"order": number}, "amount": "²", "timestamp": "y" * 100},
+    )
+    assert статус == 400 and ответ["errorCode"] == 10005 and ответ["timestamp"] is None
+    статус, ответ = _uzum(сайт, "check", {"params": {"order": number}, "amount": 2**70})
+    assert ответ["errorCode"] == 10011
+
+    # Payme: reason вне smallint, from/to вне bigint — неверный запрос
+    _payme(
+        сайт,
+        "CreateTransaction",
+        {"id": "pm-bad", "time": _ms(), "amount": ЦЕНА, "account": {"order": number}},
+    )
+    отмена = _payme(сайт, "CancelTransaction", {"id": "pm-bad", "reason": 10**10})
+    assert отмена["error"]["code"] == -32600
+    assert _payme(сайт, "GetStatement", {"from": 0, "to": 2**70})["error"]["code"] == -32600
+    поздно = {"id": "pm-bad2", "time": 2**70, "amount": ЦЕНА, "account": {"order": number}}
+    assert _payme(сайт, "CreateTransaction", поздно)["error"]["code"] == -32600
+
+    # Click: сумма с переполнением Decimal — «сумма не та»
+    _, другой, _ = _заказ(сайт, магазин)
+    поля = {"click_trans_id": "9601", "merchant_trans_id": другой, "amount": "1e999999999"}
+    assert _click(сайт, "prepare", поля)["error"] == -2
+    длинный = _click(сайт, "prepare", {**поля, "merchant_trans_id": "Z" * 100})
+    assert длинный["merchant_trans_id"] is None
+
+
+@нужна_база
+def test_click_повтор_prepare_после_отмены_заказа(сайт, магазин):
+    uid, number, pk = _заказ(сайт, магазин)
+    поля = {"click_trans_id": "9701", "merchant_trans_id": number, "amount": "90000.00"}
+    assert _click(сайт, "prepare", поля)["error"] == 0
+    _отменить(сайт, uid, number)
+
+    # Повтор Prepare с известным id — заказ уже отменён, отказ
+    assert _click(сайт, "prepare", поля)["error"] == -9
+    assert _статус(number) == "cancelled" and _журнал(pk) == {}
+
+
+@нужна_база
+def test_брошенная_попытка_не_держит_заказ(сайт, магазин):
+    uid, number, pk = _заказ(сайт, магазин)
+    первая = {"click_trans_id": "9801", "merchant_trans_id": number, "amount": "90000.00"}
+    готов = _click(сайт, "prepare", первая)
+    assert готов["error"] == 0
+
+    # Свежая — держит: вторая попытка отказ, счёт со страницы — «оплата идёт»
+    assert _click(сайт, "prepare", {**первая, "click_trans_id": "9802"})["error"] == -9
+    assert _платить(сайт, number, uid, "uzum")["status"] == 409
+
+    # Старше срока Click (30 мин) — брошена: новая попытка её гасит
+    sql(
+        "update market_payments set created_at = created_at - interval '2 hours' "
+        "where provider_transaction_id = '9801'"
+    )
+    assert _click(сайт, "prepare", {**первая, "click_trans_id": "9802"})["error"] == 0
+    assert _оплаты(pk) == [("click", "cancelled"), ("click", "pending")]
+    # Complete по погашенной — отказ, Click вернёт деньги
+    итог = {**первая, "merchant_prepare_id": str(готов["merchant_prepare_id"])}
+    assert _click(сайт, "complete", итог)["error"] == -9
+
+    # И со страницы заказа брошенная попытка счёт не блокирует
+    sql(
+        "update market_payments set created_at = created_at - interval '2 hours' "
+        "where provider_transaction_id = '9802'"
+    )
+    assert _платить(сайт, number, uid, "payme")["status"] == 200
+    assert _оплаты(pk)[-1] == ("payme", "created")
+
+
+@нужна_база
+def test_payme_чек_без_икпу_и_доставка(сайт, магазин):
+    _, number, pk = _заказ(сайт, магазин)
+    sql("update market_order_items set ikpu = null where order_id = %s", [pk])
+    счёт = {"order": number}
+
+    # Чек с пустым кодом не отправляем — отказ до транзакции
+    проверка = _payme(сайт, "CheckPerformTransaction", {"amount": ЦЕНА, "account": счёт})
+    assert проверка["error"]["code"] == -31054
+    создать = {"id": "pm-noikpu", "time": _ms(), "amount": ЦЕНА, "account": счёт}
+    assert _payme(сайт, "CreateTransaction", создать)["error"]["code"] == -31054
+    assert _оплаты(pk) == []
+
+    # Доставка — своей позицией с ИКПУ из окружения
+    _, доставка, доставка_pk = _заказ(сайт, магазин)
+    sql(
+        "update market_orders set delivery_total = 1500000, total = total + 1500000 where id = %s",
+        [доставка_pk],
+    )
+    ответ = _payme(
+        сайт,
+        "CheckPerformTransaction",
+        {"amount": ЦЕНА + 1_500_000, "account": {"order": доставка}},
+        env={"MARKET_DELIVERY_IKPU": "10112006002000000"},
+    )
+    позиции = ответ["result"]["detail"]["items"]
+    assert позиции[-1] == {
+        "title": "Доставка",
+        "price": 1_500_000,
+        "count": 1,
+        "code": "10112006002000000",
+        "vat_percent": 12,
+    }
+    # Без ИКПУ доставки — отказ
+    без = _payme(
+        сайт,
+        "CheckPerformTransaction",
+        {"amount": ЦЕНА + 1_500_000, "account": {"order": доставка}},
+    )
+    assert без["error"]["code"] == -31054
+
+
 # ── Возврат и сверка ────────────────────────────────────────────────
 
 
@@ -660,9 +1020,16 @@ def test_возврат_ровно_один_раз(сайт, магазин):
     assert _статус(number) == "refund_pending"
 
     код = f"from savdex.market.payments import base; print(base.refund_order({pk}))"
+    # Провайдер выключен (нет ключей) — отметку «запрошен» не ставим навсегда
+    assert _python(код) == "disabled"
+    assert sql(
+        "select refund_requested_at from market_payments where order_id = %s and status = 'paid'",
+        [pk],
+    ) == [(None,)]
+
     # У Payme API возврата нет — пометка администратору, заказ ждёт отмены из кабинета
-    assert _python(код) == "manual"
-    assert _python(код) == "requested"
+    assert _python_env(код) == "manual"
+    assert _python_env(код) == "requested"
     assert _статус(number) == "refund_pending"
     [(пометок,)] = sql(
         "select count(*) from market_order_events where order_id = %s "
@@ -673,7 +1040,7 @@ def test_возврат_ровно_один_раз(сайт, магазин):
 
     _payme(сайт, "CancelTransaction", {"id": "pm-r", "reason": 5})
     assert _статус(number) == "refunded"
-    assert _python(код) == "not_pending"
+    assert _python_env(код) == "not_pending"
     [(возвратов,)] = sql(
         "select count(*) from market_ledger where order_id = %s and account = 'refund_payable' "
         "and amount > 0",
@@ -682,23 +1049,91 @@ def test_возврат_ровно_один_раз(сайт, магазин):
     assert возвратов == 1
 
 
+#: День сверки, на который проверки переносят свои оплаты: прочие проверки
+#: файла в него не попадают — сверка видит только своё
+ДЕНЬ = "2020-01-01"
+
+
+def _в_тот_день(pk: int) -> None:
+    sql(
+        "update market_payments set created_at = %s, updated_at = %s, performed_at = "
+        "case when performed_at is null then null else %s::timestamp end where order_id = %s",
+        [f"{ДЕНЬ} 10:00:00", f"{ДЕНЬ} 10:00:00", f"{ДЕНЬ} 10:00:00", pk],
+    )
+    sql(
+        "update market_orders set paid_at = %s where id = %s and paid_at is not null",
+        [f"{ДЕНЬ} 10:00:00", pk],
+    )
+
+
 @нужна_база
 def test_сверка_оплат(сайт, магазин):
-    день = datetime.now(UTC).date().isoformat()
-    чисто = _manage("market_reconcile_payments", "--day", день)
+    # Чистый день: одна честная оплата Click
+    _, number, pk = _заказ(сайт, магазин)
+    поля = {"click_trans_id": "9901", "merchant_trans_id": number, "amount": "90000.00"}
+    готов = _click(сайт, "prepare", поля)
+    _click(сайт, "complete", {**поля, "merchant_prepare_id": str(готов["merchant_prepare_id"])})
+    _в_тот_день(pk)
+
+    чисто = _manage("market_reconcile_payments", "--day", ДЕНЬ)
     assert чисто.returncode == 0, чисто.stdout + чисто.stderr
+    assert "click: оплат 1, расхождений 0" in чисто.stdout
     assert "расхождений 0." in чисто.stdout
 
     # Оплата «проведена», а начисления в журнале нет — расхождение
-    _, number, pk = _заказ(сайт, магазин)
+    _, фальшивый, фальшивый_pk = _заказ(сайт, магазин)
     sql(
         "insert into market_payments (order_id, provider, provider_transaction_id, amount, "
         "status, performed_at) values (%s, 'click', 'fake-1', %s, 'paid', "
         "now() at time zone 'utc')",
-        [pk, ЦЕНА],
+        [фальшивый_pk, ЦЕНА],
     )
-    грязно = _manage("market_reconcile_payments", "--day", день)
-    assert грязно.returncode == 1
-    assert number in грязно.stdout
-    # В журнал приложения — только счётчики, без номера заказа
-    assert number not in грязно.stderr
+    _в_тот_день(фальшивый_pk)
+
+    # Отклонённая на проведении (Click Complete по отменённому заказу) —
+    # «проверить возврат у провайдера»
+    uid, отменён, отменён_pk = _заказ(сайт, магазин)
+    поля = {"click_trans_id": "9902", "merchant_trans_id": отменён, "amount": "90000.00"}
+    готов = _click(сайт, "prepare", поля)
+    _отменить(сайт, uid, отменён)
+    _click(сайт, "complete", {**поля, "merchant_prepare_id": str(готов["merchant_prepare_id"])})
+    sql(
+        "update market_payments set rejected_at = %s, updated_at = %s where order_id = %s",
+        [f"{ДЕНЬ} 11:00:00", f"{ДЕНЬ} 11:00:00", отменён_pk],
+    )
+    [(отклонена,)] = sql(
+        "select id from market_payments where order_id = %s and rejected_at is not null",
+        [отменён_pk],
+    )
+
+    # Заказ ждёт возврата дольше суток
+    покупатель, ждёт, ждёт_pk = _заказ(сайт, магазин)
+    _payme(
+        сайт,
+        "CreateTransaction",
+        {"id": "pm-wait-refund", "time": _ms(), "amount": ЦЕНА, "account": {"order": ждёт}},
+    )
+    _payme(сайт, "PerformTransaction", {"id": "pm-wait-refund"})
+    _отменить(сайт, покупатель, ждёт)
+    sql(
+        "update market_orders set cancelled_at = cancelled_at - interval '48 hours' where id = %s",
+        [ждёт_pk],
+    )
+
+    try:
+        грязно = _manage("market_reconcile_payments", "--day", ДЕНЬ)
+        assert грязно.returncode == 1, грязно.stdout
+        assert фальшивый in грязно.stdout
+        assert f"оплата {отклонена} отклонена на проведении" in грязно.stdout
+        assert f"{ждёт} ждёт возврата дольше 24 ч" in грязно.stdout
+        assert number not in грязно.stdout
+        # В журнал приложения — только счётчики, без номеров заказов
+        for номер in (фальшивый, ждёт):
+            assert номер not in грязно.stderr
+    finally:
+        # Прочие проверки после этой сверку не запускают, но порядок мог
+        # бы смениться: долгий возврат возвращаем в «сейчас»
+        sql(
+            "update market_orders set cancelled_at = now() at time zone 'utc' where id = %s",
+            [ждёт_pk],
+        )

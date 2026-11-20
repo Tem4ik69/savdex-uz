@@ -878,6 +878,18 @@ def _cutoff(moment: datetime | None, wait: timedelta) -> str:
     return ((moment or datetime.now(UTC)) - wait).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _paying(order_id: int, since: str) -> bool:
+    """По заказу идёт оплата: транзакция провайдера заведена не раньше since."""
+    return (
+        one(
+            "select 1 as found from market_payments where order_id = %s and status = 'pending' "
+            "and created_at >= %s limit 1",
+            [order_id, since],
+        )
+        is not None
+    )
+
+
 def expire(
     minutes: int | None = None, moment: datetime | None = None, *, hours: int | None = None
 ) -> int:
@@ -896,11 +908,18 @@ def expire(
     сколько отменено.
 
     Неоплаченный картой заказ, по которому провайдер уже завёл транзакцию
-    (market_payments, pending) меньше N минут назад, ждёт ещё: покупатель
-    как раз вводит код из СМС, и отмена под ним вернула бы ему деньги
-    вместо заказа.
+    (market_payments, pending), ждёт ещё — отсрочка: максимум из срока
+    ожидания оплаты и срока pending у провайдеров
+    (payments/base.py, max_pending_minutes): покупатель как раз вводит код
+    из СМС, и отмена под ним вернула бы ему деньги вместо заказа. Условие
+    перепроверяется под блокировкой заказа: провайдер заводит транзакцию,
+    тоже взяв заказ «for update» (base.open_transaction), так что между
+    проверкой и отменой новой транзакции не появится.
     """
+    from savdex.market.payments.base import max_pending_minutes
+
     wait = minutes if minutes is not None else expire_minutes()
+    grace = _cutoff(moment, timedelta(minutes=max(wait, max_pending_minutes())))
     cash_wait = hours if hours is not None else cash_expire_hours()
     queues = (
         (CREATED, "card", _cutoff(moment, timedelta(minutes=wait)), f"не оплачен за {wait} мин."),
@@ -916,10 +935,8 @@ def expire(
     for status, method, cutoff, note in queues:
         for found in rows(
             "select o.id from market_orders o where o.status = %s and o.payment_method = %s "
-            "and o.created_at < %s and not exists (select 1 from market_payments mp "
-            "where mp.order_id = o.id and mp.status = 'pending' and mp.created_at >= %s) "
-            "order by o.id limit 1000",
-            [status, method, cutoff, cutoff],
+            "and o.created_at < %s order by o.id limit 1000",
+            [status, method, cutoff],
         ):
             with transaction.atomic():
                 order = one(
@@ -928,7 +945,10 @@ def expire(
                     [found["id"], status],
                 )
 
-                if order is not None and _close(order, CANCELLED, actor="system", note=note):
+                if order is None or _paying(int(order["id"]), grace):
+                    continue
+
+                if _close(order, CANCELLED, actor="system", note=note):
                     done += 1
 
     if done:

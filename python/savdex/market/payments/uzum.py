@@ -115,7 +115,7 @@ class UzumProvider:
             return False
 
         # На боевом — только со списком адресов Uzum (раздел 3 правил)
-        return not (base.production() and not base.callback_ips(self.name))
+        return base.allowed_here(self.name)
 
     def create_invoice(
         self, order: dict[str, Any], payment: dict[str, Any], *, locale: str, back: str
@@ -159,15 +159,24 @@ def _json(data: dict[str, Any], status: int = 200) -> HttpResponse:
 
 
 def _amount(value: object) -> int | None:
-    """Сумма в тийинах: целое число или строка из цифр; иначе None."""
+    """
+    Сумма в тийинах: целое число или строка из цифр ASCII (не «²» и не
+    арабские цифры — их isdigit тоже считает цифрами) в пределах bigint;
+    иначе None.
+    """
     if isinstance(value, bool):
         return None
 
-    if isinstance(value, int):
-        return value
+    if isinstance(value, str):
+        text = value.strip()
 
-    if isinstance(value, str) and value.strip().isdigit():
-        return int(value.strip())
+        if not (text.isascii() and text.isdigit() and len(text) <= 19):
+            return None
+
+        value = int(text)
+
+    if isinstance(value, int) and 0 <= value <= base.BIGINT_MAX:
+        return value
 
     return None
 
@@ -206,9 +215,9 @@ class _Merchant:
     ) -> HttpResponse:
         return _json(
             {
-                "serviceId": self.data.get("serviceId"),
-                "timestamp": self.data.get("timestamp"),
-                "transId": self.data.get("transId"),
+                "serviceId": base.echo(self.data.get("serviceId")),
+                "timestamp": base.echo(self.data.get("timestamp")),
+                "transId": base.echo(self.data.get("transId")),
                 "status": "FAILED",
                 "errorCode": code,
                 **(extra or {}),
@@ -263,8 +272,8 @@ class _Merchant:
 
         return _json(
             {
-                "serviceId": self.data.get("serviceId"),
-                "timestamp": self.data.get("timestamp"),
+                "serviceId": base.echo(self.data.get("serviceId")),
+                "timestamp": base.echo(self.data.get("timestamp")),
                 "status": "OK",
                 "data": {"order": order["number"], "amount": int(order["total"])},
             }
@@ -291,7 +300,7 @@ class _Merchant:
 
         return _json(
             {
-                "serviceId": self.data.get("serviceId"),
+                "serviceId": base.echo(self.data.get("serviceId")),
                 "transId": trans_id,
                 "status": "CREATED",
                 "transTime": base.ms(payment["created_at"]),
@@ -336,7 +345,7 @@ class _Merchant:
 
         return _json(
             {
-                "serviceId": self.data.get("serviceId"),
+                "serviceId": base.echo(self.data.get("serviceId")),
                 "transId": fresh["provider_transaction_id"],
                 "status": "CONFIRMED",
                 "confirmTime": base.ms(fresh["performed_at"]),
@@ -368,7 +377,7 @@ class _Merchant:
 
         return _json(
             {
-                "serviceId": self.data.get("serviceId"),
+                "serviceId": base.echo(self.data.get("serviceId")),
                 "transId": fresh["provider_transaction_id"],
                 "status": "REVERSED",
                 "reverseTime": base.ms(fresh["refunded_at"] or fresh["cancelled_at"]),
@@ -385,7 +394,7 @@ class _Merchant:
 
         return _json(
             {
-                "serviceId": self.data.get("serviceId"),
+                "serviceId": base.echo(self.data.get("serviceId")),
                 "transId": payment["provider_transaction_id"],
                 "status": STATE_LABELS.get(payment["status"], payment["status"]),
                 "transTime": base.ms(payment["created_at"]),
@@ -408,12 +417,17 @@ def merchant(request: HttpRequest, operation: str) -> HttpResponse:
     handler = _Merchant(request, config)
 
     if not handler.authorized():
-        log.warning("market.payment.uzum.bad_auth")
+        base.auth_failed(request, "uzum")
 
         return handler.error(ERROR_AUTH, status=401)
 
     if not hmac.compare_digest(handler.text("serviceId").encode(), config.service_id.encode()):
         return handler.error(ERROR_BAD_SERVICE_ID)
+
+    # Новые транзакции — только где маркетплейс открыт; заведённые
+    # (confirm, reverse, status) провайдер доводит всегда
+    if operation in ("check", "create") and (closed := base.market_closed()) is not None:
+        return closed
 
     operations = {
         "check": handler.check,

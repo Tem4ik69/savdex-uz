@@ -35,8 +35,8 @@ import logging
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from datetime import UTC, date, datetime, timedelta
+from decimal import Decimal, DecimalException
 from functools import wraps
 from typing import Any, Protocol
 
@@ -97,10 +97,37 @@ MANUAL_REFUND: dict[str, str] = {
 VAT_KEY = "market_vat_percent"
 VAT_DEFAULT = 12
 
+#: Сколько минут живёт заведённая, но не проведённая транзакция (pending),
+#: если у провайдера не задано своё: дольше — попытка брошена
+PENDING_DEFAULT = 30
+
+#: Переменная окружения со сроком pending у каждого провайдера
+PENDING_KEYS = {
+    "uzum": "MARKET_UZUM_CONFIRM_TIMEOUT",
+    "payme": "MARKET_PAYME_PENDING_MINUTES",
+    "click": "MARKET_CLICK_PENDING_MINUTES",
+}
+
+#: Провайдеры, чью брошенную попытку (pending старше срока) гасим сами при
+#: новой попытке оплатить тот же заказ. У Payme свой срок — 12 часов, и
+#: отменяет он сам (CancelTransaction)
+STALE_CANCELLABLE = frozenset({"uzum", "click"})
+
+#: Лимиты колбэков на адрес отправителя (savdex/web/throttle.py): всего в
+#: минуту и неудачных проверок подписи или пароля за 10 минут
+RATE_KEY = "MARKET_CALLBACK_RATE"
+RATE_DEFAULT = 120
+AUTH_FAILS_KEY = "MARKET_CALLBACK_AUTH_FAILS"
+AUTH_FAILS_DEFAULT = 10
+AUTH_FAILS_WINDOW = 600
+
+#: Предел для чисел, которые пишутся в bigint
+BIGINT_MAX = 2**63 - 1
+
 _COLUMNS = (
     "id, order_id, provider, provider_transaction_id, provider_ref, provider_time, amount, "
     "status, reason, note, created_at, updated_at, performed_at, cancelled_at, "
-    "refund_requested_at, refunded_at"
+    "refund_requested_at, refunded_at, rejected_at"
 )
 _ORDER_COLUMNS = (
     "id, number, buyer_user_id, status, payment_method, total, paid_at, reserve_released_at"
@@ -133,6 +160,51 @@ def callback_ips(provider: str) -> list[str]:
     return [ip.strip() for ip in raw.split(",") if ip.strip()]
 
 
+def allowed_here(provider: str) -> bool:
+    """
+    На боевом провайдер работает только со списком своих адресов
+    (docs/marketplace-security.md, раздел 3): без него — выключен.
+    """
+    return not production() or bool(callback_ips(provider))
+
+
+def pending_minutes(provider: str) -> int:
+    """Срок жизни заведённой транзакции провайдера (минуты, не меньше 1)."""
+    return max(1, env_int(PENDING_KEYS.get(provider, ""), PENDING_DEFAULT))
+
+
+def max_pending_minutes() -> int:
+    """Самый длинный срок pending среди провайдеров — отсрочка истечения заказа."""
+    return max(pending_minutes(name) for name in PROVIDERS)
+
+
+def stale(found: dict[str, Any]) -> bool:
+    """Заведённая транзакция Uzum или Click старше своего срока — попытка брошена."""
+    if found["status"] != PENDING or found["provider"] not in STALE_CANCELLABLE:
+        return False
+
+    limit = timedelta(minutes=pending_minutes(str(found["provider"])))
+
+    return bool(found["created_at"] + limit < datetime.now(UTC).replace(tzinfo=None))
+
+
+def echo(value: object) -> object:
+    """
+    Что можно вернуть провайдеру эхом из его же запроса: строка до 64
+    знаков или целое в пределах bigint; прочее — None.
+    """
+    if isinstance(value, bool):
+        return None
+
+    if isinstance(value, str):
+        return value if len(value) <= 64 else None
+
+    if isinstance(value, int):
+        return value if -BIGINT_MAX <= value <= BIGINT_MAX else None
+
+    return None
+
+
 def vat_percent() -> int:
     """НДС для чека: настройка market_vat_percent; не число или вне 0…100 — 12."""
     try:
@@ -149,6 +221,12 @@ def return_url(number: str, fallback: str) -> str:
     с {number} или страница заказа (fallback).
     """
     template = env("MARKET_PAYMENT_RETURN_URL")
+
+    # «;» и «=» ломают параметры ссылки Payme (m=…;ac.order=…;c=…): такой
+    # шаблон не берём — возврат на страницу заказа
+    if template and (";" in template or "=" in template):
+        log.error("market.payment.return_url_rejected")
+        template = ""
 
     return template.replace("{number}", number) if template else fallback
 
@@ -176,20 +254,27 @@ def tiyin_exact(value: object) -> int | None:
     if value is None or isinstance(value, bool):
         return None
 
+    text = str(value).strip()
+
+    # Длинная строка — не сумма; разбирать её Decimal незачем
+    if len(text) > 32:
+        return None
+
     try:
-        amount = Decimal(str(value).strip())
-    except InvalidOperation:
+        amount = Decimal(text)
+
+        if not amount.is_finite() or amount <= 0 or amount > orders.MAX_TOTAL_SOM:
+            return None
+
+        cents = amount * 100
+
+        if cents != cents.to_integral_value():
+            return None
+    except DecimalException:
         return None
 
-    if not amount.is_finite() or amount <= 0:
-        return None
-
-    cents = amount * 100
-
-    if cents != cents.to_integral_value():
-        return None
-
-    return int(cents)
+    # Исчезающе малая сумма округляется в ноль — это не сумма
+    return int(cents) if cents > 0 else None
 
 
 # ── Протокол провайдера ─────────────────────────────────────────────
@@ -335,7 +420,7 @@ def _set(pk: int, before: tuple[str, ...], after: str, **fields: object) -> bool
     )
 
 
-def _refusal(order: dict[str, Any] | None, amount: int | None) -> str | None:
+def refusal(order: dict[str, Any] | None, amount: int | None) -> str | None:
     """Почему по заказу нельзя платить эту сумму; можно — None."""
     if order is None:
         return NOT_FOUND
@@ -363,7 +448,7 @@ def check(number: str, amount: int | None) -> tuple[dict[str, Any] | None, str |
     другой транзакции по нему нет. Без записи.
     """
     order = order_by_number(number)
-    problem = _refusal(order, amount)
+    problem = refusal(order, amount)
 
     if problem is not None:
         return order, problem
@@ -374,7 +459,8 @@ def check(number: str, amount: int | None) -> tuple[dict[str, Any] | None, str |
     if current is not None and current["status"] == PAID:
         return order, ALREADY_PAID
 
-    if current is not None and current["status"] == PENDING:
+    # Брошенная попытка (stale) новой не мешает: её погасит open_transaction
+    if current is not None and current["status"] == PENDING and not stale(current):
         return order, BUSY
 
     return order, None
@@ -396,14 +482,14 @@ def open_transaction(
     transaction.atomic: заказ — под замком до конца транзакции.
     """
     order = order_by_number(number, lock=True)
-    problem = _refusal(order, amount)
+    problem = refusal(order, amount)
 
     if problem is not None:
         return None, problem
 
     assert order is not None
     order_id = int(order["id"])
-    current = live(order_id, lock=True)
+    current = _drop_stale(live(order_id, lock=True))
 
     if current is not None:
         if current["status"] == PAID:
@@ -465,6 +551,21 @@ def open_transaction(
     return payment(int(pk)), None
 
 
+def _drop_stale(current: dict[str, Any] | None) -> dict[str, Any] | None:
+    """
+    Брошенная попытка Uzum или Click (pending старше срока провайдера)
+    гасится, чтобы не держать заказ: confirm или Complete по ней после
+    этого получат отказ, и провайдер вернёт деньги. Заказ — уже под замком.
+    """
+    if current is not None and stale(current):
+        cancel_pending(current, note=f"{current['provider']}: попытка брошена, истёк срок")
+        log.info("market.payment.stale_cancelled payment=%s", current["id"])
+
+        return None
+
+    return current
+
+
 def complete(found: dict[str, Any]) -> str | None:
     """
     Провайдер провёл деньги (Uzum confirm, Payme PerformTransaction, Click
@@ -483,18 +584,22 @@ def complete(found: dict[str, Any]) -> str | None:
         return None
 
     order = order_by_id(order_id)
+    # rejected_at — отказ на шаге проведения: у провайдера деньги могли уже
+    # списать, сверка просит проверить, что он их вернул
     _set(
         int(found["id"]),
         (PENDING,),
         CANCELLED,
         cancelled_at=now(),
-        reason=3,
-        note="заказ уже не ждёт оплаты — деньги не приняты",
+        rejected_at=now(),
+        # Код причины — понятие Payme (3 — ошибка проведения); у прочих пусто
+        reason=3 if found["provider"] == "payme" else None,
+        note="отклонена: заказ уже не ждёт оплаты",
     )
     log.warning(
-        "market.payment.rejected provider=%s order=%s status=%s",
+        "market.payment.rejected provider=%s payment=%s status=%s",
         found["provider"],
-        order_id,
+        found["id"],
         order["status"] if order else None,
     )
 
@@ -572,7 +677,7 @@ def open_invoice(
         if order is None:
             raise orders.OrderRefused("order.not_found", 404)
 
-        problem = _refusal(order, int(order["total"]))
+        problem = refusal(order, int(order["total"]))
 
         if problem == ALREADY_PAID:
             raise orders.OrderRefused("payment.already_paid", 409)
@@ -581,7 +686,7 @@ def open_invoice(
             raise orders.OrderRefused("payment.not_payable", 409)
 
         order_id = int(order["id"])
-        current = live(order_id, lock=True)
+        current = _drop_stale(live(order_id, lock=True))
 
         if current is not None and current["status"] == PAID:
             raise orders.OrderRefused("payment.already_paid", 409)
@@ -631,6 +736,10 @@ def refund_order(order_id: int) -> str:
     - ``refused`` — провайдер отказал, можно повторить;
     - ``error`` — сбой связи: вернул ли провайдер деньги, неизвестно —
       повторно сам не запрашиваем, разбирают руками (журнал — ERROR);
+    - ``unrecorded`` — провайдер вернул, а заказ отметить не удалось (ERROR с
+      номером оплаты, сверка показывает);
+    - ``disabled`` — провайдер выключен (нет ключей): отметку не ставим,
+      расписание повторит после включения;
     - ``not_pending`` — заказ не ждёт возврата; ``no_payment`` — оплаты картой нет.
 
     Сеть — вне транзакции и без замков: замок держит только отметка
@@ -652,6 +761,19 @@ def refund_order(order_id: int) -> str:
 
         return "no_payment"
 
+    provider = get(str(found["provider"]))
+
+    # Провайдер выключен (нет ключей) — отметку не ставим: иначе возврат
+    # «запрошен» навсегда, и после включения его никто не повторит
+    if not provider.enabled():
+        log.warning(
+            "market.payment.refund_provider_disabled provider=%s payment=%s",
+            found["provider"],
+            found["id"],
+        )
+
+        return "disabled"
+
     claimed = write(
         "update market_payments set refund_requested_at = %s, updated_at = %s "
         "where id = %s and status = %s and refund_requested_at is null",
@@ -661,13 +783,11 @@ def refund_order(order_id: int) -> str:
     if not claimed:
         return "requested"
 
-    provider = get(str(found["provider"]))
-
     try:
-        result = provider.refund(found) if provider.enabled() else None
+        result = provider.refund(found)
     except Exception:
         log.exception(
-            "market.payment.refund_failed provider=%s order=%s", found["provider"], order_id
+            "market.payment.refund_failed provider=%s payment=%s", found["provider"], found["id"]
         )
 
         return "error"
@@ -675,7 +795,10 @@ def refund_order(order_id: int) -> str:
     if result is None:
         note = MANUAL_REFUND[str(found["provider"])]
 
+        # Порядок замков — как везде: заказ, затем оплата
         with transaction.atomic():
+            order_by_id(order_id, lock=True)
+            payment(int(found["id"]), lock=True)
             write(
                 "update market_payments set note = %s, updated_at = %s where id = %s",
                 [note[:500], now(), found["id"]],
@@ -683,7 +806,7 @@ def refund_order(order_id: int) -> str:
             orders.note(order_id, note)
 
         log.warning(
-            "market.payment.refund_manual provider=%s order=%s", found["provider"], order_id
+            "market.payment.refund_manual provider=%s payment=%s", found["provider"], found["id"]
         )
 
         return "manual"
@@ -694,7 +817,9 @@ def refund_order(order_id: int) -> str:
             "where id = %s and status = %s",
             [now(), found["id"], PAID],
         )
-        log.error("market.payment.refund_refused provider=%s order=%s", found["provider"], order_id)
+        log.error(
+            "market.payment.refund_refused provider=%s payment=%s", found["provider"], found["id"]
+        )
 
         return "refused"
 
@@ -705,8 +830,20 @@ def refund_order(order_id: int) -> str:
     ):
         return "refunded"
 
+    fresh = payment(int(found["id"]))
+
     # Пока шёл запрос, провайдер уже прислал отмену — возврат записан ею
-    return "requested"
+    if fresh is not None and fresh["status"] == REFUNDED:
+        return "requested"
+
+    # Провайдер деньги вернул, а заказ отметить не удалось (статус сменили
+    # между запросом и ответом): ERROR с номером оплаты, сверка покажет
+    # «возврат запрошен, заказ не ждёт возврата»
+    log.error(
+        "market.payment.refund_unrecorded provider=%s payment=%s", found["provider"], found["id"]
+    )
+
+    return "unrecorded"
 
 
 def refund_all(limit: int = 200) -> dict[str, int]:
@@ -730,6 +867,63 @@ def refund_all(limit: int = 200) -> dict[str, int]:
 View = Callable[..., HttpResponse]
 
 
+def _keys(request: HttpRequest) -> tuple[str, str]:
+    """Ключи счётчиков частоты: по адресу отправителя (sha1 — адрес в имени файла не виден)."""
+    import hashlib
+
+    from savdex import audit
+
+    ip = hashlib.sha1((audit.client_ip(request) or "").encode()).hexdigest()
+
+    return f"market-pay:{ip}", f"market-pay-auth:{ip}"
+
+
+def _throttled(request: HttpRequest) -> bool:
+    """
+    Общий предел колбэков с адреса и предел неудачных проверок подписи
+    (savdex/web/throttle.py, файловый кэш; не файловое хранилище — без
+    предела, как у остального сайта). Засчитывается каждый запрос.
+    """
+    from savdex import laravel_cache
+    from savdex.web import throttle
+
+    if not laravel_cache.is_file_store():
+        return False
+
+    rate_key, auth_key = _keys(request)
+
+    if throttle.too_many(auth_key, max(1, env_int(AUTH_FAILS_KEY, AUTH_FAILS_DEFAULT))):
+        return True
+
+    if throttle.too_many(rate_key, max(1, env_int(RATE_KEY, RATE_DEFAULT))):
+        return True
+
+    throttle.hit(rate_key, 60)
+
+    return False
+
+
+def auth_failed(request: HttpRequest, provider: str) -> None:
+    """Неудачная проверка подписи или пароля — в счётчик адреса и в журнал (без данных)."""
+    from savdex import laravel_cache
+    from savdex.web import throttle
+
+    log.warning("market.payment.bad_auth provider=%s", provider)
+
+    if laravel_cache.is_file_store():
+        throttle.hit(_keys(request)[1], AUTH_FAILS_WINDOW)
+
+
+def market_closed() -> HttpResponse | None:
+    """
+    Новая транзакция там, где маркетплейс закрыт (market_open ложно), —
+    404, как будто адреса нет; открыт — None.
+    """
+    from savdex.web.shared import market_open
+
+    return None if market_open() else HttpResponse(status=404)
+
+
 def callback(provider: str, deny: Callable[[HttpRequest], HttpResponse]) -> Callable[[View], View]:
     """
     Обёртка колбэка провайдера (сервер — серверу):
@@ -738,11 +932,18 @@ def callback(provider: str, deny: Callable[[HttpRequest], HttpResponse]) -> Call
       подпись или пароль, которые проверяет сам колбэк (как у колбэков
       тарифов, savdex/web/payment_callbacks.py; проверка CSRF Django на
       сайте и так стоит только на /py/ — savdex/csrf.py);
-    - только там, где маркетплейс открыт (market_open), и только у
-      включённого провайдера — иначе 404, как будто адреса нет;
+    - только у включённого провайдера (ключи заданы; на боевом — и список
+      адресов) — иначе 404, как будто адреса нет. «Маркетплейс открыт»
+      (market_open) проверяет сам колбэк и только для новых транзакций
+      (``market_closed``): по уже заведённым — confirm, perform, complete,
+      reverse, cancel, status — провайдер должен достучаться всегда, иначе
+      деньги повиснут;
     - только POST;
     - белый список адресов провайдера (MARKET_<ПРОВАЙДЕР>_CALLBACK_IPS),
       если задан; чужой адрес — deny (ответ в формате провайдера);
+    - не больше MARKET_CALLBACK_RATE (120) запросов в минуту с адреса и не
+      больше MARKET_CALLBACK_AUTH_FAILS (10) неудачных проверок подписи или
+      пароля за 10 минут (``auth_failed``) — дальше deny;
     - вся обработка — одной транзакцией: два одинаковых колбэка разом —
       второй ждёт замка и видит готовое, а не 500.
     """
@@ -752,9 +953,8 @@ def callback(provider: str, deny: Callable[[HttpRequest], HttpResponse]) -> Call
         @wraps(view)
         def wrapped(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
             from savdex import audit
-            from savdex.web.shared import market_open
 
-            if not market_open() or not enabled(provider):
+            if not enabled(provider):
                 return HttpResponse(status=404)
 
             if request.method != "POST":
@@ -764,6 +964,11 @@ def callback(provider: str, deny: Callable[[HttpRequest], HttpResponse]) -> Call
 
             if ips and audit.client_ip(request) not in ips:
                 log.warning("market.payment.foreign_ip provider=%s", provider)
+
+                return deny(request)
+
+            if _throttled(request):
+                log.warning("market.payment.throttled provider=%s", provider)
 
                 return deny(request)
 

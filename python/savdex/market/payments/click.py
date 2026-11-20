@@ -80,7 +80,8 @@ REFUSALS = {
     base.ALREADY_PAID: ERROR_ALREADY_PAID,
     base.NOT_PAYABLE: ERROR_CANCELLED,
     base.WRONG_AMOUNT: ERROR_AMOUNT,
-    base.BUSY: ERROR_REQUEST,
+    # По заказу идёт другая оплата — для Click это «отменена»
+    base.BUSY: ERROR_CANCELLED,
 }
 
 #: Связь с API возврата: соединение 5 с, ответ 15 с
@@ -142,7 +143,10 @@ class ClickProvider:
     def enabled(self) -> bool:
         config = Config.from_env()
 
-        return bool(config.service_id and config.merchant_id and config.secret_key)
+        # На боевом — только со списком адресов Click, как у Uzum
+        return bool(
+            config.service_id and config.merchant_id and config.secret_key
+        ) and base.allowed_here(self.name)
 
     def create_invoice(
         self, order: dict[str, Any], payment: dict[str, Any], *, locale: str, back: str
@@ -215,8 +219,8 @@ PROVIDER = ClickProvider()
 
 def _answer(form: dict[str, str], error: int, **extra: object) -> HttpResponse:
     body = {
-        "click_trans_id": form.get("click_trans_id"),
-        "merchant_trans_id": form.get("merchant_trans_id"),
+        "click_trans_id": base.echo(form.get("click_trans_id")),
+        "merchant_trans_id": base.echo(form.get("merchant_trans_id")),
         **extra,
         "error": error,
         "error_note": NOTES.get(error, NOTES[ERROR_REQUEST]),
@@ -243,7 +247,9 @@ _REQUIRED = (
 )
 
 
-def _verified(form: dict[str, str], config: Config, *, complete: bool) -> int | None:
+def _verified(
+    request: HttpRequest, form: dict[str, str], config: Config, *, complete: bool
+) -> int | None:
     """Код ошибки разбора и подписи; всё верно — None."""
     needed = (*_REQUIRED, "merchant_prepare_id") if complete else _REQUIRED
 
@@ -262,7 +268,7 @@ def _verified(form: dict[str, str], config: Config, *, complete: bool) -> int | 
     )
 
     if not hmac.compare_digest(expected.encode(), form["sign_string"].lower().encode()):
-        log.warning("market.payment.click.bad_sign")
+        base.auth_failed(request, "click")
 
         return ERROR_SIGN
 
@@ -285,7 +291,12 @@ def prepare(request: HttpRequest) -> HttpResponse:
     config = Config.from_env()
     form = _form(request)
 
-    if (problem := _verified(form, config, complete=False)) is not None:
+    # Новая транзакция — только где маркетплейс открыт; Complete по
+    # заведённой Click доводит всегда
+    if (closed := base.market_closed()) is not None:
+        return closed
+
+    if (problem := _verified(request, form, config, complete=False)) is not None:
         return _answer(form, problem)
 
     amount = base.tiyin_exact(form["amount"])
@@ -303,8 +314,18 @@ def prepare(request: HttpRequest) -> HttpResponse:
         if existing["status"] != base.PENDING:
             return _answer(form, ERROR_CANCELLED)
 
+        # Повтор с известным id: тот же заказ, та же сумма, и заказ всё ещё
+        # ждёт оплаты (не истёк и не отменён)
+        order = base.order_by_id(int(existing["order_id"]))
+
+        if order is None or order["number"] != form["merchant_trans_id"].upper():
+            return _answer(form, ERROR_TRANSACTION_NOT_FOUND)
+
         if int(existing["amount"]) != amount:
             return _answer(form, ERROR_AMOUNT)
+
+        if (refused := base.refusal(order, amount)) is not None:
+            return _answer(form, REFUSALS.get(refused, ERROR_CANCELLED))
 
         return _answer(form, OK, merchant_prepare_id=int(existing["id"]))
 
@@ -328,7 +349,7 @@ def complete(request: HttpRequest) -> HttpResponse:
     config = Config.from_env()
     form = _form(request)
 
-    if (problem := _verified(form, config, complete=True)) is not None:
+    if (problem := _verified(request, form, config, complete=True)) is not None:
         return _answer(form, problem)
 
     payment = base.locked("click", form["click_trans_id"][:64])

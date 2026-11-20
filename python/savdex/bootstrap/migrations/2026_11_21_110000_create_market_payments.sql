@@ -21,6 +21,8 @@
 -- time — по нему отвечаем на GetStatement). reason — код причины отмены
 -- (Payme reason), note — короткая пометка для администратора.
 -- refund_requested_at — возврат уже запрошен (ровно один раз).
+-- rejected_at — отклонена на шаге проведения (заказ уже не ждал оплаты):
+-- провайдер мог списать деньги, сверка просит проверить, что он их вернул.
 -- created_at — когда провайдер завёл транзакцию (у открытого счёта —
 -- когда счёт открыт): от него считаются сроки провайдера.
 create table market_payments (
@@ -40,6 +42,7 @@ create table market_payments (
     cancelled_at timestamp(0) without time zone,
     refund_requested_at timestamp(0) without time zone,
     refunded_at timestamp(0) without time zone,
+    rejected_at timestamp(0) without time zone,
     constraint market_payments_provider_check check (provider in ('uzum', 'payme', 'click')),
     constraint market_payments_status_check
         check (status in ('created', 'pending', 'paid', 'cancelled', 'refunded')),
@@ -58,6 +61,8 @@ create unique index market_payments_live_unique on market_payments (order_id)
 create index market_payments_order_index on market_payments (order_id);
 create index market_payments_provider_time_index on market_payments (provider, provider_time);
 create index market_payments_updated_index on market_payments (updated_at);
+create index market_payments_rejected_index on market_payments (rejected_at)
+    where rejected_at is not null;
 
 -- ── Права роли Django ──────────────────────────────────────────────
 -- Читать, заводить и менять статус; удалять — нет: история оплат нужна

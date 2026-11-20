@@ -378,14 +378,16 @@ def reconcile_market_payments(now: datetime, due: datetime) -> str:
     """
     Каждую ночь: оплаты маркетплейса за вчерашние сутки (UTC) — против
     журнала денег (savdex/market/payments/reconcile.py). Расхождение —
-    ERROR в журнале приложения, только счётчики.
+    ERROR в журнале приложения, только счётчики, и сигнал «сбой» в
+    Healthchecks (MARKET_HC_PING_PAYMENTS) — тревога в Telegram.
     """
     from savdex.market.payments import reconcile
 
-    reports = reconcile.run(now.date() - timedelta(days=1))
-    total = sum(len(report.problems) for report in reports)
+    day = now.date() - timedelta(days=1)
+    reports = reconcile.run(day)
+    reconcile.signal(reports, day)
 
-    return f"Сверка оплат маркетплейса: расхождений {total}."
+    return reconcile.summary(reports, day) + "."
 
 
 JOBS: tuple[Job, ...] = (
