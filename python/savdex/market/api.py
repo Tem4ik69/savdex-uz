@@ -94,10 +94,19 @@ def _limited(ctx: Context, name: str, per_minute: int) -> JsonResponse | None:
     if not laravel_cache.is_file_store():
         return None
 
-    key = f"market-{name}|{throttle.signature(ctx)}"
+    import time
 
-    if throttle.too_many(key, per_minute):
-        return _json({"message": "Too many requests"}, 429)
+    key = f"market-{name}|{throttle.signature(ctx)}"
+    # Гость считается по адресу, а у мобильных операторов один адрес — на
+    # многих абонентов (CGNAT): гостю предел втрое выше, чем вошедшему
+    limit = per_minute if ctx.visitor.user_id is not None else per_minute * 3
+
+    if throttle.too_many(key, limit):
+        response = _json({"message": "Too many requests"}, 429)
+        until = laravel_cache._to_int(laravel_cache.get(f"{key}:timer") or 0)
+        response["Retry-After"] = str(max(1, until - int(time.time())))
+
+        return response
 
     throttle.hit(key)
 
@@ -149,7 +158,7 @@ def suggest(request: HttpRequest) -> HttpResponse:
     if isinstance(ctx, HttpResponse):
         return ctx
 
-    if (refused := _limited(ctx, "suggest", 60)) is not None:
+    if (refused := _limited(ctx, "suggest", 120)) is not None:
         return refused
 
     return _json(catalog.suggest(str(request.GET.get("q", ""))[:100], ctx.locale))
