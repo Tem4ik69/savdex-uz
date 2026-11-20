@@ -40,8 +40,10 @@ create table market_pickup_points (
 -- обновлением «where status = ожидаемый».
 --
 -- reserve_released_at — когда резерв остатка снят (отмена, истечение):
--- снимается ровно один раз. pickup_code_hash — хеш кода выдачи
--- (следующий этап, вместе с ПВЗ).
+-- снимается ровно один раз. stock_written_off_at — когда при выдаче
+-- списан остаток (и резерв вместе с ним): тоже ровно один раз; у
+-- списанного заказа резерв больше не снимается. pickup_code_hash —
+-- хеш кода выдачи (следующий этап, вместе с ПВЗ).
 create table market_orders (
     id bigserial primary key,
     number varchar(16) not null,
@@ -61,6 +63,7 @@ create table market_orders (
     cancel_reason varchar(500),
     issued_at timestamp(0) without time zone,
     reserve_released_at timestamp(0) without time zone,
+    stock_written_off_at timestamp(0) without time zone,
     created_at timestamp(0) without time zone not null default (now() at time zone 'utc'),
     updated_at timestamp(0) without time zone not null default (now() at time zone 'utc'),
     constraint market_orders_number_unique unique (number),

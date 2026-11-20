@@ -479,13 +479,14 @@ def release_reserve(order_id: int) -> bool:
     """
     Снять резерв остатка заказа — ровно один раз: отметка
     ``reserve_released_at`` ставится условно, второй вызов ничего не делает.
-    Сводка остатка товаров (market_products.stock) — заново, в той же
-    транзакции.
+    У выданного заказа (``stock_written_off_at``) резерв уже ушёл вместе с
+    остатком — снимать нечего. Сводка остатка товаров (market_products.stock)
+    — заново, в той же транзакции.
     """
     with transaction.atomic():
         changed = write(
             "update market_orders set reserve_released_at = %s "
-            "where id = %s and reserve_released_at is null",
+            "where id = %s and reserve_released_at is null and stock_written_off_at is null",
             [now(), order_id],
         )
 
@@ -944,35 +945,104 @@ STAFF_STEPS: dict[str, str] = {
     READY: ISSUED,
 }
 
-#: Сотрудник отменяет заказ с оплатой при получении — до отгрузки со склада
-STAFF_CANCELLABLE = frozenset({CASH_ON_PICKUP, ASSEMBLING})
+#: Сотрудник отменяет заказ до отгрузки со склада: при получении — из
+#: «оплата при получении» и «собирается», оплаченный картой — из «оплачен» и
+#: «собирается» (деньги — к возврату, refund_pending)
+STAFF_CANCELLABLE: dict[str, frozenset[str]] = {
+    "cash": frozenset({CASH_ON_PICKUP, ASSEMBLING}),
+    "card": frozenset({PAID, ASSEMBLING}),
+}
+
+
+class WriteOffError(RuntimeError):
+    """Остаток или резерв варианта меньше выдаваемого: выдача откатывается."""
 
 
 def staff_can_cancel(status: str, payment_method: str) -> bool:
-    return payment_method == "cash" and status in STAFF_CANCELLABLE
+    return status in STAFF_CANCELLABLE.get(payment_method, frozenset())
+
+
+def _write_off(order_id: int) -> bool:
+    """
+    Выдача: списать остаток — ровно один раз (``stock_written_off_at``,
+    условно). Строки товаров — раньше вариантов; у варианта уходят и
+    остаток, и резерв на количество позиции, у товара растут продажи,
+    сводка — заново. Не хватило остатка или резерва — WriteOffError, вся
+    транзакция (и переход в «выдан») откатывается. False — уже списано.
+    """
+    if not write(
+        "update market_orders set stock_written_off_at = %s "
+        "where id = %s and stock_written_off_at is null and reserve_released_at is null",
+        [now(), order_id],
+    ):
+        return False
+
+    items = rows(
+        "select variant_id, product_id, quantity from market_order_items where order_id = %s "
+        "order by variant_id",
+        [order_id],
+    )
+    _lock_products(int(item["product_id"]) for item in items)
+    sold: dict[int, int] = {}
+
+    for item in items:
+        quantity = int(item["quantity"])
+
+        if not write(
+            "update market_product_variants set stock = stock - %s, reserved = reserved - %s "
+            "where id = %s and reserved >= %s and stock >= %s",
+            [quantity, quantity, item["variant_id"], quantity, quantity],
+        ):
+            log.error(
+                "market.order.write_off_mismatch order=%s variant=%s", order_id, item["variant_id"]
+            )
+
+            raise WriteOffError(f"заказ {order_id}: остаток варианта {item['variant_id']}")
+
+        sold[int(item["product_id"])] = sold.get(int(item["product_id"]), 0) + quantity
+
+    for product_id, quantity in sorted(sold.items()):
+        write(
+            "update market_products set sold_count = sold_count + %s where id = %s",
+            [quantity, product_id],
+        )
+
+    _refresh_products(sold)
+
+    return True
 
 
 def advance(order_id: int, before: str, *, actor_user_id: int, note: str | None = None) -> bool:
     """
     Сотрудник переводит заказ на следующий шаг (STAFF_STEPS) из статуса,
-    который видел (before). False — шага нет или статус уже сменил кто-то
-    другой (повторный щелчок); ничего не записано.
+    который видел (before). Выдача (→ issued) в той же транзакции списывает
+    остаток (_write_off). False — шага нет или статус уже сменил кто-то
+    другой (повторный щелчок); ничего не записано. WriteOffError —
+    остатка не хватило, всё откатано.
     """
     after = STAFF_STEPS.get(before)
 
     if after is None:
         return False
 
-    return transition(
-        order_id, before, after, actor="staff", actor_user_id=actor_user_id, note=note
-    )
+    with transaction.atomic():
+        if not transition(
+            order_id, before, after, actor="staff", actor_user_id=actor_user_id, note=note
+        ):
+            return False
+
+        if after == ISSUED:
+            _write_off(order_id)
+
+    return True
 
 
-def staff_cancel(order_id: int, before: str, *, actor_user_id: int, note: str) -> bool:
+def staff_cancel(order_id: int, before: str, *, actor_user_id: int, note: str) -> str | None:
     """
-    Сотрудник отменяет заказ с оплатой при получении (до отгрузки) — тем же
-    путём, что покупатель: резерв снят один раз, начисление — назад. False —
-    статус уже не тот, что видел сотрудник, или отменять так нельзя.
+    Сотрудник отменяет заказ до отгрузки — тем же путём, что покупатель:
+    резерв снят один раз, начисление — назад; оплаченный картой — в
+    «ожидает возврата». Возвращает новый статус; None — статус уже не тот,
+    что видел сотрудник, или отменять так нельзя.
     """
     with transaction.atomic():
         order = one(
@@ -981,14 +1051,16 @@ def staff_cancel(order_id: int, before: str, *, actor_user_id: int, note: str) -
         )
 
         if order is None or not staff_can_cancel(str(order["status"]), order["payment_method"]):
-            return False
+            return None
 
-        closed = _close(order, CANCELLED, actor="staff", actor_user_id=actor_user_id, note=note)
+        target = REFUND_PENDING if order["paid_at"] is not None else CANCELLED
 
-    if closed:
-        log.info("market.order.staff_cancelled id=%s", order_id)
+        if not _close(order, target, actor="staff", actor_user_id=actor_user_id, note=note):
+            return None
 
-    return closed
+    log.info("market.order.staff_cancelled id=%s to=%s", order_id, target)
+
+    return target
 
 
 # ── Деньги — зовёт оплата (savdex/market/payments) ──────────────────

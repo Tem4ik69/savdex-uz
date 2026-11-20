@@ -267,6 +267,7 @@ class Order(models.Model):
     cancel_reason = models.CharField("причина отмены", max_length=500, null=True)
     issued_at = UTCDateTimeField("выдан", null=True)
     reserve_released_at = UTCDateTimeField("резерв снят", null=True)
+    stock_written_off_at = UTCDateTimeField("остаток списан", null=True)
     created_at = UTCDateTimeField("оформлен", auto_now_add=True)
     updated_at = UTCDateTimeField("изменён", auto_now=True)
 

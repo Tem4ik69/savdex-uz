@@ -32,7 +32,7 @@ from typing import Any, ClassVar
 from django import forms
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import Count, OuterRef, QuerySet, Subquery
 from django.forms.models import BaseInlineFormSet
 from django.http import HttpRequest, HttpResponse, HttpResponseRedirect
@@ -138,6 +138,13 @@ def _notify(
     )
 
 
+class DecisionRefused(Exception):  # noqa: N818 — отказ сотруднику, а не сбой
+    """
+    Решение не принято (статус уже сменили, не хватило остатка): decide
+    бросает его с текстом — панель покажет предупреждение, а не «готово».
+    """
+
+
 class DecisionsMixin:
     """
     Кнопки решений под карточкой — общая панель модерации.
@@ -231,9 +238,14 @@ class DecisionsMixin:
 
             seen = _version(obj.updated_at)
 
-        self.message_user(  # type: ignore[attr-defined]
-            request, self.decide(request, obj, decision, note, seen), messages.SUCCESS
-        )
+        try:
+            done = self.decide(request, obj, decision, note, seen)
+        except DecisionRefused as refused:
+            self.message_user(request, str(refused), messages.WARNING)  # type: ignore[attr-defined]
+
+            return HttpResponseRedirect(page)
+
+        self.message_user(request, done, messages.SUCCESS)  # type: ignore[attr-defined]
 
         return HttpResponseRedirect(page)
 
@@ -1198,7 +1210,12 @@ class OrderAdmin(DecisionsMixin, SavdexModelAdmin):
             found.append((f"to:{obj.status}:{after}", _STEP_LABELS[after], False))
 
         if orders.staff_can_cancel(obj.status, obj.payment_method):
-            found.append((f"cancel:{obj.status}", "Отменить заказ", False))
+            label = (
+                "Отменить заказ (деньги — к возврату)"
+                if obj.paid_at is not None
+                else "Отменить заказ"
+            )
+            found.append((f"cancel:{obj.status}", label, False))
 
         return found
 
@@ -1210,34 +1227,44 @@ class OrderAdmin(DecisionsMixin, SavdexModelAdmin):
         note: str,
         version: str | None,
     ) -> str:
+        """
+        Шаг или отмена и строка журнала — одной транзакцией. Не вышло —
+        DecisionRefused (предупреждение), ничего не записано.
+        """
         admin = _admin_of(request)
         kind, before, *rest = decision.split(":")
         text = note[:500] or None
 
-        if kind == "cancel":
-            after = orders.CANCELLED
-            done = orders.staff_cancel(
-                obj.pk, before, actor_user_id=admin.id, note=text or "отменён сотрудником"
-            )
-        else:
-            after = rest[0]
-            done = orders.advance(obj.pk, before, actor_user_id=admin.id, note=text)
+        try:
+            with transaction.atomic():
+                if kind == "cancel":
+                    after = orders.staff_cancel(
+                        obj.pk, before, actor_user_id=admin.id, note=text or "отменён сотрудником"
+                    )
+                else:
+                    moved = orders.advance(obj.pk, before, actor_user_id=admin.id, note=text)
+                    after = rest[0] if moved else None
 
-        if not done:
-            return "Статус заказа уже изменился — обновите страницу."
+                if after is None:
+                    raise DecisionRefused("Статус заказа уже изменился — обновите страницу.")
 
-        audit.record(
-            connection,
-            action="cancelled" if kind == "cancel" else "status_changed",
-            section="market_orders",
-            actor=admin,
-            subject_type=self.laravel_model,
-            subject_id=obj.pk,
-            subject_label=obj.number,
-            changes={"before": {"status": before}, "after": {"status": after}},
-            note=text,
-            ip=audit.client_ip(request),
-        )
+                audit.record(
+                    connection,
+                    action="cancelled" if kind == "cancel" else "status_changed",
+                    section="market_orders",
+                    actor=admin,
+                    subject_type=self.laravel_model,
+                    subject_id=obj.pk,
+                    subject_label=obj.number,
+                    changes={"before": {"status": before}, "after": {"status": after}},
+                    note=text,
+                    ip=audit.client_ip(request),
+                )
+        except orders.WriteOffError as error:
+            raise DecisionRefused(
+                "Заказ не выдан: остаток или резерв товара меньше заказанного — "
+                "проверьте остатки в карточке товара."
+            ) from error
 
         return f"Заказ {obj.number}: {orders.STATUSES.get(after, after)}."
 
