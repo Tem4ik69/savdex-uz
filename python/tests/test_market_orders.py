@@ -19,7 +19,10 @@ docs/marketplace-security.md, разделы 1, 3 и 5.
 - продавец не видит неоплаченный картой заказ — ни ждущий, ни отменённый;
 - куплено меньше, чем лежало в корзине, — остаток строки остаётся;
 - сводка остатка товара пересчитывается при оформлении и снятии резерва;
-- пользователя с заказами админка навсегда не удаляет — понятный отказ.
+- пользователя с заказами админка навсегда не удаляет — понятный отказ;
+- в лимите — и отменённые самим покупателем за сутки;
+- сотрудник (market_orders.moderate) ведёт заказ до выдачи и отменяет
+  заказ при получении до отгрузки; поддержке — 403.
 
 Нужен PostgreSQL (SAVDEX_PARITY_PG_URL).
 """
@@ -38,7 +41,7 @@ import pytest
 from savdex.market import orders
 from savdex.market.common import MAX_PRICE_SOM, tiyin
 
-from .pg_admin import PYTHON, ОКРУЖЕНИЕ, django, sql, нужна_база, свежая_база
+from .pg_admin import PYTHON, ОКРУЖЕНИЕ, django, sql, журнал, нужна_база, свежая_база
 from .test_market import (
     _get,
     _get_as,
@@ -180,6 +183,10 @@ def _роль_django() -> None:
     Роль savdex_django, как на сервере (так же, как в tests/test_schema.py):
     миграции выдают ей права, их проверяет
     test_у_роли_приложения_журнал_только_дописывается. В чистой базе CI её нет.
+
+    Роль не удаляется после модуля и остаётся в кластере до конца потока
+    тестов — как и у фикстуры в tests/test_schema.py: на ней держатся
+    права и права по умолчанию, которые выдают миграции и свежая_база().
     """
     sql(
         "do $$ begin if not exists (select from pg_roles where rolname = 'savdex_django') "
@@ -805,3 +812,140 @@ def test_админка_заказов_имя_покупателя(сайт, м�
         _, страница = django(_сотрудник(role), ("get", "/py/admin/market/order/", None))
         assert страница["status"] == 200, role
         assert number in страница["body"] and "Шахноза Рашидова" in страница["body"], role
+
+
+# ── Лимит с отменами, шаги заказа в админке ────────────────────────
+
+
+@нужна_база
+def test_отменённые_покупателем_за_сутки_в_лимите(сайт, магазин):
+    _, вариант = _товар(
+        магазин["продавец"], "toys", "Скакалка", "jump-rope", price=10_000, stock=50
+    )
+    покупатель = _покупатель()
+
+    for _ in range(orders.MAX_OPEN_ORDERS):
+        _в_корзину(покупатель, вариант)
+        number = _json(_оформить(сайт, покупатель, 10_000))["order"]["number"]
+        assert _post(сайт, f"/market/api/orders/{number}/cancel", покупатель)["status"] == 200
+
+    # Открытых нет, но пять отмен за сутки — цикл «оформить — отменить» упирается в лимит
+    assert _резерв(вариант) == 0
+    _в_корзину(покупатель, вариант)
+    шестой = _оформить(сайт, покупатель, 10_000)
+    assert шестой["status"] == 409, шестой["body"]
+    assert "5 незавершённых заказов" in _json(шестой)["message"]
+
+    # Сутки прошли — отмены больше не считаются
+    sql(
+        "update market_orders set cancelled_at = cancelled_at - interval '25 hours' "
+        "where buyer_user_id = %s",
+        [покупатель],
+    )
+    assert _оформить(сайт, покупатель, 10_000)["status"] == 201
+
+
+def _шаг(uid: int, pk: int, decision: str, note: str = "") -> dict[str, Any]:
+    """POST решения в карточке заказа и следующая за ним страница карточки."""
+    адрес_заказа = f"/py/admin/market/order/{pk}/"
+    _, ответ, страница = django(
+        uid,
+        ("post", адрес_заказа + "decide/", {"decision": decision, "note": note}),
+        ("get", адрес_заказа + "change/", None),
+    )
+    assert ответ["status"] in (302, 403), ответ
+
+    return {"status": ответ["status"], "body": страница["body"]}
+
+
+@нужна_база
+def test_сотрудник_ведёт_заказ_до_выдачи(сайт, магазин):
+    покупатель = _покупатель()
+    _в_корзину(покупатель, магазин["кубики"])
+    number = _json(_оформить(сайт, покупатель, 90_000))["order"]["number"]
+    pk = _id(number)
+    администратор, поддержка = _сотрудник("admin"), _сотрудник("support")
+
+    # Поддержка смотрит, но статус не двигает: кнопок нет, POST — 403
+    _, карточка = django(поддержка, ("get", f"/py/admin/market/order/{pk}/change/", None))
+    assert карточка["status"] == 200 and "В сборку" not in карточка["body"]
+    assert _шаг(поддержка, pk, "to:cash_on_pickup:assembling")["status"] == 403
+    assert _статус(number) == "cash_on_pickup"
+    # GET решения — тоже 403: только POST
+    _, без_post = django(администратор, ("get", f"/py/admin/market/order/{pk}/decide/", None))
+    assert без_post["status"] == 403
+
+    _, карточка = django(администратор, ("get", f"/py/admin/market/order/{pk}/change/", None))
+    assert "В сборку" in карточка["body"] and "Отменить заказ" in карточка["body"]
+
+    цепочка = [
+        ("cash_on_pickup", "assembling"),
+        ("assembling", "in_transit"),
+        ("in_transit", "ready"),
+        ("ready", "issued"),
+    ]
+
+    for before, after in цепочка:
+        шаг = _шаг(администратор, pk, f"to:{before}:{after}", "склад BTS")
+        assert шаг["status"] == 302
+        assert _статус(number) == after
+        запись = журнал("status_changed")
+        assert запись["section"] == "market_orders" and запись["subject_label"] == number
+        assert запись["changes"] == {"before": {"status": before}, "after": {"status": after}}
+
+    assert sql("select status from market_order_parts where order_id = %s", [pk]) == [("issued",)]
+    assert sql(
+        "select from_status, to_status from market_order_events "
+        "where order_id = %s and actor = 'staff' order by id",
+        [pk],
+    ) == [tuple(step) for step in цепочка]
+
+    # Повтор того же шага — понятное сообщение, не 500, статус тот же
+    повтор = _шаг(администратор, pk, "to:ready:issued")
+    assert повтор["status"] == 302
+    assert "Это решение уже недоступно" in повтор["body"]
+    assert _статус(number) == "issued"
+    # Выданный не отменить
+    assert "Это решение уже недоступно" in _шаг(администратор, pk, "cancel:issued")["body"]
+
+
+@нужна_база
+def test_сборка_не_истекает_и_отмена_сотрудником(сайт, магазин):
+    _, вариант = _товар(
+        магазин["продавец"], "toys", "Конструктор", "constructor", price=30_000, stock=10
+    )
+    администратор = _сотрудник("admin")
+    покупатель = _покупатель()
+    _в_корзину(покупатель, вариант)
+    собирается = _json(_оформить(сайт, покупатель, 30_000))["order"]["number"]
+    _в_корзину(покупатель, вариант)
+    отменяемый = _json(_оформить(сайт, покупатель, 30_000))["order"]["number"]
+    assert _резерв(вариант) == 2
+
+    assert _шаг(администратор, _id(собирается), "to:cash_on_pickup:assembling")["status"] == 302
+    assert _статус(собирается) == "assembling"
+
+    # 48-часовое истечение заказ в сборке не трогает
+    sql(
+        "update market_orders set created_at = created_at - interval '49 hours' where number = %s",
+        [собирается],
+    )
+    итог = _manage("market_expire_orders", "--minutes", "100000", "--hours", "48")
+    assert итог.returncode == 0, итог.stderr[-3000:]
+    assert _статус(собирается) == "assembling" and _резерв(вариант) == 2
+
+    # Отмена сотрудником — общий путь: резерв снят один раз, начисление назад
+    шаг = _шаг(администратор, _id(отменяемый), "cancel:cash_on_pickup", "покупатель не придёт")
+    assert шаг["status"] == 302
+    assert _статус(отменяемый) == "cancelled" and _резерв(вариант) == 1
+    assert журнал("cancelled")["subject_label"] == отменяемый
+    assert sql(
+        "select count(*) from (select account from market_ledger where order_id = %s "
+        "group by account having sum(amount) <> 0) t",
+        [_id(отменяемый)],
+    ) == [(0,)]
+    assert (
+        "Это решение уже недоступно"
+        in (_шаг(администратор, _id(отменяемый), "cancel:cash_on_pickup")["body"])
+    )
+    assert _резерв(вариант) == 1

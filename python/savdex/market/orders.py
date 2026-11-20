@@ -154,6 +154,9 @@ EXPIRE_DEFAULT = 30
 CASH_EXPIRE_KEY = "market_cash_order_expire_hours"
 CASH_EXPIRE_DEFAULT = 48
 
+#: Отменённые самим покупателем за столько часов — тоже в лимите открытых
+BUYER_CANCEL_WINDOW_HOURS = 24
+
 #: Сумма заказа сверху: строк в корзине × штук в строке × цена штуки
 MAX_TOTAL_SOM = MAX_LINES * MAX_QUANTITY * MAX_PRICE_SOM
 
@@ -493,6 +496,8 @@ def release_reserve(order_id: int) -> bool:
             "order by variant_id",
             [order_id],
         )
+        # Строки товаров — раньше вариантов (порядок блокировок — как в checkout)
+        _lock_products(int(item["product_id"]) for item in items)
 
         for item in items:
             released = write(
@@ -512,6 +517,17 @@ def release_reserve(order_id: int) -> bool:
         _refresh_products(int(item["product_id"]) for item in items)
 
     return True
+
+
+def _lock_products(product_ids: Iterable[int]) -> None:
+    """Заблокировать строки товаров по возрастанию номера (до правки вариантов)."""
+    ids = sorted(set(product_ids))
+
+    if ids:
+        rows(
+            "select id from market_products where id = any(%s) order by id for update",
+            [ids],
+        )
 
 
 def _refresh_products(product_ids: Iterable[int]) -> None:
@@ -593,10 +609,20 @@ def checkout(user_id: int, data: Mapping[str, Any]) -> str:
             raise OrderRefused("order.cart_empty", 422)
 
         # После блокировки корзины: параллельное оформление того же
-        # покупателя уже закончилось, его заказ здесь виден
+        # покупателя уже закончилось, его заказ здесь виден. В лимите — и
+        # отменённые самим покупателем за последние сутки: цикл «оформить —
+        # отменить» иначе держал бы резерв без конца
         open_now = one(
-            "select count(*) as n from market_orders where buyer_user_id = %s and status = any(%s)",
-            [user_id, list(OPEN_STATUSES)],
+            "select count(*) as n from market_orders o where o.buyer_user_id = %s "
+            "and (o.status = any(%s) or (o.cancelled_at >= %s and exists ("
+            " select from market_order_events e where e.order_id = o.id "
+            " and e.actor = 'buyer' and e.to_status = any(%s))))",
+            [
+                user_id,
+                list(OPEN_STATUSES),
+                _cutoff(None, timedelta(hours=BUYER_CANCEL_WINDOW_HOURS)),
+                [CANCELLED, REFUND_PENDING],
+            ],
         )
 
         if open_now is not None and int(open_now["n"]) >= MAX_OPEN_ORDERS:
@@ -618,6 +644,11 @@ def checkout(user_id: int, data: Mapping[str, Any]) -> str:
 
         if total != expected:
             raise OrderRefused("order.total_changed", 409, fresh_cart=True)
+
+        # Сначала строки товаров (по возрастанию), потом варианты — тот же
+        # порядок, что у правки товара продавцом и остатка в админке: без
+        # взаимных блокировок, и сводка ниже считается под блокировкой
+        _lock_products(int(line["product_id"]) for line in buyable)
 
         # Резерв — по возрастанию номера варианта, одним условным обновлением
         for line in sorted(buyable, key=lambda item: int(item["variant_id"])):
@@ -764,7 +795,7 @@ def _close(
     note: str,
 ) -> bool:
     """
-    Общий путь отмены (покупатель, истечение): условный переход в target,
+    Общий путь отмены (покупатель, сотрудник, истечение): условный переход в target,
     резерв — снять ровно один раз, начисление — обратной группой
     (оплаченный картой — в долг покупателю, при получении — снять долг
     покупателя). Вызывать в транзакции. False — статус уже сменил кто-то
@@ -881,6 +912,64 @@ def expire(
         log.info("market.order.expired count=%s", done)
 
     return done
+
+
+# ── Сотрудник: сборка, отгрузка, выдача ───────────────────────────
+
+#: Следующий шаг заказа, который двигает сотрудник (админка заказов)
+STAFF_STEPS: dict[str, str] = {
+    PAID: ASSEMBLING,
+    CASH_ON_PICKUP: ASSEMBLING,
+    ASSEMBLING: IN_TRANSIT,
+    IN_TRANSIT: READY,
+    READY: ISSUED,
+}
+
+#: Сотрудник отменяет заказ с оплатой при получении — до отгрузки со склада
+STAFF_CANCELLABLE = frozenset({CASH_ON_PICKUP, ASSEMBLING})
+
+
+def staff_can_cancel(status: str, payment_method: str) -> bool:
+    return payment_method == "cash" and status in STAFF_CANCELLABLE
+
+
+def advance(order_id: int, before: str, *, actor_user_id: int, note: str | None = None) -> bool:
+    """
+    Сотрудник переводит заказ на следующий шаг (STAFF_STEPS) из статуса,
+    который видел (before). False — шага нет или статус уже сменил кто-то
+    другой (повторный щелчок); ничего не записано.
+    """
+    after = STAFF_STEPS.get(before)
+
+    if after is None:
+        return False
+
+    return transition(
+        order_id, before, after, actor="staff", actor_user_id=actor_user_id, note=note
+    )
+
+
+def staff_cancel(order_id: int, before: str, *, actor_user_id: int, note: str) -> bool:
+    """
+    Сотрудник отменяет заказ с оплатой при получении (до отгрузки) — тем же
+    путём, что покупатель: резерв снят один раз, начисление — назад. False —
+    статус уже не тот, что видел сотрудник, или отменять так нельзя.
+    """
+    with transaction.atomic():
+        order = one(
+            f"select {_CLOSE_FIELDS} from market_orders where id = %s and status = %s for update",
+            [order_id, before],
+        )
+
+        if order is None or not staff_can_cancel(str(order["status"]), order["payment_method"]):
+            return False
+
+        closed = _close(order, CANCELLED, actor="staff", actor_user_id=actor_user_id, note=note)
+
+    if closed:
+        log.info("market.order.staff_cancelled id=%s", order_id)
+
+    return closed
 
 
 # ── Деньги — для этапа 2 (Uzum) ─────────────────────────────────────
