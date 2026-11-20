@@ -356,7 +356,7 @@ def oneid_start(request: HttpRequest) -> HttpResponse:
     started = session.start(request)
 
     if cfg is None or started is None:
-        return _message(ctx, "oneid.off", 503)
+        return _message(ctx, "oneid.off", 409)
 
     if input_of(request).get("offer") not in (True, 1, "1", "true", "on", "yes"):
         return _json(

@@ -78,7 +78,7 @@ def test_state_одноразовый_и_свой():
 
     state = oneid.issue_state(store, 7, 70)  # type: ignore[arg-type]
     assert oneid.take_state(store, state, 8) is None, "чужой пользователь"  # type: ignore[arg-type]
-    assert SESSION_KEY_GONE(store), "запись снята и после отказа"
+    assert oneid.SESSION_KEY not in store.data, "запись снята и после отказа"
 
     state = oneid.issue_state(store, 7, 70)  # type: ignore[arg-type]
     assert oneid.take_state(store, state + "x", 7) is None  # type: ignore[arg-type]
@@ -91,10 +91,6 @@ def test_state_одноразовый_и_свой():
     assert oneid.take_state(store, state, 7) is None, "просрочен"  # type: ignore[arg-type]
 
     assert oneid.take_state(_Store(), "любой", 7) is None, "без начала"  # type: ignore[arg-type]
-
-
-def SESSION_KEY_GONE(store: _Store) -> bool:  # noqa: N802
-    return oneid.SESSION_KEY not in store.data
 
 
 def test_адрес_возврата_только_из_настроек(monkeypatch):
@@ -157,6 +153,9 @@ def test_из_профиля_минимум():
     with pytest.raises(oneid.OneIdError):
         oneid.identity({**профиль, "valid": False})
 
+    with pytest.raises(oneid.OneIdError, match="не подтверждён"):
+        oneid.identity({k: v for k, v in профиль.items() if k != "valid"})
+
     with pytest.raises(oneid.OneIdError):
         oneid.identity({**профиль, "pin": "123"})
 
@@ -166,11 +165,15 @@ def test_из_профиля_минимум():
 
 def test_сверка_инн():
     person = oneid.Identity(PIN, "412345678", ("301234567",))
-    assert oneid.matched_tin(person, "301 234-567") == "301234567", "юрлицо по ЭЦП"
-    assert oneid.matched_tin(person, "412345678") == "412345678", "ИП — личный ИНН"
-    assert oneid.matched_tin(person, PIN) == PIN, "ИП — ПИНФЛ"
-    assert oneid.matched_tin(person, "309999999") is None
-    assert oneid.matched_tin(person, "") is None and oneid.matched_tin(person, None) is None
+    m = oneid.matched_tin
+    assert m(person, "301 234-567", "legal") == "301234567", "юрлицо по ЭЦП"
+    assert m(person, "412345678", "individual") == "412345678", "ИП — личный ИНН"
+    assert m(person, PIN, "freelancer") == PIN, "ИП — ПИНФЛ"
+    assert m(person, "412345678", "legal") is None, "личный ИНН — не ООО"
+    assert m(person, PIN, None) is None, "без формы — как юрлицо"
+    assert m(person, "301234567", "individual") is None
+    assert m(person, "309999999", "legal") is None
+    assert m(person, "", "legal") is None and m(person, None, "individual") is None
 
     хеш = oneid.pin_hash(_cfg(), PIN)
     assert len(хеш) == 64 and PIN not in хеш
@@ -283,7 +286,7 @@ def test_oneid_проход(сайт, сервер):
     менеджер = _человек("manager@oneid.uz", компания, role="manager")
 
     # Выключен — кнопка скрыта, старт отвечает «не подключён»
-    assert _post(сайт, "/market/api/oneid/start", владелец, {"offer": True})["status"] == 503
+    assert _post(сайт, "/market/api/oneid/start", владелец, {"offer": True})["status"] == 409
 
     def старт(uid: int, body: dict[str, Any]) -> dict[str, Any]:
         return отправить(
@@ -380,6 +383,44 @@ def test_oneid_проход(сайт, сервер):
         == "blocked"
     )
     assert sql("select 1 from market_sellers where company_id = %s", [другая]) == []
+
+    def пройти(uid: int, tin: str) -> str:
+        _OneId.profile = _профиль(tin)
+        запись_ = _сессия(старт(uid, {"offer": True}))[oneid.SESSION_KEY]
+        return _итог(_возврат(сайт, uid, сервер, f"code=GOOD&state={запись_['state']}", запись_))
+
+    # Тот же ИНН у продавца, заблокированного вручную (без OneID), — тоже нет
+    _продавец(_компания("OneID Third", "oneid-third", tin="305550004"), status="blocked")
+    четвёртая = _компания("OneID Fourth", "oneid-fourth", tin="305550004")
+    assert пройти(_человек("owner4@oneid.uz", четвёртая), "305550004") == "blocked"
+
+    # Личный ИНН у «юрлица» не подтверждает его
+    шестая = _компания("OneID Sixth", "oneid-sixth", tin="412345678")
+    assert пройти(_человек("owner6@oneid.uz", шестая), "305559999") == "mismatch"
+
+    # ИП по ПИНФЛ: подтверждён, но сам ПИНФЛ в oneid_tin не пишется
+    sql(
+        "update market_sellers set status = 'approved', blocked_at = null where company_id = %s",
+        [компания],
+    )
+    ип = _компания("ИП Тестов", "ip-testov", tin=PIN, legal_form="individual")
+    assert пройти(_человек("owner7@oneid.uz", ип), "305559999") == "ok"
+    assert sql("select status, oneid_tin from market_sellers where company_id = %s", [ип]) == [
+        ("approved", None)
+    ]
+
+    # Отклонённую модератором заявку OneID не одобряет — снова на проверку
+    пятая = _компания("OneID Fifth", "oneid-fifth", tin="305550005")
+    sql(
+        "insert into market_sellers (company_id, status, reject_reason) "
+        "values (%s, 'rejected', 'Документы не читаются')",
+        [пятая],
+    )
+    assert пройти(_человек("owner5@oneid.uz", пятая), "305550005") == "review"
+    assert sql(
+        "select status, verified_via, oneid_tin from market_sellers where company_id = %s",
+        [пятая],
+    ) == [("pending", "oneid", "305550005")]
 
 
 def _сессия(ответ: dict[str, Any]) -> dict[str, Any]:

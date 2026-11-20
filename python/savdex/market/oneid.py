@@ -45,7 +45,13 @@ sso.egov.uz), ONEID_SCOPE — по умолчанию client_id. Пока хот
 OneID выключен: кнопка не показывается, адреса отвечают «не подключён».
 
 Имена полей профиля — по общедоступному описанию OneID; сверить с
-документацией из договора (ТЗ, 11.5), когда дадут доступ.
+документацией из договора (ТЗ, 11.5), когда дадут доступ. Там же
+уточнить, отдаёт ли legal_info только организации, где человек —
+руководитель (право подписи): если нет — фильтровать по полю роли.
+
+ONEID_REDIRECT_URI — на том же адресе, где кнопка, или на домене общей
+куки: state лежит в сессии. Смена ONEID_PIN_KEY обнуляет сверку
+«заблокированный не вернётся» — ключ не менять без пересчёта.
 """
 
 from __future__ import annotations
@@ -85,7 +91,11 @@ STATE_TTL = 600
 TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 
 #: Итоги возврата — только они попадают в адрес /market/sell?oneid=…
-RESULTS = ("ok", "off", "denied", "expired", "mismatch", "blocked", "error")
+RESULTS = ("ok", "review", "off", "denied", "expired", "mismatch", "blocked", "error")
+
+
+#: Предупреждение о негодных настройках — один раз на процесс
+_warned = False
 
 
 class OneIdError(Exception):
@@ -135,7 +145,12 @@ def config() -> Config | None:
         return None
 
     if not _redirect_ok(redirect_uri) or not _redirect_ok(url):
-        log.warning("OneID выключен: ONEID_REDIRECT_URI или ONEID_URL — не https")
+        global _warned
+
+        if not _warned:
+            _warned = True
+            log.warning("OneID выключен: ONEID_REDIRECT_URI или ONEID_URL — не https")
+
         return None
 
     return Config(
@@ -222,7 +237,8 @@ def _digits(value: Any, length: int) -> str | None:  # noqa: ANN401
 
 def identity(profile: Any) -> Identity:  # noqa: ANN401
     """Ответ OneID → Identity. Всё остальное из ответа отбрасывается."""
-    if not isinstance(profile, dict) or profile.get("valid") in (False, "false", "False"):
+    # Только явное «valid: true»: нет поля — не подтверждён
+    if not isinstance(profile, dict) or profile.get("valid") not in (True, "true", "True"):
         raise OneIdError("OneID: профиль не подтверждён")
 
     pin = _digits(profile.get("pin"), 14)
@@ -242,17 +258,25 @@ def identity(profile: Any) -> Identity:  # noqa: ANN401
     return Identity(pin=pin, personal_tin=_digits(profile.get("tin"), 9), legal_tins=tuple(legal))
 
 
-def matched_tin(person: Identity, company_tin: Any) -> str | None:  # noqa: ANN401
-    """ИНН компании, если он совпал с OneID: организации, личный или ПИНФЛ (ИП)."""
+def matched_tin(person: Identity, company_tin: Any, legal_form: Any) -> str | None:  # noqa: ANN401
+    """
+    Номер компании, если он совпал с OneID. Юрлицо (legal_form = legal или
+    пусто) — только ИНН организации из legal_info (вход по ЭЦП); физлицо,
+    ИП, фрилансер — личный ИНН или ПИНФЛ. Личный номер у «юрлица» его не
+    подтверждает: иначе физлицо выдало бы себя за ООО.
+    """
     tin = normalize(company_tin)
 
     if not isinstance(tin, str) or not tin:
         return None
 
-    candidates = {*person.legal_tins, person.pin}
+    if (legal_form or "legal") == "legal":
+        candidates = set(person.legal_tins)
+    else:
+        candidates = {person.pin}
 
-    if person.personal_tin is not None:
-        candidates.add(person.personal_tin)
+        if person.personal_tin is not None:
+            candidates.add(person.personal_tin)
 
     return tin if tin in candidates else None
 
@@ -316,7 +340,8 @@ def confirm_seller(cfg: Config, person: Identity, user: dict[str, Any], company_
     """Подтвердить продавца по OneID: итог из RESULTS."""
     with transaction.atomic():
         company = one(
-            "select id, tin, status, deleted_at from companies where id = %s for update",
+            "select id, tin, legal_form, status, deleted_at from companies "
+            "where id = %s for update",
             [company_id],
         )
 
@@ -329,17 +354,22 @@ def confirm_seller(cfg: Config, person: Identity, user: dict[str, Any], company_
         ):
             return "denied"
 
-        tin = matched_tin(person, company["tin"])
+        matched = matched_tin(person, company["tin"], company["legal_form"])
 
-        if tin is None:
+        if matched is None:
             return "mismatch"
 
         digest = pin_hash(cfg, person.pin)
+        # Совпал ПИНФЛ (ИП) — сам номер не пишем: хватает хеша
+        tin = None if matched == person.pin else matched
 
+        # Заблокированный продавец не возвращается через другую компанию: тот
+        # же человек (хеш ПИНФЛ) или тот же номер — и у заблокированных вручную
         banned = one(
-            "select 1 as x from market_sellers where oneid_pin_hash = %s and status = 'blocked' "
-            "limit 1",
-            [digest],
+            "select 1 as x from market_sellers s join companies c on c.id = s.company_id "
+            "where s.status = 'blocked' and s.company_id <> %s "
+            "and (s.oneid_pin_hash = %s or s.oneid_tin = %s or c.tin = %s) limit 1",
+            [company_id, digest, matched, matched],
         )
         seller = one("select * from market_sellers where company_id = %s for update", [company_id])
 
@@ -348,12 +378,35 @@ def confirm_seller(cfg: Config, person: Identity, user: dict[str, Any], company_
 
         moment = now()
 
+        # Отказ модератора по существу OneID не снимает: заявка — снова на
+        # проверку, уже с отметкой OneID
+        if seller is not None and seller["status"] == "rejected":
+            write(
+                "update market_sellers set status = 'pending', verified_via = 'oneid', "
+                "oneid_tin = %s, oneid_pin_hash = %s, oneid_verified_at = %s, user_id = %s, "
+                "offer_version = %s, offer_accepted_at = %s, reviewed_by = null, "
+                "reviewed_at = null, updated_at = %s where id = %s and status = 'rejected'",
+                [
+                    tin,
+                    digest,
+                    moment,
+                    user["id"],
+                    sellers.OFFER_VERSION,
+                    moment,
+                    moment,
+                    seller["id"],
+                ],
+            )
+            log.info("OneID: компания %s — заявка снова на проверке", company_id)
+
+            return "review"
+
         if seller is None:
             write(
                 "insert into market_sellers (company_id, user_id, status, verified_via, oneid_tin, "
                 "oneid_pin_hash, oneid_verified_at, offer_version, offer_accepted_at, approved_at, "
                 "created_at, updated_at) values (%s, %s, 'approved', 'oneid', %s, %s, %s, %s, %s, "
-                "%s, %s, %s)",
+                "%s, %s, %s) on conflict (company_id) do nothing",
                 [
                     company_id,
                     user["id"],
@@ -371,10 +424,9 @@ def confirm_seller(cfg: Config, person: Identity, user: dict[str, Any], company_
             write(
                 "update market_sellers set status = 'approved', verified_via = 'oneid', "
                 "oneid_tin = %s, oneid_pin_hash = %s, oneid_verified_at = %s, user_id = %s, "
-                "offer_version = coalesce(offer_version, %s), "
-                "offer_accepted_at = coalesce(offer_accepted_at, %s), "
+                "offer_version = %s, offer_accepted_at = %s, "
                 "approved_at = coalesce(approved_at, %s), reject_reason = null, "
-                "updated_at = %s where id = %s and status <> 'blocked'",
+                "updated_at = %s where id = %s and status in ('pending', 'approved')",
                 [
                     tin,
                     digest,
@@ -406,7 +458,12 @@ def result_redirect(root: str, result: str) -> HttpResponse:
 
 def callback(request: HttpRequest) -> HttpResponse:
     """GET ?code&state (или ?error) — от OneID."""
+    from django.http import HttpResponseNotAllowed
+
     from savdex.web.request import context
+
+    if request.method not in ("GET", "HEAD"):
+        return HttpResponseNotAllowed(["GET", "HEAD"])
 
     ctx = context(request, redirect=False)
 
