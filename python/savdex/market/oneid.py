@@ -364,12 +364,13 @@ def confirm_seller(cfg: Config, person: Identity, user: dict[str, Any], company_
         tin = None if matched == person.pin else matched
 
         # Заблокированный продавец не возвращается через другую компанию: тот
-        # же человек (хеш ПИНФЛ) или тот же номер — и у заблокированных вручную
+        # же человек (хеш ПИНФЛ) или номер, подтверждённый OneID. ИНН из
+        # карточки без OneID не в счёт: карточку с чужим ИНН мог завести и
+        # заблокировать не владелец — настоящему юрлицу путь не закрываем
         banned = one(
-            "select 1 as x from market_sellers s join companies c on c.id = s.company_id "
-            "where s.status = 'blocked' and s.company_id <> %s "
-            "and (s.oneid_pin_hash = %s or s.oneid_tin = %s or c.tin = %s) limit 1",
-            [company_id, digest, matched, matched],
+            "select 1 as x from market_sellers where status = 'blocked' and company_id <> %s "
+            "and (oneid_pin_hash = %s or oneid_tin = %s) limit 1",
+            [company_id, digest, matched],
         )
         seller = one("select * from market_sellers where company_id = %s for update", [company_id])
 
@@ -384,8 +385,9 @@ def confirm_seller(cfg: Config, person: Identity, user: dict[str, Any], company_
             write(
                 "update market_sellers set status = 'pending', verified_via = 'oneid', "
                 "oneid_tin = %s, oneid_pin_hash = %s, oneid_verified_at = %s, user_id = %s, "
-                "offer_version = %s, offer_accepted_at = %s, reviewed_by = null, "
-                "reviewed_at = null, updated_at = %s where id = %s and status = 'rejected'",
+                "offer_version = %s, offer_accepted_at = %s, reject_reason = null, "
+                "reviewed_by = null, reviewed_at = null, updated_at = %s "
+                "where id = %s and status = 'rejected'",
                 [
                     tin,
                     digest,
@@ -402,7 +404,7 @@ def confirm_seller(cfg: Config, person: Identity, user: dict[str, Any], company_
             return "review"
 
         if seller is None:
-            write(
+            written = write(
                 "insert into market_sellers (company_id, user_id, status, verified_via, oneid_tin, "
                 "oneid_pin_hash, oneid_verified_at, offer_version, offer_accepted_at, approved_at, "
                 "created_at, updated_at) values (%s, %s, 'approved', 'oneid', %s, %s, %s, %s, %s, "
@@ -421,7 +423,7 @@ def confirm_seller(cfg: Config, person: Identity, user: dict[str, Any], company_
                 ],
             )
         else:
-            write(
+            written = write(
                 "update market_sellers set status = 'approved', verified_via = 'oneid', "
                 "oneid_tin = %s, oneid_pin_hash = %s, oneid_verified_at = %s, user_id = %s, "
                 "offer_version = %s, offer_accepted_at = %s, "
@@ -439,6 +441,9 @@ def confirm_seller(cfg: Config, person: Identity, user: dict[str, Any], company_
                     seller["id"],
                 ],
             )
+
+        if not written:
+            return "error"
 
     # Только номера: ни ИНН, ни ПИНФЛ, ни имени — в журнал приложения
     log.info("OneID: компания %s подтверждена как продавец", company_id)

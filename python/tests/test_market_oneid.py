@@ -389,20 +389,32 @@ def test_oneid_проход(сайт, сервер):
         запись_ = _сессия(старт(uid, {"offer": True}))[oneid.SESSION_KEY]
         return _итог(_возврат(сайт, uid, сервер, f"code=GOOD&state={запись_['state']}", запись_))
 
-    # Тот же ИНН у продавца, заблокированного вручную (без OneID), — тоже нет
-    _продавец(_компания("OneID Third", "oneid-third", tin="305550004"), status="blocked")
-    четвёртая = _компания("OneID Fourth", "oneid-fourth", tin="305550004")
-    assert пройти(_человек("owner4@oneid.uz", четвёртая), "305550004") == "blocked"
-
     # Личный ИНН у «юрлица» не подтверждает его
     шестая = _компания("OneID Sixth", "oneid-sixth", tin="412345678")
     assert пройти(_человек("owner6@oneid.uz", шестая), "305559999") == "mismatch"
 
-    # ИП по ПИНФЛ: подтверждён, но сам ПИНФЛ в oneid_tin не пишется
     sql(
         "update market_sellers set status = 'approved', blocked_at = null where company_id = %s",
         [компания],
     )
+
+    # Номер, подтверждённый OneID у заблокированного (другой человек), — нет
+    третья = _компания("OneID Third", "oneid-third", tin="305550004")
+    sql(
+        "insert into market_sellers (company_id, status, verified_via, oneid_tin, "
+        "oneid_pin_hash, oneid_verified_at, approved_at, blocked_at) values "
+        "(%s, 'blocked', 'oneid', '305550004', %s, now(), now(), now())",
+        [третья, "0" * 64],
+    )
+    четвёртая = _компания("OneID Fourth", "oneid-fourth", tin="305550004")
+    assert пройти(_человек("owner4@oneid.uz", четвёртая), "305550004") == "blocked"
+
+    # Тот же ИНН лишь в карточке, заблокированной вручную, — путь не закрыт
+    _продавец(_компания("Самозванец", "oneid-squatter", tin="305550008"), status="blocked")
+    настоящая = _компания("OneID Real", "oneid-real", tin="305550008")
+    assert пройти(_человек("owner8@oneid.uz", настоящая), "305550008") == "ok"
+
+    # ИП по ПИНФЛ: подтверждён, но сам ПИНФЛ в oneid_tin не пишется
     ип = _компания("ИП Тестов", "ip-testov", tin=PIN, legal_form="individual")
     assert пройти(_человек("owner7@oneid.uz", ип), "305559999") == "ok"
     assert sql("select status, oneid_tin from market_sellers where company_id = %s", [ип]) == [
