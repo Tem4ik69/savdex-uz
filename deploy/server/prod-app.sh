@@ -50,6 +50,12 @@ esac
 umask 077
 mkdir -p "$ENV_DIR"
 
+# Сигналы Healthchecks приложения (signals.env, compose.yml) — не
+# обязательны: нет файла — пустой, иначе compose не поднимет контейнер
+if [ ! -e "$ENV_DIR/signals.env" ]; then
+    : > "$ENV_DIR/signals.env"
+fi
+
 for file in db.env app.env; do
     if [ ! -s "$ENV_DIR/$file" ]; then
         echo "ОШИБКА: нет $ENV_DIR/$file — запустите prod.yml (адрес базы и галочка «настройки с Render»)." >&2

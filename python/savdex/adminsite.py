@@ -181,6 +181,8 @@ ICONS = {
     "market.Seller": "building-office-2",
     "market.Product": "tag",
     "market.Category": "squares-2x2",
+    "market.Order": "shopping-bag",
+    "market.PickupPoint": "home",
 }
 DEFAULT_ICON = "rectangle-stack"
 
@@ -406,7 +408,17 @@ MENU_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     ),
     ("data", "Данные", ("data.companyrecord", "data.listing", "data.ittask", "tenders.tender")),
     # Маркетплейс (savdex/market): заявки продавцов, товары, дерево категорий
-    ("market", "Маркетплейс", ("market.seller", "market.product", "market.category")),
+    (
+        "market",
+        "Маркетплейс",
+        (
+            "market.seller",
+            "market.product",
+            "market.category",
+            "market.order",
+            "market.pickuppoint",
+        ),
+    ),
     (
         "money",
         "Монетизация",

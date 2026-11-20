@@ -57,6 +57,8 @@
 #   secrets.S3_ACCESS_KEY, S3_SECRET_KEY, vars.S3_ENDPOINT — хранилище Uztelecom
 #   secrets.HC_PING_DB, HC_PING_FILES, HC_PING_RESTORE  сигналы копий и
 #                                проверки восстановления в Healthchecks.io (docs/monitoring.md)
+#   secrets.MARKET_HC_PING_PAYMENTS  сигнал ночной сверки оплат маркетплейса
+#                                (машина админки, signals.env; docs/monitoring.md)
 #   vars.GRAFANA_PROM_URL, GRAFANA_PROM_USER, secrets.GRAFANA_ALLOY_TOKEN — агент
 #                                мониторинга Grafana Alloy (docs/monitoring.md)
 #   vars.RENDER_SSH              адрес SSH службы Render — настройки и файлы
@@ -596,9 +598,29 @@ jobs:
           ssh admin "WEB_IP='$WEB_IP' bash /opt/savdex/src/deploy/server/prod-build.sh"
 
       - name: Админка и схема базы
+        env:
+          # Сигнал ночной сверки оплат маркетплейса в Healthchecks.io
+          # (docs/monitoring.md); нет — без него
+          MARKET_HC_PING_PAYMENTS: ${{ secrets.MARKET_HC_PING_PAYMENTS }}
         run: |
           set -euo pipefail
           tag=$(git rev-parse HEAD | cut -c1-12)
+          # Адрес сигнала — через stdin, не в командной строке; расписание
+          # (и сверка) — только на машине админки. Пустой файл — без сигнала.
+          # Значение — без кавычек: env_file у compose читает строку как есть,
+          # а %q экранировал бы «?» и «=»; поэтому адрес сначала сверяется —
+          # только https://hc-ping.com/ и символы адреса, без пробелов и
+          # кавычек. Не тот — ошибка шага; само значение не печатается
+          ping_re='^https://hc-ping\.com/[A-Za-z0-9_/.?=&-]+$'
+          if [ -n "$MARKET_HC_PING_PAYMENTS" ] && ! [[ $MARKET_HC_PING_PAYMENTS =~ $ping_re ]]; then
+            echo "::error::Секрет MARKET_HC_PING_PAYMENTS — не адрес вида https://hc-ping.com/… (docs/monitoring.md)"
+            exit 1
+          fi
+          {
+            if [ -n "$MARKET_HC_PING_PAYMENTS" ]; then
+              printf 'MARKET_HC_PING_PAYMENTS=%s\n' "$MARKET_HC_PING_PAYMENTS"
+            fi
+          } | ssh admin 'umask 077; mkdir -p /opt/savdex/env; cat > /opt/savdex/env/signals.env'
           ssh admin "SAVDEX_ROLE=admin DB_IP='$DB_IP' ADMIN_IP='$ADMIN_IP' SITE_DOMAIN='$SITE_DOMAIN' \
             bash /opt/savdex/src/deploy/server/prod-app.sh '$tag' --migrate"
 

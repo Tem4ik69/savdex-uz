@@ -1,0 +1,20 @@
+{% extends "admin/change_form.html" %}
+{# Заказ маркетплейса (savdex/market/admin.py, OrderAdmin): карточка и шаги заказа #}
+{% block content %}
+  {{ block.super }}
+  {% if original and decisions %}
+    <form method="post" action="{{ decide_url }}" class="module aligned" id="decision">
+      {% csrf_token %}
+      <h2>Заказ: следующий шаг</h2>
+      <div class="form-row">
+        <label for="decision-note">Комментарий (в истории заказа):</label>
+        <textarea name="note" id="decision-note" rows="2" cols="80"></textarea>
+      </div>
+      <div class="submit-row">
+        {% for code, label, needs in decisions %}
+          <button type="submit" name="decision" value="{{ code }}" class="button{% if forloop.first %} default{% endif %}">{{ label }}</button>
+        {% endfor %}
+      </div>
+    </form>
+  {% endif %}
+{% endblock %}

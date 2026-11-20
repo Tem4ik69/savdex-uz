@@ -2,7 +2,7 @@
 Адреса /market/api/… — JSON для страниц маркетплейса (ветка maksud).
 
 Витрина — GET без входа: категории, каталог, подсказки, товар, продавец.
-Корзина, избранное, «Стать продавцом» и «Мои товары» — только со входом:
+Корзина, избранное, заказы, «Стать продавцом» и «Мои товары» — только со входом:
 гость получает 401 и адрес входа (``login``), а адрес страницы, с которой
 он пришёл, запоминается — после входа он вернётся к товару (ТЗ, раздел 4).
 
@@ -25,7 +25,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 
 from savdex.audit import client_ip
 from savdex.market import banners as market_banners
-from savdex.market import cart, catalog, oneid, products, sellers
+from savdex.market import cart, catalog, oneid, orders, products, sellers
 from savdex.market.common import t
 from savdex.web import session, throttle
 from savdex.web.actions import form
@@ -355,6 +355,158 @@ def favorites(request: HttpRequest) -> HttpResponse:
     return _json({"ids": cart.favorite_ids(user["id"])})
 
 
+# ── Заказ (savdex/market/orders.py) ─────────────────────────────────
+
+
+def _order_refused(ctx: Context, refused: orders.OrderRefused, user_id: int) -> JsonResponse:
+    """Отказ оформления или отмены: 422 — с полем, 409 — со свежей корзиной."""
+    message = t(refused.key, ctx.locale, **refused.replace)
+    body: dict[str, Any] = {"message": message}
+
+    if refused.field:
+        body["errors"] = {refused.field: [message]}
+
+    if refused.fresh_cart:
+        body["cart"] = cart.summary(user_id)
+
+    return _json(body, refused.status)
+
+
+@_get
+def pickup_points(request: HttpRequest) -> HttpResponse:
+    """Пункты выдачи для оформления (пока Ташкент)."""
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    return _json({"pickupPoints": orders.pickup_points()})
+
+
+@form()
+def checkout(request: HttpRequest) -> HttpResponse:
+    """
+    POST {pickupPoint, paymentMethod: card | cash, expectedTotal}: оформить
+    заказ из корзины. Сумма не совпала с серверной или товар кончился —
+    409 и свежая корзина (``cart``).
+    """
+    ctx = action(request, auth=False, throttle=10, throttle_prefix="market-checkout")
+    user = ctx.user
+
+    if user is None:
+        return _guest(ctx)
+
+    user_id = int(user["id"])
+
+    try:
+        number = orders.checkout(user_id, input_of(request))
+    except orders.OrderRefused as refused:
+        return _order_refused(ctx, refused, user_id)
+
+    return _json(
+        {
+            "message": t("order.created", ctx.locale),
+            "order": orders.detail(user_id, number, ctx.locale),
+        },
+        201,
+    )
+
+
+@_get
+def my_orders(request: HttpRequest) -> HttpResponse:
+    """Заказы покупателя — только свои."""
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    user = ctx.user
+
+    if user is None:
+        return _guest(ctx)
+
+    return _json({"orders": orders.mine(int(user["id"]), ctx.locale)})
+
+
+@_get
+def order(request: HttpRequest, number: str) -> HttpResponse:
+    """Заказ по номеру — только свой; чужой и несуществующий — одинаково 404."""
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    user = ctx.user
+
+    if user is None:
+        return _guest(ctx)
+
+    found = orders.detail(int(user["id"]), number, ctx.locale)
+
+    if found is None:
+        return _message(ctx, "order.not_found", 404)
+
+    return _json({"order": found})
+
+
+@form()
+def order_cancel(request: HttpRequest, number: str) -> HttpResponse:
+    """POST {reason?}: отменить свой заказ — только до отгрузки со склада."""
+    ctx = action(request, auth=False, throttle=10, throttle_prefix="market-order")
+    user = ctx.user
+
+    if user is None:
+        return _guest(ctx)
+
+    user_id = int(user["id"])
+    reason = str(input_of(request).get("reason") or "").strip()[:500] or None
+
+    try:
+        status = orders.cancel(user_id, number, reason)
+    except orders.OrderRefused as refused:
+        return _order_refused(ctx, refused, user_id)
+
+    return _json(
+        {
+            "message": t(f"order.{status}", ctx.locale),
+            "order": orders.detail(user_id, number, ctx.locale),
+        }
+    )
+
+
+@form()
+def order_pay(request: HttpRequest, number: str) -> HttpResponse:
+    """
+    POST {provider: uzum | payme | click}: открыть счёт у провайдера (или
+    вернуть уже открытый) — ответ {provider, redirect: адрес страницы
+    оплаты}. Только свой заказ (чужой — 404), только картой и только
+    ждущий оплаты (savdex/market/payments/base.py, open_invoice).
+    """
+    from savdex.market import domain
+    from savdex.market.payments import base as payments
+
+    ctx = action(request, auth=False, throttle=10, throttle_prefix="market-pay")
+    user = ctx.user
+
+    if user is None:
+        return _guest(ctx)
+
+    user_id = int(user["id"])
+    provider = str(input_of(request).get("provider") or "").strip().lower()
+    clean = orders.normalize_number(number)
+    back = payments.return_url(
+        clean,
+        domain.market_url(f"/orders/{clean}") or ctx.url(f"/market/orders/{clean}"),
+    )
+
+    try:
+        _, url = payments.open_invoice(user_id, clean, provider, locale=ctx.locale, back=back)
+    except orders.OrderRefused as refused:
+        return _order_refused(ctx, refused, user_id)
+
+    return _json({"provider": provider, "redirect": url})
+
+
 # ── «Стать продавцом» ───────────────────────────────────────────────
 
 
@@ -486,6 +638,27 @@ def my_products(request: HttpRequest) -> HttpResponse:
     assert seller is not None
 
     return _json({"products": products.mine(seller), "needsReview": products.needs_review(seller)})
+
+
+@_get
+def my_seller_orders(request: HttpRequest) -> HttpResponse:
+    """
+    Заказы продавца — только его части; о покупателе — имя и номер заказа,
+    без телефона и почты (ТЗ, раздел 10).
+    """
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    seller, refused = _seller_ctx(ctx)
+
+    if refused is not None:
+        return refused
+
+    assert seller is not None
+
+    return _json({"orders": orders.seller_orders(int(seller["id"]), ctx.locale)})
 
 
 @form()

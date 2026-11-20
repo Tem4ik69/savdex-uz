@@ -232,6 +232,20 @@ OWNED_TABLES: frozenset[str] = frozenset(
         "market_product_values",
         "market_favorites",
         "market_cart_items",
+        # Маркетплейс, заказ — этап 1 (миграция 2026_11_21_100000,
+        # savdex/market/orders.py): пункты выдачи, заказы, части, позиции;
+        # история статусов и журнал денег только дописываются (у роли
+        # приложения нет update и delete, триггер запрещает их всем)
+        "market_pickup_points",
+        "market_orders",
+        "market_order_parts",
+        "market_order_items",
+        "market_order_events",
+        "market_ledger",
+        # Маркетплейс, оплата — этап 2 (миграция 2026_11_21_110000,
+        # savdex/market/payments): оплаты заказов у Uzum, Payme и Click;
+        # у роли приложения нет delete
+        "market_payments",
     }
 )
 
