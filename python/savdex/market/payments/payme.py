@@ -50,7 +50,8 @@ from typing import Any
 
 from django.http import HttpRequest, HttpResponse
 
-from savdex.market.common import rows
+from savdex.market import orders
+from savdex.market.common import one, rows
 from savdex.market.payments import base
 
 log = logging.getLogger("savdex.market.payments.payme")
@@ -60,6 +61,9 @@ TIMEOUT_MS = 43_200_000
 
 #: Причина отмены «истёк срок» (Payme reason 4)
 REASON_TIMEOUT = 4
+
+#: reason хранится в smallint
+REASON_MAX = 32767
 
 ERROR_AUTH = -32504
 ERROR_PARSE = -32700
@@ -73,6 +77,10 @@ ERROR_ORDER_NOT_FOUND = -31050
 ERROR_ORDER_NOT_PAYABLE = -31051
 ERROR_ORDER_PAID = -31052
 ERROR_ORDER_BUSY = -31053
+#: Чек не собрать: у позиции нет ИКПУ (или у доставки — MARKET_DELIVERY_IKPU)
+ERROR_NO_RECEIPT = -31054
+#: Транзакция с этим id заведена на другой заказ
+ERROR_OTHER_ORDER = -31099
 
 MESSAGES: dict[int, tuple[str, str, str]] = {
     ERROR_AUTH: ("Недостаточно привилегий", "Ruxsat yo‘q", "Insufficient privileges"),
@@ -106,6 +114,16 @@ MESSAGES: dict[int, tuple[str, str, str]] = {
         "По заказу уже идёт другая оплата",
         "Buyurtma bo‘yicha boshqa to‘lov amalga oshirilmoqda",
         "Another payment for the order is in progress",
+    ),
+    ERROR_NO_RECEIPT: (
+        "Нет ИКПУ у позиции заказа — чек не собрать",
+        "Buyurtma pozitsiyasida MXIK yo‘q — chekni tuzib bo‘lmaydi",
+        "An order item has no IKPU code, the receipt cannot be built",
+    ),
+    ERROR_OTHER_ORDER: (
+        "Транзакция заведена на другой заказ",
+        "Tranzaksiya boshqa buyurtmaga ochilgan",
+        "The transaction belongs to another order",
     ),
 }
 
@@ -144,7 +162,8 @@ class PaymeProvider:
     def enabled(self) -> bool:
         config = Config.from_env()
 
-        return bool(config.merchant_id and config.key)
+        # На боевом — только со списком адресов Payme, как у Uzum
+        return bool(config.merchant_id and config.key) and base.allowed_here(self.name)
 
     def create_invoice(
         self, order: dict[str, Any], payment: dict[str, Any], *, locale: str, back: str
@@ -156,7 +175,9 @@ class PaymeProvider:
                 f"m={config.merchant_id}",
                 f"ac.{config.account_field}={order['number']}",
                 f"a={int(payment['amount'])}",
-                f"c={back}",
+                # «;» и «=» в адресе возврата сломали бы разбор параметров —
+                # такой адрес не передаём (Payme вернёт на свою страницу)
+                *([f"c={back}"] if back and ";" not in back and "=" not in back else []),
                 f"l={locale if locale in ('ru', 'uz', 'en') else 'ru'}",
             ]
         )
@@ -188,7 +209,7 @@ def _response(body: dict[str, Any]) -> HttpResponse:
 
 
 def _result(request_id: object, result: dict[str, Any]) -> HttpResponse:
-    return _response({"jsonrpc": "2.0", "id": request_id, "result": result})
+    return _response({"jsonrpc": "2.0", "id": base.echo(request_id), "result": result})
 
 
 def _error(request_id: object, code: int, data: str | None = None) -> HttpResponse:
@@ -197,7 +218,7 @@ def _error(request_id: object, code: int, data: str | None = None) -> HttpRespon
     return _response(
         {
             "jsonrpc": "2.0",
-            "id": request_id,
+            "id": base.echo(request_id),
             "error": {"code": code, "message": {"ru": ru, "uz": uz, "en": en}, "data": data},
         }
     )
@@ -208,14 +229,15 @@ def _now_ms() -> int:
 
 
 def _int(value: object) -> int | None:
+    """Целое из JSON в пределах 0…2⁶³-1 (bigint); прочее — None."""
     if isinstance(value, bool):
         return None
 
-    if isinstance(value, int):
-        return value
-
     if isinstance(value, float) and value.is_integer():
-        return int(value)
+        value = int(value)
+
+    if isinstance(value, int) and 0 <= value <= base.BIGINT_MAX:
+        return value
 
     return None
 
@@ -238,10 +260,13 @@ def _transaction(payment: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def detail(order: dict[str, Any]) -> dict[str, Any]:
+def detail(order: dict[str, Any]) -> dict[str, Any] | None:
     """
     Чек для CheckPerformTransaction: позиции заказа — ИКПУ (code), название,
-    цена за штуку и количество (тийины), НДС из настройки market_vat_percent.
+    цена за штуку и количество (тийины), НДС из настройки market_vat_percent;
+    доставка (delivery_total > 0) — своей позицией с ИКПУ из
+    MARKET_DELIVERY_IKPU. Чек с пустым кодом не отправляем: у позиции нет
+    ИКПУ — None (провайдер получает отказ ERROR_NO_RECEIPT до транзакции).
     """
     vat = base.vat_percent()
     items = []
@@ -264,8 +289,25 @@ def detail(order: dict[str, Any]) -> dict[str, Any]:
         # заказа; до тех пор ключ не передаём
         items.append(line)
 
-    # TODO(маркетплейс, оплата): доставка, когда появится (delivery_total > 0),
-    # — отдельной позицией со своим ИКПУ
+    total = one("select delivery_total from market_orders where id = %s", [order["id"]])
+    delivery = int(total["delivery_total"] or 0) if total else 0
+
+    if delivery > 0:
+        items.append(
+            {
+                "title": "Доставка",
+                "price": delivery,
+                "count": 1,
+                "code": base.env("MARKET_DELIVERY_IKPU") or None,
+                "vat_percent": vat,
+            }
+        )
+
+    if not items or any(not str(item["code"] or "").strip() for item in items):
+        log.warning("market.payment.payme.no_ikpu order=%s", order["id"])
+
+        return None
+
     return {"receipt_type": 0, "items": items}
 
 
@@ -304,8 +346,12 @@ class _Rpc:
             return self.refused(problem)
 
         assert order is not None
+        receipt = detail(order)
 
-        return _result(self.id, {"allow": True, "detail": detail(order)})
+        if receipt is None:
+            return _error(self.id, ERROR_NO_RECEIPT, self.config.account_field)
+
+        return _result(self.id, {"allow": True, "detail": receipt})
 
     def create(self) -> HttpResponse:
         trans_id = self.transaction_id()
@@ -315,8 +361,19 @@ class _Rpc:
             return _error(self.id, ERROR_REQUEST)
 
         existing = base.locked("payme", trans_id)
+        amount = _int(self.params.get("amount"))
 
         if existing is not None:
+            # Повтор с известным id: тот же заказ и та же сумма, заказ всё
+            # ещё ждёт оплаты — иначе понятный отказ, а не «та же транзакция»
+            order = base.order_by_id(int(existing["order_id"]))
+
+            if order is None or order["number"] != orders.normalize_number(self.number()):
+                return _error(self.id, ERROR_OTHER_ORDER, self.config.account_field)
+
+            if amount != int(existing["amount"]):
+                return _error(self.id, ERROR_AMOUNT)
+
             if existing["status"] != base.PENDING:
                 return _error(self.id, ERROR_CANNOT_PERFORM)
 
@@ -325,13 +382,21 @@ class _Rpc:
 
                 return _error(self.id, ERROR_CANNOT_PERFORM)
 
+            if (problem := base.refusal(order, amount)) is not None:
+                return self.refused(problem)
+
             return self.created(existing)
+
+        found = base.order_by_number(self.number())
+
+        if found is not None and base.refusal(found, amount) is None and detail(found) is None:
+            return _error(self.id, ERROR_NO_RECEIPT, self.config.account_field)
 
         payment, problem = base.open_transaction(
             "payme",
             trans_id,
             self.number(),
-            _int(self.params.get("amount")),
+            amount,
             provider_time=payme_time,
         )
 
@@ -386,7 +451,12 @@ class _Rpc:
         if payment is None:
             return _error(self.id, ERROR_TRANSACTION_NOT_FOUND)
 
-        reason = _int(self.params.get("reason"))
+        raw = self.params.get("reason")
+        reason = _int(raw)
+
+        # reason пишется в smallint: вне его — неверный запрос, а не 500
+        if raw is not None and (reason is None or not 0 <= reason <= REASON_MAX):
+            return _error(self.id, ERROR_REQUEST)
 
         if payment["status"] == base.PENDING:
             base.cancel_pending(payment, reason=reason, note="Payme: отмена транзакции")
@@ -419,7 +489,8 @@ class _Rpc:
     def statement(self) -> HttpResponse:
         start, end = _int(self.params.get("from")), _int(self.params.get("to"))
 
-        if start is None or end is None:
+        # Границы — миллисекунды в bigint; _int уже отсёк всё вне 0…2⁶³-1
+        if start is None or end is None or start > end:
             return _error(self.id, ERROR_REQUEST)
 
         found = rows(
@@ -469,12 +540,13 @@ def _authorized(request: HttpRequest, config: Config) -> bool:
 
 
 def _request_id(request: HttpRequest) -> object:
+    """id запроса JSON-RPC — для эха в ответе: строка до 64 знаков или целое."""
     try:
         body = json.loads(request.body or b"{}")
     except ValueError:
         return None
 
-    return body.get("id") if isinstance(body, dict) else None
+    return base.echo(body.get("id")) if isinstance(body, dict) else None
 
 
 def _deny(request: HttpRequest) -> HttpResponse:
@@ -488,7 +560,7 @@ def endpoint(request: HttpRequest) -> HttpResponse:
     request_id = _request_id(request)
 
     if not _authorized(request, config):
-        log.warning("market.payment.payme.bad_auth")
+        base.auth_failed(request, "payme")
 
         return _error(request_id, ERROR_AUTH)
 
@@ -502,6 +574,14 @@ def endpoint(request: HttpRequest) -> HttpResponse:
 
     if not isinstance(method, str) or not isinstance(params, dict):
         return _error(request_id, ERROR_REQUEST)
+
+    # Новые транзакции — только где маркетплейс открыт; заведённые Payme
+    # доводит всегда (Perform, Cancel, Check, GetStatement)
+    if (
+        method in ("CheckPerformTransaction", "CreateTransaction")
+        and (closed := base.market_closed()) is not None
+    ):
+        return closed
 
     rpc = _Rpc(request_id, params, config)
     methods = {
