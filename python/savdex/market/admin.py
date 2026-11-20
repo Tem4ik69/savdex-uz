@@ -39,7 +39,7 @@ from savdex import audit
 from savdex.adminsite import SavdexModelAdmin, _admin_of, register
 from savdex.crm.admin import _badge, when
 from savdex.market import products, sellers
-from savdex.market.common import now, t, write
+from savdex.market.common import now, one, t, write
 from savdex.market.models import Attribute, Category, Product, Seller, Variant
 from savdex.moderation.services import context_of, notify_company
 from savdex.web.shared import public_url
@@ -140,6 +140,12 @@ class DecisionsMixin:
     decide_url_name: ClassVar[str] = ""
     #: Запись изменилась после открытия карточки — решение не принято
     changed_message: ClassVar[str] = "Запись изменилась — обновите страницу."
+    #: Решения, которые пропускают запись, — только по увиденной версии
+    permissive: ClassVar[frozenset[str]] = frozenset({"approve", "unblock"})
+
+    def version_of(self, obj: Any) -> str:  # noqa: ANN401
+        """Версия записи для формы решения: время её правки."""
+        return _version(obj.updated_at)
 
     def decisions(self, obj: Any) -> list[tuple[str, str, bool]]:  # noqa: ANN401
         raise NotImplementedError
@@ -150,7 +156,7 @@ class DecisionsMixin:
         obj: Any,  # noqa: ANN401
         decision: str,
         note: str,
-        version: str,
+        version: str | None,
     ) -> str:
         raise NotImplementedError
 
@@ -194,17 +200,25 @@ class DecisionsMixin:
 
             return HttpResponseRedirect(page)
 
-        # Версия, которую видел модератор, — та же, что сейчас в базе; ещё
-        # раз её проверит сам UPDATE (decide), если правка придёт между ними
-        version = request.POST.get("version") or ""
+        # Пропустить (одобрить, разблокировать) можно только ту версию, которую
+        # модератор видел: та же, что сейчас в базе, — и ещё раз её проверит
+        # сам UPDATE (decide), если правка придёт между ними. Запретить
+        # (отклонить, заблокировать) можно всегда: правка продавца, пока
+        # карточка открыта, не должна мешать снять товар
+        seen: str | None = None
 
-        if not version or version != _version(obj.updated_at):
-            self.message_user(request, self.changed_message, messages.WARNING)  # type: ignore[attr-defined]
+        if decision in self.permissive:
+            version = request.POST.get("version") or ""
 
-            return HttpResponseRedirect(page)
+            if not version or version != self.version_of(obj):
+                self.message_user(request, self.changed_message, messages.WARNING)  # type: ignore[attr-defined]
+
+                return HttpResponseRedirect(page)
+
+            seen = _version(obj.updated_at)
 
         self.message_user(  # type: ignore[attr-defined]
-            request, self.decide(request, obj, decision, note, version), messages.SUCCESS
+            request, self.decide(request, obj, decision, note, seen), messages.SUCCESS
         )
 
         return HttpResponseRedirect(page)
@@ -223,7 +237,7 @@ class DecisionsMixin:
             extra["decisions"] = self.decisions(obj)
             extra["min_note"] = MIN_NOTE
             extra["decide_url"] = reverse(f"savdex_admin:{self.decide_url_name}", args=[obj.pk])
-            extra["decision_version"] = _version(obj.updated_at)
+            extra["decision_version"] = self.version_of(obj)
 
         return super().change_view(request, object_id, form_url, extra)  # type: ignore[misc, no-any-return]
 
@@ -255,6 +269,20 @@ class SellerAdmin(DecisionsMixin, SavdexModelAdmin):
     title_change = "Заявка продавца"
     decide_url_name = "market_seller_decide"
     changed_message = "Заявка изменилась — обновите страницу."
+
+    def version_of(self, obj: Any) -> str:  # noqa: ANN401
+        """
+        Версия заявки — и её документов: компания могла заменить документ,
+        пока модератор смотрел карточку, а сама заявка при этом не меняется.
+        """
+        row = one(
+            "select count(*) as n, max(greatest(created_at, coalesce(updated_at, created_at))) "
+            "as last from company_documents where company_id = %s and type = any(%s)",
+            [obj.company_id, list(sellers.VERIFICATION_TYPES)],
+        )
+        docs = f"{row['n']}:{_version(row['last'])}" if row is not None else "0:"
+
+        return f"{_version(obj.updated_at)}|{docs}"
 
     list_display = ("company", "state", "documents", "applied")
     list_filter = (SellerStatus,)
@@ -358,7 +386,7 @@ class SellerAdmin(DecisionsMixin, SavdexModelAdmin):
         }.get(obj.status, [])
 
     def decide(
-        self, request: HttpRequest, obj: Seller, decision: str, note: str, version: str
+        self, request: HttpRequest, obj: Seller, decision: str, note: str, version: str | None
     ) -> str:
         staff = _admin_of(request).id
         label = (_company(obj.company_id) or {}).get("name") or str(obj)
@@ -419,7 +447,9 @@ class ProductStatus(admin.SimpleListFilter):
 
 
 #: Остаток варианта сверху: столбец integer, больше — ошибка базы, а не формы
-MAX_STOCK = 1_000_000_000
+#: Остаток варианта. Сводка товара (market_products.stock, integer) — сумма
+#: по вариантам (до 100): предел с запасом, чтобы она не переполнилась
+MAX_STOCK = 1_000_000
 
 
 class VariantForm(forms.ModelForm):  # type: ignore[type-arg]
@@ -760,7 +790,7 @@ class ProductAdmin(DecisionsMixin, SavdexModelAdmin):
         return found
 
     def decide(
-        self, request: HttpRequest, obj: Product, decision: str, note: str, version: str
+        self, request: HttpRequest, obj: Product, decision: str, note: str, version: str | None
     ) -> str:
         staff = _admin_of(request).id
         actions: dict[str, tuple[Callable[[], bool], str, str | None, str]] = {

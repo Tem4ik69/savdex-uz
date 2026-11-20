@@ -177,12 +177,26 @@ def _сотрудник(role: str) -> int:
 
 
 def _версия(table: str, pk: int) -> str:
-    """Версия записи для решения модератора — её updated_at, как в форме решения."""
+    """
+    Версия записи для решения модератора, как в форме решения: updated_at;
+    у заявки продавца — ещё число и время документов компании.
+    """
     [(версия,)] = sql(
         f"select to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS') from {table} where id = %s", [pk]
     )
 
-    return str(версия)
+    if table != "market_sellers":
+        return str(версия)
+
+    [(n, last)] = sql(
+        "select count(*), coalesce(to_char(max(greatest(d.created_at, coalesce(d.updated_at, "
+        "d.created_at))), 'YYYY-MM-DD HH24:MI:SS'), '') from company_documents d "
+        "join market_sellers s on s.company_id = d.company_id where s.id = %s "
+        "and d.type in ('registration', 'license', 'certificate', 'quality')",
+        [pk],
+    )
+
+    return f"{версия}|{n}:{last}"
 
 
 def _категория(slug: str) -> int:
@@ -867,15 +881,44 @@ def test_решение_по_той_версии_что_видел_модера�
 
     django(
         модератор,
-        ("post", адрес_заявки, {"decision": "approve", "version": "2026-11-01 10:59:59"}),
+        ("post", адрес_заявки, {"decision": "approve", "version": "2026-11-01 10:59:59|0:"}),
     )
+    assert sql("select status from market_sellers where id = %s", [заявка]) == [("pending",)]
+
+    # Компания заменила документ, пока модератор смотрел, — заявка та же, а
+    # версия другая: одобрение по старой не проходит
+    увиденная = _версия("market_sellers", заявка)
+    assert увиденная == "2026-11-01 11:00:00|0:"
+    sql(
+        "insert into company_documents (company_id, type, title, file_path, created_at, "
+        "updated_at) select company_id, 'registration', 'Свидетельство', 'docs/y.pdf', "
+        "'2026-11-01 11:01:00', '2026-11-01 11:01:00' from market_sellers where id = %s",
+        [заявка],
+    )
+    django(модератор, ("post", адрес_заявки, {"decision": "approve", "version": увиденная}))
     assert sql("select status from market_sellers where id = %s", [заявка]) == [("pending",)]
 
     django(
         модератор,
-        ("post", адрес_заявки, {"decision": "approve", "version": "2026-11-01 11:00:00"}),
+        (
+            "post",
+            адрес_заявки,
+            {"decision": "approve", "version": _версия("market_sellers", заявка)},
+        ),
     )
     assert sql("select status from market_sellers where id = %s", [заявка]) == [("approved",)]
+
+    # Запретить можно и без версии: правка продавца не мешает снять товар
+    sql("update market_products set updated_at = '2026-11-01 12:00:00' where id = %s", [товар])
+    django(
+        модератор,
+        (
+            "post",
+            адрес_товара + "decide/",
+            {"decision": "block", "note": "Подделка известного бренда", "version": "старая"},
+        ),
+    )
+    assert sql("select status from market_products where id = %s", [товар]) == [("blocked",)]
 
 
 @нужна_база

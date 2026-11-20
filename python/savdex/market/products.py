@@ -763,6 +763,9 @@ def add_image(
         [product_id, variant_id, path, thumb_path, product_id],
     )
 
+    # Фото — часть содержания: решение модератора — по увиденной версии
+    write("update market_products set updated_at = %s where id = %s", [now(), product_id])
+
     return path, ""
 
 
@@ -786,6 +789,9 @@ def set_image_variant(
         [variant_id, image_id, product_id],
     )
 
+    if changed:
+        write("update market_products set updated_at = %s where id = %s", [now(), product_id])
+
     return "" if changed else "not_found"
 
 
@@ -804,6 +810,9 @@ def remove_image(seller: dict[str, Any], product_id: int, image_id: int) -> bool
         return False
 
     write("delete from market_product_images where id = %s", [image_id])
+
+    # Фото — часть содержания: решение модератора — по увиденной версии
+    write("update market_products set updated_at = %s where id = %s", [now(), product_id])
     images.delete(found["path"], found["thumb_path"])
 
     if needs_review(seller):
