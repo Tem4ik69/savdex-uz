@@ -169,7 +169,8 @@ Settings → Rules → Rulesets → New ruleset → New branch ruleset:
 2. **Машина в UzCloud:** Ubuntu 24.04, 2 vCPU, 4 ГБ, диск 25 ГБ,
    публичный IP, открытые порты 22, 80, 443; при создании — открытый
    ключ `savdex-deploy.pub`.
-3. **DNS у Ahost:** A-записи `staging` и `preview` → IP машины.
+3. **DNS у Ahost:** A-записи `staging`, `preview` и `market.staging`
+   (маркетплейс на тестовом) → IP машины.
 4. **GitHub → Settings → Secrets and variables → Actions:**
    - секрет `DEPLOY_SSH_KEY` — содержимое файла `savdex-deploy` целиком;
    - секрет `STAGING_PASSWORD` — пароль на тестовый сайт (логин `savdex`);
@@ -190,6 +191,25 @@ Settings → Rules → Rulesets → New ruleset → New branch ruleset:
 Закрытый ключ и пароли — только в секреты GitHub, не в чат и не на
 скриншотах. Репозиторий публичный: журналы Actions видят все, поэтому
 скрипты пароли в журнал не пишут.
+
+## Маркетплейс — свой адрес
+
+ТЗ 18.11: маркетплейс открывается на `market.savdex.uz` (решил Тимур
+20.11), на тестовом — `market.staging.savdex.uz`. DNS у Ahost: A-запись
+`market` → публичный IP сети `savdex-prod`, `market.staging` → IP
+тестового (заведены 20.11).
+
+- **Тестовый:** `deploy/staging/Caddyfile` — тот же сайт и тот же пароль на
+  обоих адресах; `deploy.sh` пишет адрес в `MARKET_DOMAIN` (сайту и Caddy)
+  и в `DJANGO_ALLOWED_HOSTS`. Какие страницы показать на поддомене, сайт
+  решает сам по `MARKET_DOMAIN`.
+- **Боевой:** пока маркетплейс не запущен (страницы `/market` отвечают
+  404), `market.savdex.uz` временно ведёт на `savdex.uz` — без копии
+  сайта по второму адресу; сертификат Caddy уже получает. Запуск — в
+  `prod-app.sh`: блок `market.savdex.uz` — `reverse_proxy` на сайт, как у
+  `savdex.uz`, адрес — в `DJANGO_ALLOWED_HOSTS` и `MARKET_DOMAIN`.
+- Общий вход на двух адресах (кука сессии на `.savdex.uz`, своё имя куки
+  у тестового) — в коде сайта, не здесь.
 
 ## Боевые машины
 

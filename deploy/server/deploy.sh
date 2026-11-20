@@ -9,6 +9,7 @@
 #
 # Переменные:
 #   SITE_DOMAIN — адрес тестового сайта (по умолчанию staging.savdex.uz);
+#   MARKET_DOMAIN — адрес маркетплейса на нём (по умолчанию market.<SITE_DOMAIN>);
 #   с --password-stdin первая строка ввода — пароль на сайт (логин savdex).
 #
 # Запускается от пользователя deploy (группа docker). Пароли базы и
@@ -21,6 +22,7 @@ SRC=$APP_HOME/src
 ENV_DIR=$APP_HOME/env
 COMPOSE_FILE=$SRC/deploy/staging/compose.yml
 SITE_DOMAIN=${SITE_DOMAIN:-staging.savdex.uz}
+MARKET_DOMAIN=${MARKET_DOMAIN:-market.$SITE_DOMAIN}
 AUTH_USER=savdex
 KEEP_IMAGES=3
 
@@ -63,6 +65,7 @@ if [ ! -s "$ENV_DIR/compose.env" ]; then
     } > "$ENV_DIR/compose.env"
 fi
 set_var "$ENV_DIR/compose.env" SITE_DOMAIN "$SITE_DOMAIN"
+set_var "$ENV_DIR/compose.env" MARKET_DOMAIN "$MARKET_DOMAIN"
 
 # shellcheck disable=SC1091
 . "$ENV_DIR/compose.env"
@@ -84,7 +87,9 @@ if [ ! -s "$ENV_DIR/app.env" ]; then
     } > "$ENV_DIR/app.env"
 fi
 set_var "$ENV_DIR/app.env" APP_URL "https://$SITE_DOMAIN"
-set_var "$ENV_DIR/app.env" DJANGO_ALLOWED_HOSTS "$SITE_DOMAIN,127.0.0.1,localhost"
+set_var "$ENV_DIR/app.env" DJANGO_ALLOWED_HOSTS "$SITE_DOMAIN,$MARKET_DOMAIN,127.0.0.1,localhost"
+# Маркетплейс (ТЗ 18.11): по этому адресу сайт узнаёт поддомен маркетплейса
+set_var "$ENV_DIR/app.env" MARKET_DOMAIN "$MARKET_DOMAIN"
 # Cloudflare перед тестовым нет: адрес посетителя — только из
 # X-Forwarded-For, который Caddy пишет сам (python/savdex/audit.py)
 set_var "$ENV_DIR/app.env" SAVDEX_CLIENT_IP_HEADERS ""

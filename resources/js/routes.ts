@@ -43,17 +43,30 @@ export const routes = {
     reviewsNew: '/reviews/new',
     contacts: '/contact',
 
+    // Маркетплейс (демо-данные, python/savdex/web/market.py)
+    market: '/market',
+    marketCatalog: '/market/catalog',
+    marketProduct: (slug: string) => `/market/product/${slug}`,
+    marketCart: '/market/cart',
+    marketCheckout: '/market/checkout',
+    marketOrders: '/market/orders',
+    marketShop: (slug: string) => `/market/shop/${slug}`,
+    marketSell: '/market/sell',
+    marketSeller: (tab?: string) => (tab ? `/market/seller?tab=${tab}` : '/market/seller'),
+
     // Избранное
     favorites: '/favorites',
     favoriteToggle: (id: number) => `/favorites/${id}`,
 
     // Вход
     login: '/login',
-    /** Вход с возвратом на текущую страницу (гость нажал «В избранное», «Откликнуться») */
-    loginBack: () =>
-        typeof window === 'undefined'
-            ? '/login'
-            : `/login?back=${encodeURIComponent(window.location.pathname + window.location.search)}`,
+    /** Вход с возвратом на текущую страницу (гость нажал «В избранное», «Откликнуться») или на заданный адрес */
+    loginBack: (to?: string) =>
+        to
+            ? `/login?back=${encodeURIComponent(to)}`
+            : typeof window === 'undefined'
+              ? '/login'
+              : `/login?back=${encodeURIComponent(window.location.pathname + window.location.search)}`,
     logout: '/logout',
     /** Новое задание капчи регистрации: ?for=register (JSON) */
     captcha: '/captcha',

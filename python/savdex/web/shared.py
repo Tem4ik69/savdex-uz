@@ -16,6 +16,7 @@ from __future__ import annotations
 import calendar
 import json
 import math
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
@@ -632,6 +633,11 @@ def maintenance(values: dict[str, Any], now: datetime | None = None) -> dict[str
     return None
 
 
+def market_open() -> bool:
+    """Открыт ли маркетплейс на этом сервере: везде, кроме боевого, пока идёт демо."""
+    return os.environ.get("APP_ENV", "local") != "production"
+
+
 def shared(ctx: Context) -> dict[str, Any]:
     """Общие пропсы — ключи и порядок HandleInertiaRequests::share."""
     user = ctx.user
@@ -704,6 +710,9 @@ def shared(ctx: Context) -> dict[str, Any]:
         "localeLinks": locale_links(ctx),
         "localeSuggest": suggest,
         "analytics": _analytics(ctx, company),
+        # Маркетплейс пока демо: на боевом закрыт (savdex/web/market.py),
+        # и ссылки на него в шапке нет
+        "market": market_open(),
     }
 
 
