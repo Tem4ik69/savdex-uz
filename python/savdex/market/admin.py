@@ -171,6 +171,14 @@ class DecisionsMixin:
     def decisions(self, obj: Any) -> list[tuple[str, str, bool]]:  # noqa: ANN401
         raise NotImplementedError
 
+    def may_decide(self, request: HttpRequest) -> bool:
+        """Может ли сотрудник принимать решения в разделе (по умолчанию — decide_ability)."""
+        return _admin_of(request).can(self.decide_ability)
+
+    def decisions_for(self, request: HttpRequest, obj: Any) -> list[tuple[str, str, bool]]:  # noqa: ANN401
+        """Решения, доступные этому сотруднику (по умолчанию — все решения записи)."""
+        return self.decisions(obj)
+
     def decide(
         self,
         request: HttpRequest,
@@ -192,7 +200,7 @@ class DecisionsMixin:
         ]
 
     def decide_view(self, request: HttpRequest, object_id: str) -> HttpResponse:
-        if request.method != "POST" or not _admin_of(request).can(self.decide_ability):
+        if request.method != "POST" or not self.may_decide(request):
             raise PermissionDenied
 
         obj = self.get_object(request, object_id)  # type: ignore[attr-defined]
@@ -204,7 +212,7 @@ class DecisionsMixin:
             f"savdex_admin:{self.decide_url_name.removesuffix('_decide')}_change", args=[obj.pk]
         )
         decision = request.POST.get("decision", "")
-        allowed = {code: needs for code, _, needs in self.decisions(obj)}
+        allowed = {code: needs for code, _, needs in self.decisions_for(request, obj)}
         note = (request.POST.get("note") or "").strip()
 
         if decision not in allowed:
@@ -259,8 +267,8 @@ class DecisionsMixin:
         obj = self.get_object(request, object_id)  # type: ignore[attr-defined]
         extra = dict(extra_context or {})
 
-        if obj is not None and _admin_of(request).can(self.decide_ability):
-            extra["decisions"] = self.decisions(obj)
+        if obj is not None and self.may_decide(request):
+            extra["decisions"] = self.decisions_for(request, obj)
             extra["min_note"] = MIN_NOTE
             extra["decide_url"] = reverse(f"savdex_admin:{self.decide_url_name}", args=[obj.pk])
             extra["decision_version"] = self.version_of(obj)
@@ -1168,6 +1176,10 @@ class OrderStatus(admin.SimpleListFilter):
         return queryset.filter(status=self.value()) if self.value() else queryset
 
 
+#: Право склада на шаги заказа (в сборку → отгружен → в пункте → выдан);
+#: отменить заказ склад не может — это market_orders.moderate
+STOCK_ABILITY = "market_stock.moderate"
+
 #: Кнопки шагов заказа в админке: в коде решения — статус, который видел
 #: сотрудник, чтобы повторный щелчок не продвинул заказ на шаг дальше
 _STEP_LABELS = {
@@ -1182,13 +1194,15 @@ _STEP_LABELS = {
 class OrderAdmin(DecisionsMixin, SavdexModelAdmin):
     """
     Заказы: поля только смотреть. Статус двигает сотрудник с правом
-    market_orders.moderate (администратор) кнопками под карточкой: в сборку
-    → отгружен → в пункте → выдан; заказ с оплатой при получении — ещё и
-    отменить до отгрузки. Только POST с CSRF, только через orders.advance и
+    market_orders.moderate (администратор) или market_stock.moderate (склад)
+    кнопками под карточкой: в сборку → отгружен → в пункте → выдан;
+    администратор может ещё и отменить заказ до отгрузки (склад — нет).
+    Только POST с CSRF, только через orders.advance и
     orders.staff_cancel (условный переход, резерв и обратная проводка),
-    каждое действие — строка журнала. Поддержка видит состав и статус, но
-    не суммы (access._DETAILS_HIDDEN), и статус не двигает. Телефона и
-    почты покупателя здесь нет: заказ выдаёт пункт выдачи.
+    каждое действие — строка журнала. Поддержка и склад видят состав и
+    статус, но не суммы (access._DETAILS_HIDDEN); поддержка статус не
+    двигает. Телефона и почты покупателя здесь нет: заказ выдаёт пункт
+    выдачи.
     """
 
     laravel_model = "Savdex\\Market\\Order"
@@ -1218,6 +1232,21 @@ class OrderAdmin(DecisionsMixin, SavdexModelAdmin):
             found.append((f"cancel:{obj.status}", label, False))
 
         return found
+
+    def may_decide(self, request: HttpRequest) -> bool:
+        """Шаги заказа — администратор (market_orders) и склад (market_stock)."""
+        admin = _admin_of(request)
+
+        return admin.can(self.decide_ability) or admin.can(STOCK_ABILITY)
+
+    def decisions_for(self, request: HttpRequest, obj: Order) -> list[tuple[str, str, bool]]:
+        """Склад двигает заказ по шагам, но не отменяет: отмена — администратору."""
+        found = self.decisions(obj)
+
+        if _admin_of(request).can(self.decide_ability):
+            return found
+
+        return [item for item in found if not item[0].startswith("cancel:")]
 
     def decide(
         self,
@@ -1251,7 +1280,7 @@ class OrderAdmin(DecisionsMixin, SavdexModelAdmin):
                 audit.record(
                     connection,
                     action="cancelled" if kind == "cancel" else "status_changed",
-                    section="market_orders",
+                    section="market_orders" if admin.can(self.decide_ability) else "market_stock",
                     actor=admin,
                     subject_type=self.laravel_model,
                     subject_id=obj.pk,
@@ -1487,3 +1516,8 @@ class PickupPointAdmin(SavdexModelAdmin):
     def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
         """Пункт с заказами не удаляется (база держит), выключите его."""
         return False
+
+
+# Касса маркетплейса (раздел market_cash): балансы, выплаты, реквизиты,
+# ручные возвраты — своим модулем, регистрируется при загрузке админки
+from savdex.market import cash_admin  # noqa: E402, F401

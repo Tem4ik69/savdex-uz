@@ -23,8 +23,9 @@ from typing import Any
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
+from savdex import audit
 from savdex.market import banners as market_banners
-from savdex.market import cart, catalog, oneid, orders, products, sellers
+from savdex.market import cart, cash, catalog, oneid, orders, products, sellers
 from savdex.market.common import t
 from savdex.web import session, throttle
 from savdex.web.actions import form
@@ -632,6 +633,107 @@ def my_seller_orders(request: HttpRequest) -> HttpResponse:
     assert seller is not None
 
     return _json({"orders": orders.seller_orders(int(seller["id"]), ctx.locale)})
+
+
+# ── Касса продавца: баланс и реквизиты ─────────────────────────────
+
+
+@_get
+def my_balance(request: HttpRequest) -> HttpResponse:
+    """
+    Баланс продавца — только свой: начислено, держится (не выдан или срок
+    на возврат не прошёл), доступно к выплате, в работе, выплачено и
+    последние выплаты (savdex/market/cash.py).
+    """
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    seller, refused = _seller_ctx(ctx)
+
+    if refused is not None:
+        return refused
+
+    assert seller is not None
+
+    return _json({"balance": cash.seller_balance(int(seller["id"]), ctx.locale)})
+
+
+def _owner_seller(ctx: Context) -> tuple[dict[str, Any] | None, HttpResponse | None]:
+    """Продавец, от имени которого действует владелец компании: реквизиты — только ему."""
+    seller, refused = _seller_ctx(ctx)
+
+    if refused is not None:
+        return None, refused
+
+    assert ctx.user is not None
+
+    if ctx.user.get("company_role") != "owner":
+        return None, _message(ctx, "cash.owner_only", 403)
+
+    return seller, None
+
+
+def my_requisites(request: HttpRequest) -> HttpResponse:
+    """GET — реквизиты для выплат, POST — сохранить (только владелец компании)."""
+    if request.method == "POST":
+        return _my_requisites_save(request)
+
+    return _my_requisites_view(request)
+
+
+@_get
+def _my_requisites_view(request: HttpRequest) -> HttpResponse:
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    seller, refused = _owner_seller(ctx)
+
+    if refused is not None:
+        return refused
+
+    assert seller is not None
+
+    return _json({"requisites": cash.requisites_view(int(seller["id"]))})
+
+
+@form()
+def _my_requisites_save(request: HttpRequest) -> HttpResponse:
+    """
+    POST {bankAccount, bankMfo, bankName, recipientName, recipientTin}.
+    Каждая смена — строка истории; выплата на новые реквизиты — через сутки
+    или после отдельной сверки кассой.
+    """
+    ctx = action(
+        request, auth=False, throttle=10, throttle_minutes=60, throttle_prefix="market-requisites"
+    )
+    seller, refused = _owner_seller(ctx)
+
+    if refused is not None:
+        return refused
+
+    assert seller is not None and ctx.user is not None
+    _, errors = cash.save_requisites(
+        int(seller["id"]),
+        int(ctx.user["id"]),
+        input_of(request),
+        ip=audit.client_ip(ctx.request),
+    )
+
+    if errors:
+        texts = {field: [t(key, ctx.locale)] for field, key in errors.items()}
+
+        return _json({"message": next(iter(texts.values()))[0], "errors": texts}, 422)
+
+    return _json(
+        {
+            "message": t("cash.saved", ctx.locale),
+            "requisites": cash.requisites_view(int(seller["id"])),
+        }
+    )
 
 
 @form()

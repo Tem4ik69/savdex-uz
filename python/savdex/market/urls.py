@@ -66,6 +66,8 @@ urlpatterns = [
         name="market.api.payments.click.complete",
     ),
     re_path(_P + r"me/orders$", api.my_seller_orders, name="market.api.me.orders"),
+    re_path(_P + r"me/balance$", api.my_balance, name="market.api.me.balance"),
+    re_path(_P + r"me/requisites$", api.my_requisites, name="market.api.me.requisites"),
     re_path(_P + r"me/seller$", api.seller_state, name="market.api.me.seller"),
     re_path(_P + r"me/seller/apply$", api.seller_apply, name="market.api.me.seller.apply"),
     re_path(_P + r"oneid/start$", api.oneid_start, name="market.api.oneid.start"),

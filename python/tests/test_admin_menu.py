@@ -54,6 +54,7 @@ def test_у_суперадмина_нет_групп_из_одного_пунк�
         "Модерация",
         "Данные",
         "Маркетплейс",
+        "Касса маркетплейса",
         "Монетизация",
         "Контент",
         "Справочники",
@@ -64,6 +65,12 @@ def test_у_суперадмина_нет_групп_из_одного_пунк�
     assert "Ticket" in меню["CRM"] and меню["CRM"][-1] == "Stage"
     assert меню["Модерация"].index("Complaint") > меню["Модерация"].index("CompanyDocument")
     assert меню["Система"][:2] == ["User", "StaffMember"]
+    assert меню["Касса маркетплейса"] == [
+        "SellerBalance",
+        "Payout",
+        "SellerRequisites",
+        "RefundOrder",
+    ]
     # «Возвраты» после «Счетов и оплат», как в Filament (8e32f2a)
     assert меню["Монетизация"].index("Payment") < меню["Монетизация"].index("Refund")
 
@@ -97,6 +104,15 @@ def test_сотруднику_только_свои_группы():
     assert модератор["CRM"] == ["Lead", "Deal"]
     assert "Complaint" in модератор["Модерация"]
     assert "Tender" in модератор["Данные"]
+
+
+def test_касса_и_склад_маркетплейса():
+    """Касса видит только кассу; склад — заказы (шаги заказа, без денег) и пункты выдачи."""
+    assert _меню("cashier") == {
+        "Касса маркетплейса": ["SellerBalance", "Payout", "SellerRequisites", "RefundOrder"]
+    }
+    # Пункты выдачи — только смотреть (правка — market_orders.edit)
+    assert _меню("warehouse") == {"Маркетплейс": ["Order", "PickupPoint"]}
 
 
 def test_открытая_группа():

@@ -141,15 +141,21 @@ def test_доставка_в_журнале_сходится():
 
 
 def test_счета_журнала_совпадают_с_миграцией():
-    """Ограничение market_ledger_account_check — тот же список, что ACCOUNTS."""
-    миграция = (
-        PYTHON / "savdex/bootstrap/migrations/2026_11_21_100000_create_market_orders.sql"
-    ).read_text(encoding="utf-8")
-    найдено = re.search(
-        r"market_ledger_account_check check \(account in \((.*?)\)\)", миграция, re.S
-    )
-    assert найдено is not None
-    assert set(re.findall(r"'(\w+)'", найдено.group(1))) == set(orders.ACCOUNTS)
+    """
+    Ограничение market_ledger_account_check — тот же список, что ACCOUNTS:
+    действует последнее по порядку миграций (касса, этап 3, его заменяет).
+    """
+    найдено = [
+        совпадение
+        for путь in sorted((PYTHON / "savdex/bootstrap/migrations").glob("*.sql"))
+        for совпадение in re.finditer(
+            r"market_ledger_account_check check \(account in \((.*?)\)\)",
+            путь.read_text(encoding="utf-8"),
+            re.S,
+        )
+    ]
+    assert найдено
+    assert set(re.findall(r"'(\w+)'", найдено[-1].group(1))) == set(orders.ACCOUNTS)
 
 
 def test_поддержка_не_сортирует_по_сумме(monkeypatch):
