@@ -155,6 +155,10 @@ class MarketHostMiddleware:
             # Старый вид адреса — на корневой
             if reading and _is_market_page(path):
                 rest = path[len(PREFIX) :] or ("" if lang else "/")
+                # Один ведущий «/»: «//чужой.адрес» браузер понял бы как
+                # другой сайт
+                if rest:
+                    rest = "/" + rest.lstrip("/")
 
                 return HttpResponseRedirect(f"{lang}{rest}{_query(request)}")
 
