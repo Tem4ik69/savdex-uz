@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from savdex.market.common import now, one, rows, write
+from savdex.market.common import now, one, rows, unchanged_since, write
 
 #: Редакция оферты продавца. Текста ещё нет (ТЗ, открытый вопрос 1 —
 #: Тимур): галочка записывается с этой меткой, чтобы потом было видно,
@@ -146,22 +146,23 @@ def apply(
 # ── Решения модератора ──────────────────────────────────────────────
 
 
-def approve(seller_id: int, admin_id: int) -> bool:
+def approve(seller_id: int, admin_id: int, *, seen: str | None = None) -> bool:
     """Подтвердить: компания — продавец, кабинет продавца открыт."""
     moment = now()
+    same, version = unchanged_since(seen)
 
     return bool(
         write(
             "update market_sellers set status = 'approved', verified_via = coalesce("
             "verified_via, 'documents'), approved_at = coalesce(approved_at, %s), "
             "reject_reason = null, reviewed_by = %s, reviewed_at = %s, blocked_at = null, "
-            "updated_at = %s where id = %s and status in ('pending', 'rejected')",
-            [moment, admin_id, moment, moment, seller_id],
+            "updated_at = %s where id = %s and status in ('pending', 'rejected')" + same,
+            [moment, admin_id, moment, moment, seller_id, *version],
         )
     )
 
 
-def reject(seller_id: int, admin_id: int, reason: str) -> bool:
+def reject(seller_id: int, admin_id: int, reason: str, *, seen: str | None = None) -> bool:
     """Отклонить с причиной: без причины компания пришлёт то же самое."""
     reason = reason.strip()
 
@@ -169,18 +170,19 @@ def reject(seller_id: int, admin_id: int, reason: str) -> bool:
         raise ValueError(f"Причина — не короче {MIN_REASON} знаков")
 
     moment = now()
+    same, version = unchanged_since(seen)
 
     return bool(
         write(
             "update market_sellers set status = 'rejected', reject_reason = %s, "
             "reviewed_by = %s, reviewed_at = %s, updated_at = %s "
-            "where id = %s and status = 'pending'",
-            [reason[:1000], admin_id, moment, moment, seller_id],
+            "where id = %s and status = 'pending'" + same,
+            [reason[:1000], admin_id, moment, moment, seller_id, *version],
         )
     )
 
 
-def block(seller_id: int, admin_id: int, reason: str) -> bool:
+def block(seller_id: int, admin_id: int, reason: str, *, seen: str | None = None) -> bool:
     """
     Остановить продажи: товары пропадают с витрины сразу (витрина
     показывает только подтверждённых продавцов), сами товары не трогаются.
@@ -191,26 +193,28 @@ def block(seller_id: int, admin_id: int, reason: str) -> bool:
         raise ValueError(f"Причина — не короче {MIN_REASON} знаков")
 
     moment = now()
+    same, version = unchanged_since(seen)
 
     return bool(
         write(
             "update market_sellers set status = 'blocked', reject_reason = %s, blocked_at = %s, "
             "reviewed_by = %s, reviewed_at = %s, updated_at = %s "
-            "where id = %s and status = 'approved'",
-            [reason[:1000], moment, admin_id, moment, moment, seller_id],
+            "where id = %s and status = 'approved'" + same,
+            [reason[:1000], moment, admin_id, moment, moment, seller_id, *version],
         )
     )
 
 
-def unblock(seller_id: int, admin_id: int) -> bool:
+def unblock(seller_id: int, admin_id: int, *, seen: str | None = None) -> bool:
     moment = now()
+    same, version = unchanged_since(seen)
 
     return bool(
         write(
             "update market_sellers set status = 'approved', reject_reason = null, "
             "blocked_at = null, reviewed_by = %s, reviewed_at = %s, updated_at = %s "
-            "where id = %s and status = 'blocked'",
-            [admin_id, moment, moment, seller_id],
+            "where id = %s and status = 'blocked'" + same,
+            [admin_id, moment, moment, seller_id, *version],
         )
     )
 

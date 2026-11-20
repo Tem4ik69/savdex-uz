@@ -34,7 +34,7 @@ import os
 from collections.abc import Callable
 from urllib.parse import urlsplit
 
-from django.http import HttpRequest, HttpResponse, HttpResponseRedirect
+from django.http import HttpRequest, HttpResponse, HttpResponseNotFound, HttpResponseRedirect
 from django.urls import Resolver404, resolve
 
 from savdex.web import locales
@@ -44,7 +44,7 @@ PREFIX = "/market"
 
 #: Что на адресе маркетплейса работает как есть — первый сегмент пути (без
 #: языка): вход и регистрация (сессия общая), язык, файлы, картинки
-#: соцсетей, служебное, админка и её статика
+#: соцсетей, служебное и статика админки (сама админка — нет, _ADMIN ниже)
 _PASS = frozenset(
     {
         "login",
@@ -70,6 +70,16 @@ _PASS = frozenset(
         "favicon.ico",
     }
 )
+
+#: Админка и вход в неё (пропуск из bridge) — только на основном адресе:
+#: на адресе маркетплейса их нет, переход на основной адрес. Иначе куки и
+#: формы админки жили бы ещё на одном адресе, рядом со страницами
+#: маркетплейса. Статика (/py/static) и проверка (/py/up) — как есть
+_ADMIN = ("/py/admin", "/py/login", "/py/logout")
+
+
+def _is_admin(path: str) -> bool:
+    return any(path == prefix or path.startswith(prefix + "/") for prefix in _ADMIN)
 
 
 def market_host() -> str | None:
@@ -133,6 +143,22 @@ def _resolves_to_market(path: str) -> bool:
     return (match.url_name or "").startswith("market")
 
 
+def _away(request: HttpRequest, url: str) -> HttpResponse:
+    """
+    Переход на другой адрес (основной ↔ маркетплейс). Ссылку Inertia
+    (запрос с X-Inertia) браузер не пустит фоновым запросом на чужой домен —
+    клик молча ничего не делает. Inertia ждёт для этого 409 с
+    X-Inertia-Location и сам открывает адрес обычным переходом.
+    """
+    if request.headers.get("X-Inertia"):
+        response = HttpResponse("", status=409)
+        response["X-Inertia-Location"] = url
+
+        return response
+
+    return HttpResponseRedirect(url)
+
+
 class MarketHostMiddleware:
     """Адрес маркетплейса: страницы с корня, остальное — на основной адрес."""
 
@@ -151,6 +177,16 @@ class MarketHostMiddleware:
 
         if _host(request) == host:
             first = path.lstrip("/").split("/", 1)[0]
+
+            if _is_admin(path):
+                site = os.environ.get("APP_URL", "").rstrip("/")
+
+                if reading and site:
+                    return HttpResponseRedirect(f"{site}{request.path}{_query(request)}")
+
+                # Отправка формы (вход по пропуску, сохранение) сюда не
+                # приходит со страниц основного адреса — не обслуживается
+                return HttpResponseNotFound()
 
             # Старый вид адреса — на корневой
             if reading and _is_market_page(path):
@@ -177,7 +213,7 @@ class MarketHostMiddleware:
                 site = os.environ.get("APP_URL", "").rstrip("/")
 
                 if site:
-                    return HttpResponseRedirect(f"{site}{request.path}{_query(request)}")
+                    return _away(request, f"{site}{request.path}{_query(request)}")
 
             return self.get_response(request)
 
@@ -188,7 +224,7 @@ class MarketHostMiddleware:
             if market_open():
                 rest = path[len(PREFIX) :] or ("" if lang else "/")
 
-                return HttpResponseRedirect(f"{_scheme()}://{host}{lang}{rest}{_query(request)}")
+                return _away(request, f"{_scheme()}://{host}{lang}{rest}{_query(request)}")
 
         return self.get_response(request)
 
