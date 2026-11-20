@@ -23,12 +23,14 @@
 from __future__ import annotations
 
 import json
+import secrets
 from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
-from savdex import access
+from savdex import access, images
+from savdex.market import products
 from savdex.market.catalog import Query
 from savdex.market.common import som, tiyin
 
@@ -58,6 +60,11 @@ from .web_site import адрес, открыть
 )
 def test_деньги_в_тийинах(сумма, тийины):
     assert tiyin(сумма) == тийины
+
+
+def test_фото_товара_строже_общего_предела():
+    """Фото товара грузят по десять за раз: предел пикселей у рамки — 25 Мп, ниже общего."""
+    assert products.PHOTO.max_pixels == 25_000_000 < images.MAX_PIXELS
 
 
 def test_тийины_в_сумы():
@@ -313,8 +320,29 @@ def _json(ответ: dict[str, Any]) -> Any:
     return json.loads(ответ["body"])
 
 
-def _get(сайт: str, path: str) -> dict[str, Any]:
-    return открыть(сайт, path, headers={"Accept": "application/json"})
+def _get(сайт: str, path: str, headers: dict[str, str] | None = None) -> dict[str, Any]:
+    return открыть(сайт, path, headers={"Accept": "application/json", **(headers or {})})
+
+
+def _посетитель() -> dict[str, str]:
+    """
+    Свой гость (документационная сеть IPv6): отсев повторных просмотров —
+    только наш. Гость IPv6 — это сеть /64, поэтому случайны первые 64 бита.
+    """
+    сеть = f"{secrets.randbelow(0xFFFF):x}:{secrets.randbelow(0xFFFF):x}"
+
+    return {"X-Forwarded-For": f"2001:db8:{сеть}::1"}
+
+
+def _премодерация(n: int) -> None:
+    """Сколько первых товаров нового продавца — через модератора (0 — все продавцы проверенные)."""
+    sql("delete from settings where key = 'market_premoderated_products'")
+    sql(
+        'insert into settings ("group", key, label, type, value, sort, created_at, updated_at) '
+        "values ('market', 'market_premoderated_products', 'Первые товары', 'number', "
+        "%s::json, 1, now(), now())",
+        [str(n)],
+    )
 
 
 #: Заголовки запроса страницы маркетплейса: JSON, XHR и токен из куки
@@ -448,7 +476,8 @@ def test_подсказки(сайт, витрина):
 @нужна_база
 def test_карточка_товара(сайт, витрина):
     sql("update market_products set views_count = 0 where id = %s", [витрина["телефон"]])
-    товар = _json(_get(сайт, "/market/api/product/galaxy-a55"))["product"]
+    гость = _посетитель()
+    товар = _json(_get(сайт, "/market/api/product/galaxy-a55", гость))["product"]
 
     assert товар["price"] == 4_000_000 and товар["stock"] == 5
     assert товар["variants"] == [{"name": "Память", "options": ["128 ГБ"]}]
@@ -461,8 +490,20 @@ def test_карточка_товара(сайт, витрина):
         (1,)
     ]
 
-    по_узбекски = _json(_get(сайт, "/uz/market/api/product/galaxy-a55"))["product"]
+    по_узбекски = _json(_get(сайт, "/uz/market/api/product/galaxy-a55", гость))["product"]
     assert ["Rang", "Qora"] in по_узбекски["specs"]
+
+    # Тот же гость снова (и на другом языке) — сегодня уже засчитан:
+    # обновлением страницы товар в «Популярные» не накрутить
+    _get(сайт, "/market/api/product/galaxy-a55", гость)
+    assert sql("select views_count from market_products where id = %s", [витрина["телефон"]]) == [
+        (1,)
+    ]
+    # Другой посетитель — новый просмотр
+    _get(сайт, "/market/api/product/galaxy-a55", _посетитель())
+    assert sql("select views_count from market_products where id = %s", [витрина["телефон"]]) == [
+        (2,)
+    ]
 
 
 @нужна_база
@@ -1306,3 +1347,326 @@ def test_убранный_вариант_не_удаляется(сайт, ви�
     assert sql("select count(*) from market_cart_items where variant_id = %s", [большой["id"]]) == [
         (0,)
     ]
+
+
+# ── Модерация и проверки формы товара ───────────────────────────────
+
+
+@нужна_база
+def test_отклонённый_и_снятый_товар_только_через_модератора(сайт, витрина):
+    """
+    Проверенный продавец (премодерация выключена) отправляет сразу в продажу
+    только то, что модератор не убирал: отклонённый и возвращённый после
+    снятия товар идёт на проверку, а снятый самим продавцом — сразу назад.
+    """
+    _премодерация(0)
+    компания = _компания("Toshkent Bodom", "toshkent-bodom")
+    владелец = _человек("owner@bodom.uz", компания)
+    продавец = _продавец(компания)
+    товар, _ = _товар(
+        продавец,
+        "dried-fruits-nuts",
+        "Миндаль жареный",
+        "almond-roasted",
+        status="rejected",
+        price=120_000,
+    )
+    sql(
+        "update market_products set reject_reason = 'На фото другой товар, не миндаль' "
+        "where id = %s",
+        [товар],
+    )
+    sql(
+        "insert into market_product_images (product_id, path) "
+        "values (%s, 'market/products/c.webp')",
+        [товар],
+    )
+    модератор = _сотрудник("moderator")
+    решение = f"/py/admin/market/product/{товар}/decide/"
+
+    def на_продажу() -> str:
+        ответ = _post(сайт, f"/market/api/me/products/{товар}/submit", владелец)
+        assert ответ["status"] == 200, ответ["body"]
+
+        return str(_json(ответ)["status"])
+
+    def статус() -> tuple[str, bool]:
+        [(status, причина)] = sql(
+            "select status, reject_reason is not null from market_products where id = %s", [товар]
+        )
+
+        return status, причина
+
+    assert на_продажу() == "pending", "отклонённый — через модератора"
+    assert статус() == ("pending", True)
+
+    def решить(decision: str, **поля: str) -> None:
+        """Решение по той версии товара, что сейчас в базе (как в карточке)."""
+        версия = _версия("market_products", товар)
+        django(модератор, ("post", решение, {"decision": decision, "version": версия, **поля}))
+
+    решить("approve")
+    assert статус() == ("active", False)
+
+    решить("block", note="Жалоба покупателя на подделку")
+    решить("unblock")
+    assert статус() == ("draft", True), "причина снятия остаётся продавцу"
+    assert на_продажу() == "pending", "возвращённый после снятия — через модератора"
+
+    решить("approve")
+    assert _post(сайт, f"/market/api/me/products/{товар}/hide", владелец)["status"] == 200
+    assert статус() == ("hidden", False)
+    assert на_продажу() == "active", "снятый самим продавцом — сразу назад"
+
+
+@нужна_база
+def test_после_отказа_копия_товара_тоже_через_модератора(сайт, витрина):
+    """Проверенному продавцу отказали — новые товары месяц идут через модератора."""
+    _премодерация(0)
+    компания = _компания("Nusxa Savdo", "nusxa-savdo")
+    владелец = _человек("owner@nusxa.uz", компания)
+    продавец = _продавец(компания)
+    форма = {
+        "title": "Миндаль отборный",
+        "description": "Как у известного бренда",
+        "category": "dried-fruits-nuts",
+        "ikpu": "12345678901234567",
+        "variants": [{"price": "150000"}],
+    }
+
+    def новый_в_продажу() -> str:
+        создал = _post(сайт, "/market/api/me/products/create", владелец, форма)
+        assert создал["status"] == 201, создал["body"]
+        товар = _json(создал)["product"]["id"]
+        sql(
+            "insert into market_product_images (product_id, path) values (%s, %s)",
+            [товар, f"market/products/n{товар}.webp"],
+        )
+        ответ = _post(сайт, f"/market/api/me/products/{товар}/submit", владелец)
+        assert ответ["status"] == 200, ответ["body"]
+
+        return str(_json(ответ)["status"])
+
+    assert новый_в_продажу() == "active", "проверенный продавец — сразу"
+
+    отклонённый, _ = _товар(
+        продавец,
+        "dried-fruits-nuts",
+        "Миндаль-подделка",
+        "fake-almond",
+        status="rejected",
+        price=150_000,
+    )
+    sql(
+        "update market_products set reject_reason = 'Подделка известного бренда', "
+        "moderated_at = (now() at time zone 'utc') - interval '2 days' where id = %s",
+        [отклонённый],
+    )
+    assert новый_в_продажу() == "pending", "копия отклонённого — через модератора"
+
+    sql(
+        "update market_products set moderated_at = (now() at time zone 'utc') - "
+        "interval '40 days' where id = %s",
+        [отклонённый],
+    )
+    assert новый_в_продажу() == "active", "отказ давний — снова сразу"
+
+
+@нужна_база
+def test_правка_вариантов_у_нового_продавца_возвращает_в_черновик(сайт, витрина):
+    """Название варианта и артикул — тоже содержание; цена — нет."""
+    _премодерация(100)
+    компания = _компания("Yangi Savdo", "yangi-savdo")
+    владелец = _человек("owner@yangi.uz", компания)
+    продавец = _продавец(компания)
+    товар, вариант = _товар(
+        продавец, "men-clothes", "Рубашка льняная", "linen-shirt", price=200_000
+    )
+    форма = {
+        "title": "Рубашка льняная",
+        "description": "Описание: Рубашка льняная",
+        "category": "men-clothes",
+        "ikpu": "12345678901234567",
+    }
+
+    def правка(**поля: Any) -> str:
+        sql("update market_products set status = 'active' where id = %s", [товар])
+        ответ = _post(
+            сайт,
+            f"/market/api/me/products/{товар}",
+            владелец,
+            {**форма, "variants": [{"id": вариант, "price": 200000, **поля}]},
+        )
+        assert ответ["status"] == 200, ответ["body"]
+
+        return str(_json(ответ)["product"]["status"])
+
+    assert правка() == "active", "ничего не поменялось"
+    assert правка(price=210000) == "active", "цена статус не меняет"
+    assert правка(price=210000, options={"Цвет": "Красный"}) == "draft", "новое название варианта"
+    assert правка(price=210000, options={"Цвет": "Красный"}, sku="LN-RED-42") == "draft", (
+        "новый артикул"
+    )
+
+
+@нужна_база
+def test_цена_товара_с_варианта_который_можно_купить(сайт, витрина):
+    """
+    В строке товара (каталог, сортировка по цене) — цена самого дешёвого
+    варианта, который есть на складе; нет ни одного — самого дешёвого.
+    Дешевле 100 сумов форма не примет.
+    """
+    компания = _компания("Narx Shop", "narx-shop")
+    владелец = _человек("owner@narx.uz", компания)
+    _продавец(компания)
+    товар = {
+        "title": "Кроссовки беговые",
+        "category": "men-clothes",
+        "variants": [
+            {"options": {"Размер": "41"}, "price": 300000},
+            {"options": {"Размер": "42"}, "price": 350000},
+        ],
+    }
+
+    дёшево = _post(
+        сайт, "/market/api/me/products/create", владелец, {**товар, "variants": [{"price": "50"}]}
+    )
+    assert дёшево["status"] == 422 and "variants.0.price" in _json(дёшево)["errors"]
+
+    создал = _post(сайт, "/market/api/me/products/create", владелец, товар)
+    assert создал["status"] == 201, создал["body"]
+    карточка = _json(создал)["product"]
+    малый, большой = карточка["variants"]
+
+    def цена_после_правки() -> tuple[int, int]:
+        правка = _post(
+            сайт,
+            f"/market/api/me/products/{карточка['id']}",
+            владелец,
+            {
+                **товар,
+                "variants": [
+                    {**товар["variants"][0], "id": малый["id"]},
+                    {**товар["variants"][1], "id": большой["id"]},
+                ],
+            },
+        )
+        assert правка["status"] == 200, правка["body"]
+        [(price, stock)] = sql(
+            "select price, stock from market_products where id = %s", [карточка["id"]]
+        )
+
+        return price, stock
+
+    assert цена_после_правки() == (30_000_000, 0), "склад пуст — самый дешёвый"
+    sql("update market_product_variants set stock = 3 where id = %s", [большой["id"]])
+    assert цена_после_правки() == (35_000_000, 3), "есть только 42-й — его цена"
+    sql("update market_product_variants set reserved = 3 where id = %s", [большой["id"]])
+    assert цена_после_правки() == (30_000_000, 0), "всё отложено под заказы — самый дешёвый"
+
+
+@нужна_база
+def test_ошибки_формы_товара_422_а_не_500(сайт, витрина):
+    """То, что раньше доходило до ограничений базы (500), — ошибка формы или сохранение."""
+    _премодерация(0)
+    компания = _компания("Xato Shop", "xato-shop")
+    владелец = _человек("owner@xato.uz", компания)
+    продавец = _продавец(компания)
+    товар = {
+        "title": "Свитер шерстяной",
+        "category": "men-clothes",
+        "variants": [
+            {"options": {"Размер": "M"}, "price": 150000},
+            {"options": {"Размер": "L"}, "price": 160000},
+        ],
+    }
+
+    # Арабские цифры — не цифры ИКПУ и штрихкода: поле пустое, а не 500
+    # от market_products_ikpu_check
+    арабские = _post(
+        сайт,
+        "/market/api/me/products/create",
+        владелец,
+        {**товар, "ikpu": "١٢٣٤٥٦٧٨٩٠١٢٣٤٥٦٧", "barcode": "١٢٣٤٥٦٧٨"},
+    )
+    assert арабские["status"] == 201, арабские["body"]
+    создал = _json(арабские)["product"]
+    assert (создал["ikpu"], создал["barcode"]) == (None, None)
+
+    # Убрал L и в том же запросе добавил L заново (без id) — новый вариант,
+    # а не 500 от уникальности (product_id, options)
+    средний, большой = создал["variants"]
+    заново = _post(
+        сайт,
+        f"/market/api/me/products/{создал['id']}",
+        владелец,
+        {
+            **товар,
+            "variants": [{**товар["variants"][0], "id": средний["id"]}, товар["variants"][1]],
+        },
+    )
+    assert заново["status"] == 200, заново["body"]
+    новый = _json(заново)["product"]["variants"][1]
+    assert новый["id"] != большой["id"] and новый["options"] == {"Размер": "L"}
+    assert sql(
+        "select options ? '_removed' from market_product_variants where id = %s", [большой["id"]]
+    ) == [(True,)]
+
+    # Товар в продаже: выключить все варианты или стереть ИКПУ — ошибка
+    # формы, а не 500 от market_products_active_check
+    живой, вариант = _товар(
+        продавец, "men-clothes", "Свитер в продаже", "sweater-live", price=150_000
+    )
+    форма = {
+        "title": "Свитер в продаже",
+        "description": "Описание: Свитер в продаже",
+        "category": "men-clothes",
+        "ikpu": "12345678901234567",
+    }
+    выключил = _post(
+        сайт,
+        f"/market/api/me/products/{живой}",
+        владелец,
+        {**форма, "variants": [{"id": вариант, "price": 150000, "active": False}]},
+    )
+    assert выключил["status"] == 422 and "variants" in _json(выключил)["errors"]
+    без_икпу = _post(
+        сайт,
+        f"/market/api/me/products/{живой}",
+        владелец,
+        {**форма, "ikpu": "", "variants": [{"id": вариант, "price": 150000}]},
+    )
+    assert без_икпу["status"] == 422 and "ikpu" in _json(без_икпу)["errors"]
+    assert sql("select status, price from market_products where id = %s", [живой]) == [
+        ("active", 15_000_000)
+    ]
+
+    # Товар на проверке: без ИКПУ модератор не смог бы его одобрить — тоже ошибка
+    sql("update market_products set status = 'pending' where id = %s", [живой])
+    на_проверке = _post(
+        сайт,
+        f"/market/api/me/products/{живой}",
+        владелец,
+        {**форма, "ikpu": "", "variants": [{"id": вариант, "price": 150000}]},
+    )
+    assert на_проверке["status"] == 422 and "ikpu" in _json(на_проверке)["errors"]
+    assert sql("select ikpu from market_products where id = %s", [живой]) == [
+        ("12345678901234567",)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("адрес", "гость"),
+    [
+        ("203.0.113.7", "203.0.113.7"),
+        ("2001:db8:1:2:aaaa::1", "2001:db8:1:2::/64"),
+        ("2001:db8:1:2:bbbb::9", "2001:db8:1:2::/64"),
+        ("не адрес", "не адрес"),
+    ],
+)
+def test_гость_для_просмотров_ipv6_по_сети(monkeypatch, адрес, гость):
+    from savdex.market import api
+
+    monkeypatch.setattr(api, "client_ip", lambda request: адрес)
+
+    assert api._visitor_net(None) == гость  # type: ignore[arg-type]
