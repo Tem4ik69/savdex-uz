@@ -7,6 +7,7 @@ import { Link } from '@/components/ui/Link';
 import { CATEGORIES, PRODUCTS } from '@/market/demo';
 import { sum } from '@/market/format';
 import { cartCount, useCart, useFavorites } from '@/market/store';
+import { localize } from '@/lib/locale';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
 
@@ -31,7 +32,10 @@ export function MarketLayout({
     search?: string;
     children: ReactNode;
 }) {
-    const { auth } = usePage<SharedProps>().props;
+    const { auth, marketLinks } = usePage<SharedProps>().props;
+    // На своём адресе маркетплейса «/» — его главная: на основной сайт —
+    // полным адресом и обычной ссылкой (другой домен, не переход Inertia)
+    const site = marketLinks?.base === '' && marketLinks.site ? marketLinks.site : null;
     const inCart = cartCount(useCart());
     const liked = Object.keys(useFavorites()).length;
     const account = auth.user ? routes.cabinet : routes.loginBack();
@@ -51,7 +55,7 @@ export function MarketLayout({
                     </span>
                     <nav aria-label="Служебное меню">
                         <Link href={routes.marketSell}>Стать продавцом</Link>
-                        <Link href={routes.home}>savdex.uz</Link>
+                        {site ? <a href={`${site}${localize('/')}`}>savdex.uz</a> : <Link href={routes.home}>savdex.uz</Link>}
                         <Link href={routes.help}>Помощь</Link>
                     </nav>
                 </div>
