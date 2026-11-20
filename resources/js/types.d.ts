@@ -136,6 +136,12 @@ export interface SharedProps extends InertiaPageProps {
     /** Маркетплейс открыт на этом сервере: на боевом до запуска — false, и пункта в шапке нет. */
     market?: boolean;
     /**
+     * Адреса маркетплейса (savdex/market/domain.py): base — начало адресов его
+     * страниц здесь («» на его своём адресе, «/market» на основном), site —
+     * основной сайт, market — адрес маркетплейса или null.
+     */
+    marketLinks?: { base: string; site: string | null; market: string | null };
+    /**
      * Словарь интерфейса. Приходит только при полной загрузке
      * страницы — на переходах Inertia он у браузера уже есть.
      */
