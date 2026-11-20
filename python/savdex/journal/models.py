@@ -45,8 +45,10 @@ ACTIONS = {
     "payout_cancelled": "Выплата: отменена",
     "cash_reconciled": "Наличные сверены с BTS",
     "refund_claimed": "Возврат взят вручную",
+    "cash_unreconciled": "Сверка наличных снята",
+    "refund_unclaimed": "Возврат вручную отпущен",
     "refund_marked": "Возврат отмечен вручную",
-    "refund_checked": "Возврат проверен у провайдера",
+    "payment_checked": "Оплата проверена у провайдера",
 }
 
 

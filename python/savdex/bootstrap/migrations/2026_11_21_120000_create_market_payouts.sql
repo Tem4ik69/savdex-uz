@@ -112,9 +112,13 @@ create unique index market_payouts_bank_reference_unique on market_payouts (bank
 create index market_payouts_seller_index on market_payouts (seller_id, status);
 create index market_payouts_status_index on market_payouts (status, created_at desc);
 
--- Выплата не переписывается задним числом, даже владельцем базы: продавец,
--- сумма и автор — только при создании; из «выплачено» и «отменена» не
--- выходят, у выплаченной не меняются платёжка и группа журнала
+-- Выплата не переписывается задним числом, даже владельцем базы:
+-- - продавец, сумма и автор — только при создании;
+-- - переходы — только вперёд: draft → approved | cancelled,
+--   approved → paid | cancelled; назад (approved → draft) — нет;
+-- - после ухода из draft подтверждение (кто, когда, реквизиты, отметка
+--   «сверены») не меняется;
+-- - выплаченная и отменённая не меняются вовсе.
 create or replace function market_payouts_guard() returns trigger
 language plpgsql as $$
 begin
@@ -125,12 +129,27 @@ begin
             using errcode = 'insufficient_privilege';
     end if;
 
-    if old.status in ('paid', 'cancelled') and (
-        new.status <> old.status
-        or new.bank_reference is distinct from old.bank_reference
-        or new.ledger_group is distinct from old.ledger_group
-    ) then
+    if old.status in ('paid', 'cancelled') then
         raise exception 'market_payouts %: выплата уже закрыта (%)', old.id, old.status
+            using errcode = 'insufficient_privilege';
+    end if;
+
+    if new.status <> old.status and not (
+        (old.status = 'draft' and new.status in ('approved', 'cancelled'))
+        or (old.status = 'approved' and new.status in ('paid', 'cancelled'))
+    ) then
+        raise exception 'market_payouts %: переход % → % запрещён', old.id, old.status, new.status
+            using errcode = 'insufficient_privilege';
+    end if;
+
+    if old.status <> 'draft' and (
+        new.approved_by is distinct from old.approved_by
+        or new.approved_at is distinct from old.approved_at
+        or new.requisites_log_id is distinct from old.requisites_log_id
+        or new.fresh_requisites is distinct from old.fresh_requisites
+        or new.fresh_check_note is distinct from old.fresh_check_note
+    ) then
+        raise exception 'market_payouts %: подтверждение не меняется', old.id
             using errcode = 'insufficient_privilege';
     end if;
 
@@ -143,17 +162,43 @@ create trigger market_payouts_guard
 
 -- ── Наличные: сверка с отчётом BTS ─────────────────────────────────
 -- Заказ «при получении» попадает продавцу «к выплате» только после
--- отметки кассы «сверено с отчётом BTS»: пока деньги не пришли от пункта
--- выдачи, выплачивать их рано.
+-- отметки кассы «сверено с отчётом BTS» (cash_reconciled_ref — номер или
+-- дата отчёта): пока деньги не пришли от пункта выдачи, выплачивать их
+-- рано. Сверку можно снять, пока деньги заказа не ушли в выплату.
 alter table market_orders add column cash_reconciled_at timestamp(0) without time zone;
 alter table market_orders add column cash_reconciled_by bigint
     references users (id) on delete restrict;
+alter table market_orders add column cash_reconciled_ref varchar(100);
+
+-- ── Возврат вручную ────────────────────────────────────────────────
+-- refund_mode — как идёт возврат: api — расписание запрашивает его у
+-- провайдера (ставится до сетевого вызова), manual — API нет, вернуть в
+-- кабинете, error — сбой связи, итог неизвестен, claimed — касса взяла
+-- возврат на себя (refund_claimed_by). Отметить возврат вручную можно
+-- только в claimed, manual и error — не пока идёт запрос api.
+-- refund_reference — номер возврата у провайдера, один на возврат.
+alter table market_payments add column refund_mode varchar(8);
+alter table market_payments add column refund_claimed_by bigint
+    references users (id) on delete restrict;
+alter table market_payments add column refund_reference varchar(64);
+alter table market_payments add constraint market_payments_refund_mode_check
+    check (refund_mode is null or refund_mode in ('api', 'manual', 'error', 'claimed'));
+create unique index market_payments_refund_reference_unique on market_payments (refund_reference)
+    where refund_reference is not null;
+
+-- ── Реквизиты: неверные пароли ──────────────────────────────────────
+-- Смена реквизитов — с паролем от входа; пять неверных подряд — смена
+-- закрыта на сутки (requisites_locked_until), владельцам — письмо.
+alter table market_sellers add column requisites_failed smallint not null default 0;
+alter table market_sellers add column requisites_locked_until timestamp(0) without time zone;
 
 -- ── Журнал денег: счёт выплат ──────────────────────────────────────
 -- payout_clearing — деньги, ушедшие продавцам платёжкой с нашего счёта:
 -- выплата — seller_payable плюс (долг продавцу закрыт), payout_clearing
 -- минус. Список счетов — savdex/market/orders.py, ACCOUNTS.
--- not valid + validate: проверка старых строк — без замка на запись
+-- Замок на запись в журнал денег всё равно берётся (drop и add
+-- constraint); not valid и отдельный validate только делят проверку
+-- старых строк на свой шаг. Журнал пока маленький — это мгновения.
 alter table market_ledger drop constraint market_ledger_account_check;
 alter table market_ledger add constraint market_ledger_account_check check (account in (
         'buyer_receivable', 'gateway_clearing', 'cash_collected', 'seller_payable',

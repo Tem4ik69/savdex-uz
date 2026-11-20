@@ -754,19 +754,36 @@ def _my_requisites_save(request: HttpRequest) -> HttpResponse:
 
         return _json({"message": next(iter(texts.values()))[0], "errors": texts}, 422)
 
-    hashed = one("select password from users where id = %s", [ctx.user["id"]])
+    seller_id = int(seller["id"])
 
-    if not guard.check(str(data.get("password") or ""), (hashed or {}).get("password")):
+    # Пять неверных паролей подряд — смена закрыта на сутки (письмо владельцам)
+    if cash.requisites_locked(seller_id):
+        return _message(ctx, "cash.locked", 429)
+
+    hashed = (one("select password from users where id = %s", [ctx.user["id"]]) or {}).get(
+        "password"
+    )
+
+    # Пароля нет (вошёл без него) — подтвердить нечем: пусть задаст пароль.
+    # TODO(касса): запасной путь — код на почту (как savdex/web/verification.py)
+    if not hashed:
+        text = t("cash.password_missing", ctx.locale)
+
+        return _json({"message": text, "errors": {"password": [text]}}, 422)
+
+    if not guard.check(str(data.get("password") or ""), str(hashed)):
+        cash.password_failed(seller_id)
         text = t("cash.password", ctx.locale)
 
         return _json({"message": text, "errors": {"password": [text]}}, 422)
 
+    cash.password_ok(seller_id)
     changed, _ = cash.save_requisites(
-        int(seller["id"]), int(ctx.user["id"]), data, ip=client_ip(ctx.request)
+        seller_id, int(ctx.user["id"]), data, ip=client_ip(ctx.request)
     )
 
     if changed:
-        cash.notify_requisites_changed(int(seller["id"]), ctx.locale)
+        cash.notify_requisites_changed(seller_id)
 
     return _json(
         {

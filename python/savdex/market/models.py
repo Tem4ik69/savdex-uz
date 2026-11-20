@@ -270,6 +270,7 @@ class Order(models.Model):
     #: Касса сверила наличные заказа с отчётом BTS (миграция 2026_11_21_120000)
     cash_reconciled_at = UTCDateTimeField("наличные сверены", null=True)
     cash_reconciled_by = models.BigIntegerField("сверил", null=True)
+    cash_reconciled_ref = models.CharField("отчёт BTS", max_length=100, null=True)
     stock_written_off_at = UTCDateTimeField("остаток списан", null=True)
     created_at = UTCDateTimeField("оформлен", auto_now_add=True)
     updated_at = UTCDateTimeField("изменён", auto_now=True)

@@ -93,13 +93,52 @@ def test_реквизиты_проверяются_до_базы():
     assert all(key.startswith("cash.") for key in ошибки.values())
 
     # RLO и символ нулевой ширины в названии — подмена того, что видит касса
-    for плохое in ("ООО ‮тсеТ", "Капитал​банк", "Банк\x07"):
+    for плохое in ("ООО \u202eтсеТ", "Капитал\u200bбанк", "Банк\x07"):
         _, ошибки = cash.validate_requisites({**РЕКВИЗИТЫ, "bankName": плохое})
         assert set(ошибки) == {"bankName"}, плохое
 
     значения, ошибки = cash.validate_requisites(РЕКВИЗИТЫ)
     assert ошибки == {} and значения["bank_account"] == "20208000123456789012"
     assert cash.masked("20208000123456789012") == "•••• 9012"
+
+
+def _касса_без_базы() -> access.Admin:
+    return access.Admin(
+        id=1, name="Кассир", email="c@savdex.uz", is_admin=True, role="cashier", status="active"
+    )
+
+
+def test_сверка_наличных_до_базы():
+    """Отчёт BTS короче 10 знаков и пачка больше 100 — отказ раньше базы."""
+    with pytest.raises(cash.CashRefused, match="отчёта BTS"):
+        cash.reconcile_cash(_касса_без_базы(), [1], "отчёт 1")
+
+    with pytest.raises(cash.CashRefused, match="Не больше 100"):
+        cash.reconcile_cash(_касса_без_базы(), range(1, 102), "отчёт BTS №77 от 20.11")
+
+
+def test_ссылки_маркетплейса_на_пользователя_в_одном_списке():
+    """
+    Каждый внешний ключ маркетплейса на users с on delete restrict (держит
+    строку users) — в MARKET_USER_REFERENCES: удаление навсегда его видит.
+    """
+    import re
+
+    from savdex.accounts.admin import MARKET_USER_REFERENCES
+
+    from .pg_admin import PYTHON
+
+    найдено: set[str] = set()
+
+    for путь in (PYTHON / "savdex/bootstrap/migrations").glob("*market*.sql"):
+        текст = путь.read_text(encoding="utf-8")
+        найдено |= set(
+            re.findall(
+                r"(\w+) bigint(?: not null)?\s+references users \(id\) on delete restrict", текст
+            )
+        )
+
+    assert найдено == {column for _, column in MARKET_USER_REFERENCES}
 
 
 # ── Данные ──────────────────────────────────────────────────────────
@@ -444,10 +483,24 @@ def test_выплату_не_переписать_мимо_кода(сайт):
     with pytest.raises(Exception, match="не меняются"):
         sql("update market_payouts set amount = amount + 1 where id = %s", [выплата])
 
+    # Назад в draft — нельзя; подтверждение после ухода из draft не меняется
+    with pytest.raises(Exception, match="запрещён"):
+        sql("update market_payouts set status = 'draft' where id = %s", [выплата])
+
+    with pytest.raises(Exception, match="подтверждение не меняется"):
+        sql("update market_payouts set approved_by = created_by where id = %s", [выплата])
+
+    with pytest.raises(Exception, match="подтверждение не меняется"):
+        sql("update market_payouts set fresh_requisites = true where id = %s", [выплата])
+
     assert _выплата(_кассир(1), выплата, "paid", bank_reference="ПП-777")["status"] == 302
 
     with pytest.raises(Exception, match="уже закрыта"):
         sql("update market_payouts set status = 'cancelled' where id = %s", [выплата])
+
+    # Выплаченная не меняется вовсе — ни заметка, ни время
+    with pytest.raises(Exception, match="уже закрыта"):
+        sql("update market_payouts set note = 'правка' where id = %s", [выплата])
 
     with pytest.raises(Exception, match="market_payouts_two_people_check"):
         sql(
@@ -556,33 +609,70 @@ def test_наличные_к_выплате_после_сверки(сайт):
     данные = _продавец_с_товаром()
     _, number, pk = _заказ(сайт, данные["вариант"])
     _выдать(pk, дней_назад=8, сверить=False)
+    кассир = _кассир(1)
 
     баланс = _json(_get_as(сайт, "/market/api/me/balance", данные["владелец"]))["balance"]
     assert (баланс["accrued"], баланс["available"], баланс["onHold"]) == (81_000, 0, 81_000)
 
     список = "/py/admin/market/cashorder/"
-    _, страница = django(_кассир(1), ("get", список, None))
+    _, страница = django(кассир, ("get", список + "?reconciled=no", None))
     assert number in страница["body"]
 
-    # Склад и поддержка не сверяют
-    _, чужой = django(_сотрудник("support"), ("post", f"{список}{pk}/reconcile/", {"note": "x"}))
+    # Поддержка не сверяет
+    _, чужой = django(
+        _сотрудник("support"), ("post", f"{список}{pk}/reconcile/", {"report": "отчёт BTS 1234"})
+    )
     assert чужой["status"] == 403
 
-    # Пачкой — действием списка
+    # Пачкой: сначала страница подтверждения — сколько и на какую сумму
+    выбор = {"action": "reconcile", "_selected_action": [str(pk)]}
+    _, подтверждение = django(кассир, ("post", список, выбор))
+    assert подтверждение["status"] == 200
+    assert "Ждут сверки: <b>1</b>" in подтверждение["body"]
+    assert "90 000 сум" in подтверждение["body"]
+    assert sql("select cash_reconciled_at from market_orders where id = %s", [pk]) == [(None,)]
+
+    # Отчёт короче 10 знаков — отказ
+    django(кассир, ("post", список, {**выбор, "confirm": "yes", "report": "отчёт 1"}))
+    assert sql("select cash_reconciled_at from market_orders where id = %s", [pk]) == [(None,)]
+
     _, итог = django(
-        _кассир(1),
-        ("post", список, {"action": "reconcile", "_selected_action": [str(pk)]}),
+        кассир, ("post", список, {**выбор, "confirm": "yes", "report": "BTS-2026-11-20 №77"})
     )
     assert итог["status"] == 302
     assert sql(
-        "select cash_reconciled_at is not null, cash_reconciled_by from market_orders "
-        "where id = %s",
+        "select cash_reconciled_at is not null, cash_reconciled_by, cash_reconciled_ref "
+        "from market_orders where id = %s",
         [pk],
-    ) == [(True, _кассир(1))]
-    assert журнал("cash_reconciled")["subject_label"] == number
+    ) == [(True, кассир, "BTS-2026-11-20 №77")]
+    запись = журнал("cash_reconciled")
+    assert запись["subject_label"] == number
+    assert запись["changes"]["after"]["amount"] == ЦЕНА * 100
 
     баланс = _json(_get_as(сайт, "/market/api/me/balance", данные["владелец"]))["balance"]
     assert баланс["available"] == 81_000
+
+    # Сверивший не подтверждает выплату из этих денег — только другой кассир
+    _реквизиты(сайт, данные["владелец"])
+    _создать(_кассир(2), данные["продавец"], 10_000)
+    [(выплата, _, _)] = _выплаты(данные["продавец"])
+    assert "Вы сверяли наличные" in _выплата(кассир, выплата, "approve")["body"]
+    assert _выплаты(данные["продавец"])[0][2] == "draft"
+
+    # Снять сверку, пока деньги в выплате, — нельзя; без выплаты — можно, с причиной
+    карточка = f"{список}{pk}/"
+    снять = {"do": "unreconcile", "reason": "ошиблись отчётом"}
+    _, _, нельзя = django(
+        кассир,
+        ("post", карточка + "reconcile/", снять),
+        ("get", карточка + "change/", None),
+    )
+    assert "уже в выплате" in нельзя["body"]
+    assert _выплата(_кассир(2), выплата, "cancel", reason="снимаем сверку")["status"] == 302
+    _, снята = django(кассир, ("post", карточка + "reconcile/", снять))
+    assert снята["status"] == 302
+    assert sql("select cash_reconciled_at from market_orders where id = %s", [pk]) == [(None,)]
+    assert журнал("cash_unreconciled")["subject_label"] == number
 
 
 # ── Кабинет продавца ────────────────────────────────────────────────
@@ -633,7 +723,7 @@ def test_смена_реквизитов_с_паролем_и_уведомлен
     плохие = _post(сайт, адрес_api, владелец, {"bankMfo": "1", "password": ПАРОЛЬ})
     assert плохие["status"] == 422 and "bankAccount" in _json(плохие)["errors"]
     невидимые = _post(
-        сайт, адрес_api, владелец, {**РЕКВИЗИТЫ, "bankName": "Банк‮", "password": ПАРОЛЬ}
+        сайт, адрес_api, владелец, {**РЕКВИЗИТЫ, "bankName": "Банк\u202e", "password": ПАРОЛЬ}
     )
     assert невидимые["status"] == 422 and "bankName" in _json(невидимые)["errors"]
 
@@ -669,7 +759,133 @@ def test_смена_реквизитов_с_паролем_и_уведомлен
     assert "•••• 9012" in список["body"] and "20208000123456789012" not in список["body"]
 
 
+@нужна_база
+def test_пять_неверных_паролей_закрывают_смену(сайт):
+    данные = _продавец_с_товаром()
+    владелец, продавец = данные["владелец"], данные["продавец"]
+    sql("update users set locale = 'en' where id = %s", [владелец])
+    адрес_api = "/market/api/me/requisites"
+
+    for _ in range(5):
+        ответ = _post(сайт, адрес_api, владелец, {**РЕКВИЗИТЫ, "password": "не-тот"})
+        assert ответ["status"] == 422 and "password" in _json(ответ)["errors"]
+
+    # Закрыто на сутки — даже с верным паролем; владельцу — уведомление на его языке
+    закрыто = _post(сайт, адрес_api, владелец, {**РЕКВИЗИТЫ, "password": ПАРОЛЬ})
+    assert закрыто["status"] == 429
+    assert sql(
+        "select count(*) from market_seller_requisites_log where seller_id = %s", [продавец]
+    ) == [(0,)]
+    [(заголовок,)] = sql(
+        "select title from user_notifications where user_id = %s and type = 'billing'",
+        [владелец],
+    )
+    assert заголовок == "Changing payout details locked for 24 hours"
+
+    # Прошли сутки — снова можно; верный пароль сбрасывает счётчик
+    sql(
+        "update market_sellers set requisites_locked_until = now() at time zone 'utc' "
+        "- interval '1 minute' where id = %s",
+        [продавец],
+    )
+    _реквизиты(сайт, владелец, часов_назад=0)
+    assert sql("select requisites_failed from market_sellers where id = %s", [продавец]) == [(0,)]
+
+
+@нужна_база
+def test_без_пароля_реквизиты_не_сменить(сайт):
+    """Владелец без пароля (вошёл иначе) — понятный текст «задайте пароль»."""
+    данные = _продавец_с_товаром()
+    sql("update users set password = '' where id = %s", [данные["владелец"]])
+
+    ответ = _post(
+        сайт, "/market/api/me/requisites", данные["владелец"], {**РЕКВИЗИТЫ, "password": "x"}
+    )
+    assert ответ["status"] == 422
+    assert "задайте его в настройках" in _json(ответ)["errors"]["password"][0]
+
+
 # ── Возвраты ────────────────────────────────────────────────────────
+
+
+def _ждёт_возврата(сайт: str, данные: dict[str, Any], провайдер: str = "click") -> tuple[str, int]:
+    """Заказ оплачен картой (оплата — строкой) и отменён покупателем: ждёт возврата."""
+    покупатель, number, pk = _заказ(сайт, данные["вариант"], method="card")
+    assert (
+        _python(f"from savdex.market import orders; print(orders.mark_paid({pk}, {ЦЕНА * 100}))")
+        == "True"
+    )
+    sql(
+        "insert into market_payments (order_id, provider, provider_transaction_id, amount, "
+        "status, performed_at) values (%s, %s, %s, %s, 'paid', now() at time zone 'utc')",
+        [pk, провайдер, f"cash-test-{pk}", ЦЕНА * 100],
+    )
+    assert _post(сайт, f"/market/api/orders/{number}/cancel", покупатель)["status"] == 200
+    assert _статус(number) == "refund_pending"
+
+    return number, pk
+
+
+def _возврат(uid: int, pk: int, данные: dict[str, str]) -> dict[str, Any]:
+    адрес_возврата = f"/py/admin/market/refundorder/{pk}/"
+    _, ответ, страница = django(
+        uid,
+        ("post", адрес_возврата + "refund/", данные),
+        ("get", адрес_возврата + "change/", None),
+    )
+
+    return {"status": ответ["status"], "body": страница["body"]}
+
+
+@нужна_база
+def test_режимы_ручного_возврата(сайт):
+    данные = _продавец_с_товаром()
+    первый, второй = _кассир(1), _кассир(2)
+    отметить = {"do": "refund", "refund_reference": "PAYME-R-1", "note": "вернули в кабинете"}
+
+    # Запрос через API в полёте (api) — отметить вручную нельзя
+    number, pk = _ждёт_возврата(сайт, данные, "payme")
+    sql(
+        "update market_payments set refund_requested_at = now() at time zone 'utc', "
+        "refund_mode = 'api' where order_id = %s",
+        [pk],
+    )
+    assert "дождитесь его итога" in _возврат(первый, pk, отметить)["body"]
+    assert _статус(number) == "refund_pending"
+
+    # Итог manual — отметить может любой кассир
+    sql("update market_payments set refund_mode = 'manual' where order_id = %s", [pk])
+    assert _возврат(второй, pk, отметить)["status"] == 302
+    assert _статус(number) == "refunded"
+    assert sql("select refund_reference from market_payments where order_id = %s", [pk]) == [
+        ("PAYME-R-1",)
+    ]
+
+    # Взятый возврат: отмечает только взявший; тот же номер возврата — отказ
+    другой_номер, другой = _ждёт_возврата(сайт, данные)
+    assert _возврат(первый, другой, {"do": "claim"})["status"] == 302
+    assert sql(
+        "select refund_mode, refund_claimed_by, note from market_payments where order_id = %s",
+        [другой],
+    ) == [("claimed", первый, "возврат вручную взял Сотрудник cashier")]
+    assert "Возврат взял другой кассир" in _возврат(второй, другой, отметить)["body"]
+    assert "уже отмечен по другой оплате" in _возврат(первый, другой, отметить)["body"]
+    assert _статус(другой_номер) == "refund_pending"
+
+    # Отпустить — только взявший, с причиной; возврат снова ждёт расписания
+    чужой = _возврат(второй, другой, {"do": "unclaim", "reason": "не мой возврат"})
+    assert "другой кассир" in чужой["body"]
+    assert _возврат(первый, другой, {"do": "unclaim", "reason": "вернёт API"})["status"] == 302
+    assert sql(
+        "select refund_mode, refund_requested_at, refund_claimed_by from market_payments "
+        "where order_id = %s",
+        [другой],
+    ) == [(None, None, None)]
+    assert журнал("refund_unclaimed")["subject_label"] == другой_номер
+
+    # «Проверено» с короткой заметкой — понятный отказ, не 500
+    коротко = _возврат(первый, другой, {"do": "check", "note": "провер"})
+    assert коротко["status"] == 302 and "не короче 10 знаков" in коротко["body"]
 
 
 @нужна_база
@@ -679,18 +895,7 @@ def test_ждущий_возврата_не_в_доступном_и_ручно�
     _выдать(выданный, дней_назад=8)
 
     # Оплачен картой и отменён покупателем — «ждёт возврата»
-    покупатель, number, pk = _заказ(сайт, данные["вариант"], method="card")
-    assert (
-        _python(f"from savdex.market import orders; print(orders.mark_paid({pk}, {ЦЕНА * 100}))")
-        == "True"
-    )
-    sql(
-        "insert into market_payments (order_id, provider, provider_transaction_id, amount, "
-        "status, performed_at) values (%s, 'click', %s, %s, 'paid', now() at time zone 'utc')",
-        [pk, f"cash-test-{pk}", ЦЕНА * 100],
-    )
-    assert _post(сайт, f"/market/api/orders/{number}/cancel", покупатель)["status"] == 200
-    assert _статус(number) == "refund_pending"
+    number, pk = _ждёт_возврата(сайт, данные)
 
     баланс = _json(_get_as(сайт, "/market/api/me/balance", данные["владелец"]))["balance"]
     assert (баланс["accrued"], баланс["available"]) == (81_000, 81_000)
@@ -705,13 +910,15 @@ def test_ждущий_возврата_не_в_доступном_и_ручно�
         ("post", адрес_возврата + "refund/", отметить),
         ("get", адрес_возврата + "change/", None),
     )
-    assert "Возвращаю вручную" in рано["body"] and _статус(number) == "refund_pending"
+    assert "Беру возврат на себя" in рано["body"] and _статус(number) == "refund_pending"
 
     _, взял = django(кассир, ("post", адрес_возврата + "refund/", {"do": "claim"}))
     assert взял["status"] == 302
     assert sql(
-        "select refund_requested_at is not null from market_payments where order_id = %s", [pk]
-    ) == [(True,)]
+        "select refund_requested_at is not null, refund_mode from market_payments "
+        "where order_id = %s",
+        [pk],
+    ) == [(True, "claimed")]
     assert журнал("refund_claimed")["subject_label"] == number
 
     # «Проверено у провайдера» — один раз, с журналом; заказ всё ещё ждёт возврата
@@ -723,7 +930,7 @@ def test_ждущий_возврата_не_в_доступном_и_ручно�
         "where order_id = %s",
         [pk],
     ) == [(True, кассир)]
-    assert журнал("refund_checked")["subject_label"] == number
+    assert журнал("payment_checked")["section"] == "market_cash"
     _, _, повтор = django(
         кассир,
         ("post", адрес_возврата + "refund/", проверка),

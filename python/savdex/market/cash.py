@@ -49,6 +49,7 @@ from django.db import IntegrityError, connection, transaction
 
 from savdex import audit
 from savdex.access import Admin
+from savdex.guards import allowed_writes
 from savdex.market import orders
 from savdex.market.common import now, one, rows, som, t, write
 from savdex.web.shared import settings_values
@@ -315,30 +316,94 @@ def save_requisites(
     return True, {}
 
 
-def notify_requisites_changed(seller_id: int, locale: str) -> None:
+def _notify_owners(seller_id: int, key: str) -> None:
     """
-    Реквизиты сменились — владельцам компании: в ленту кабинета и письмом.
-    Самих реквизитов в тексте нет — только «изменены, если это не вы —
-    напишите в поддержку». Сбой уведомления не отменяет смену.
+    Владельцам компании продавца — в ленту кабинета и письмом, каждому на
+    его языке (users.locale). Текст — словарь market.cash.<key>_title и
+    <key>_body; самих реквизитов в нём нет. Сбой уведомления или письма —
+    в журнал приложения, запрос не падает.
+
+    TODO(касса): слать и на прежнюю почту владельца — истории смены почты
+    у users пока нет.
     """
     from savdex.moderation.services import notify_user
     from savdex.web import mail
 
-    title = t("cash.changed_title", locale)
-    body = t("cash.changed_body", locale)
-
     for owner in rows(
-        "select u.id, u.email from users u join market_sellers s on s.company_id = u.company_id "
+        "select u.id, u.email, u.locale from users u "
+        "join market_sellers s on s.company_id = u.company_id "
         "where s.id = %s and u.company_role = 'owner' and u.deleted_at is null",
         [seller_id],
     ):
+        locale = str(owner["locale"] or "ru")
+        title = t(f"cash.{key}_title", locale)
+        body = t(f"cash.{key}_body", locale)
+
         try:
             notify_user(int(owner["id"]), "billing", title, "warning", "/cabinet", body)
-
-            if owner["email"]:
-                mail.send(str(owner["email"]), title, f"<p>{html.escape(body)}</p>", body)
         except Exception:
-            log.exception("market.cash.requisites_notify_failed seller=%s", seller_id)
+            log.exception("market.cash.notify_failed seller=%s key=%s", seller_id, key)
+
+        try:
+            if owner["email"] and not mail.send(
+                str(owner["email"]), title, f"<p>{html.escape(body)}</p>", body
+            ):
+                log.error("market.cash.mail_failed seller=%s key=%s", seller_id, key)
+        except Exception:
+            log.exception("market.cash.mail_failed seller=%s key=%s", seller_id, key)
+
+
+def notify_requisites_changed(seller_id: int) -> None:
+    """Реквизиты сменились: «изменены, если это не вы — напишите в поддержку»."""
+    _notify_owners(seller_id, "changed")
+
+
+#: Неверных паролей подряд при смене реквизитов — и смена закрыта на сутки
+PASSWORD_FAILS = 5
+PASSWORD_LOCK_HOURS = 24
+
+
+def requisites_locked(seller_id: int) -> bool:
+    """Смена реквизитов закрыта после неверных паролей (ещё не прошли сутки)."""
+    found = one(
+        "select requisites_locked_until > %s as locked from market_sellers where id = %s",
+        [now(), seller_id],
+    )
+
+    return bool(found and found["locked"])
+
+
+def password_failed(seller_id: int) -> bool:
+    """
+    Неверный пароль при смене реквизитов: счётчик подряд; на PASSWORD_FAILS-й
+    — смена закрыта на сутки и письмо владельцам. True — только что закрыли.
+    """
+    found = write(
+        "update market_sellers set requisites_failed = requisites_failed + 1 "
+        "where id = %s returning requisites_failed",
+        [seller_id],
+    )
+
+    if found is None or int(found) < PASSWORD_FAILS:
+        return False
+
+    write(
+        "update market_sellers set requisites_failed = 0, requisites_locked_until = %s "
+        "where id = %s",
+        [_ago(timedelta(hours=-PASSWORD_LOCK_HOURS)), seller_id],
+    )
+    log.warning("market.cash.requisites_locked seller=%s", seller_id)
+    _notify_owners(seller_id, "locked")
+
+    return True
+
+
+def password_ok(seller_id: int) -> None:
+    """Верный пароль — счётчик неверных с нуля."""
+    write(
+        "update market_sellers set requisites_failed = 0 where id = %s and requisites_failed <> 0",
+        [seller_id],
+    )
 
 
 def _last_log_id(seller_id: int) -> int | None:
@@ -485,6 +550,21 @@ def approve_payout(
             raise CashRefused("Подтверждает другой кассир — не тот, кто создал выплату.")
 
         seller_id = int(payout["seller_id"])
+
+        # Кто сверял наличные продавца, тот не подтверждает выплату из них.
+        # Выплата с заказами не связана — берём заказы, сверенные после
+        # последней выплаченной: их деньги могут быть в этой
+        if one(
+            "select 1 as x from market_orders o join market_order_parts p on p.order_id = o.id "
+            "where p.seller_id = %s and o.cash_reconciled_by = %s and o.cash_reconciled_at > "
+            "coalesce((select max(paid_at) from market_payouts where seller_id = %s "
+            "and status = %s), '-infinity'::timestamp) limit 1",
+            [seller_id, admin.id, seller_id, PAID],
+        ):
+            raise CashRefused(
+                "Вы сверяли наличные этого продавца — выплату из них подтверждает другой кассир."
+            )
+
         fresh = one(
             "select changed_at >= %s as fresh from market_seller_requisites where seller_id = %s",
             [_ago(timedelta(hours=FRESH_HOURS)), seller_id],
@@ -686,34 +766,63 @@ def cancel_payout(
 
 # ── Сверка наличных с отчётом BTS ───────────────────────────────────
 
+#: Больше заказов за одну сверку пачкой не берём: ошибка в пачке дороже
+RECONCILE_BATCH = 100
+
+#: Номер или дата отчёта BTS — не короче (как сверили, видно в журнале)
+REPORT_MIN = 10
+
+
+def cash_pending(order_ids: Iterable[int]) -> tuple[int, int]:
+    """Сколько из этих заказов ждут сверки наличных и на какую сумму (тийины)."""
+    found = one(
+        "select count(*) as n, coalesce(sum(total), 0) as total from market_orders "
+        "where id = any(%s) and payment_method = 'cash' and status = %s "
+        "and cash_reconciled_at is null",
+        [sorted({int(pk) for pk in order_ids}), orders.ISSUED],
+    )
+
+    return (int(found["n"]), int(found["total"])) if found else (0, 0)
+
 
 def reconcile_cash(
-    admin: Admin, order_ids: Iterable[int], *, note: str | None = None, ip: str | None = None
+    admin: Admin, order_ids: Iterable[int], report: str, *, ip: str | None = None
 ) -> int:
     """
-    Касса сверила наличные выданных заказов «при получении» с отчётом BTS:
-    ставит ``cash_reconciled_at`` — с этого момента деньги заказа идут
-    продавцу «к выплате». Каждый заказ — условно (ещё не сверен) и строкой
+    Касса сверила наличные выданных заказов «при получении» с отчётом BTS
+    (report — номер или дата отчёта, один на всю пачку, не короче
+    REPORT_MIN знаков): ставит ``cash_reconciled_at`` — с этого момента
+    деньги заказа идут продавцу «к выплате». Не больше RECONCILE_BATCH
+    заказов за раз. Каждый заказ — условно (ещё не сверен) и строкой
     журнала действий. Возвращает, сколько отмечено.
     """
     _need(admin, f"{SECTION}.moderate")
-    text = _text(note) or None
+    text = _text(report, 100)
+    ids = sorted({int(pk) for pk in order_ids})
+
+    if len(text) < REPORT_MIN:
+        raise CashRefused(f"Укажите номер или дату отчёта BTS — не короче {REPORT_MIN} знаков.")
+
+    if len(ids) > RECONCILE_BATCH:
+        raise CashRefused(f"Не больше {RECONCILE_BATCH} заказов за одну сверку.")
+
     done = 0
 
     with transaction.atomic():
-        for order_id in sorted({int(pk) for pk in order_ids}):
-            found = write(
-                "update market_orders set cash_reconciled_at = %s, cash_reconciled_by = %s "
-                "where id = %s and payment_method = 'cash' and status = %s "
-                "and cash_reconciled_at is null returning number",
-                [now(), admin.id, order_id, orders.ISSUED],
-            )
+        for order_id in ids:
+            # Номер и сумма — тем же условным обновлением (returning)
+            with allowed_writes("market_orders"):
+                found = one(
+                    "update market_orders set cash_reconciled_at = %s, cash_reconciled_by = %s, "
+                    "cash_reconciled_ref = %s where id = %s and payment_method = 'cash' "
+                    "and status = %s and cash_reconciled_at is null returning number, total",
+                    [now(), admin.id, text, order_id, orders.ISSUED],
+                )
 
             if found is None:
                 continue
 
             done += 1
-            total = one("select total from market_orders where id = %s", [order_id])
             audit.record(
                 connection,
                 action="cash_reconciled",
@@ -721,8 +830,8 @@ def reconcile_cash(
                 actor=admin,
                 subject_type="Savdex\\Market\\Order",
                 subject_id=order_id,
-                subject_label=str(found),
-                changes={"after": {"amount": total["total"] if total else None}},
+                subject_label=str(found["number"]),
+                changes={"after": {"amount": found["total"], "report": text}},
                 note=text,
                 ip=ip,
             )
@@ -730,57 +839,216 @@ def reconcile_cash(
     return done
 
 
+def unreconcile_cash(admin: Admin, order_id: int, reason: str, *, ip: str | None = None) -> None:
+    """
+    Снять сверку наличных (ошиблись заказом или отчётом) — пока деньги
+    заказа не ушли в выплату: снятие не должно увести доступное продавцу в
+    минус (выплаты в работе и выплаченное уже на них рассчитаны). С
+    причиной, строкой журнала.
+    """
+    _need(admin, f"{SECTION}.moderate")
+    text = _text(reason)
+
+    if len(text) < 5:
+        raise CashRefused("Напишите причину — не короче 5 знаков.")
+
+    with transaction.atomic():
+        order = one(
+            "select o.id, o.number, o.total, p.seller_id from market_orders o "
+            "join market_order_parts p on p.order_id = o.id "
+            "where o.id = %s and o.cash_reconciled_at is not null order by p.id",
+            [order_id],
+        )
+
+        if order is None:
+            raise CashRefused("Заказ не сверен.")
+
+        sellers = [
+            int(r["seller_id"])
+            for r in rows(
+                "select seller_id from market_order_parts where order_id = %s order by seller_id",
+                [order_id],
+            )
+        ]
+
+        # Порядок замков — как у выплат: продавцы, затем заказ
+        for seller_id in sellers:
+            one("select id from market_sellers where id = %s for update", [seller_id])
+
+        write(
+            "update market_orders set cash_reconciled_at = null, cash_reconciled_by = null, "
+            "cash_reconciled_ref = null where id = %s",
+            [order_id],
+        )
+
+        if any(balance(seller_id).free < 0 for seller_id in sellers):
+            raise CashRefused(
+                "Деньги заказа уже в выплате — сначала отмените выплату, потом снимайте сверку."
+            )
+
+        audit.record(
+            connection,
+            action="cash_unreconciled",
+            section=SECTION,
+            actor=admin,
+            subject_type="Savdex\\Market\\Order",
+            subject_id=order_id,
+            subject_label=str(order["number"]),
+            changes={"before": {"amount": order["total"]}},
+            note=text,
+            ip=ip,
+        )
+
+
 # ── Ручной возврат ──────────────────────────────────────────────────
 
 _REFUND_REF = re.compile(r"[0-9A-Za-z/._:-]{3,64}")
 
+#: Режимы возврата (market_payments.refund_mode), в которых касса отмечает
+#: возврат вручную; api — запрос к провайдеру в полёте, его не трогаем
+MANUAL_MODES = ("claimed", "manual", "error")
+
+
+def _refund_payment(order_id: int) -> dict[str, Any] | None:
+    """Проведённая оплата заказа — под замком (после замка заказа)."""
+    from savdex.market.payments import base
+
+    found = one(
+        "select id, provider, status, refund_requested_at, refund_mode, refund_claimed_by, "
+        "refund_reference, note from market_payments where order_id = %s and status = %s "
+        "order by id desc limit 1",
+        [order_id, base.PAID],
+    )
+
+    if found is None:
+        return None
+
+    return one(
+        "select id, order_id, provider, status, refund_requested_at, refund_mode, "
+        "refund_claimed_by, refund_reference, note from market_payments where id = %s for update",
+        [found["id"]],
+    )
+
+
+def _order_number(order_id: int, *, lock: bool) -> dict[str, Any]:
+    order = one(
+        "select id, number, total, status from market_orders where id = %s"
+        + (" for update" if lock else ""),
+        [order_id],
+    )
+
+    if order is None or order["status"] != orders.REFUND_PENDING:
+        raise CashRefused("Заказ не ждёт возврата.")
+
+    return order
+
+
+def _append_note(note: Any, text: str) -> str:  # noqa: ANN401
+    """Пометка оплаты дописывается, а не затирается: видно всю историю."""
+    return "; ".join(part for part in (str(note or "").strip(), text) if part)[-500:]
+
 
 def claim_refund(admin: Admin, order_id: int, *, ip: str | None = None) -> bool:
     """
-    «Возвращаю вручную»: касса берёт возврат на себя, пока расписание его
-    не запросило (refund_requested_at — условным обновлением). После этого
-    API провайдера возврат уже не запросит — двух возвратов не будет.
-    False — уже запрошен (расписанием или другим кассиром).
+    «Беру возврат на себя»: касса возвращает вручную, пока расписание
+    возврат не запросило (refund_requested_at — условным обновлением,
+    refund_mode = claimed, refund_claimed_by). После этого API провайдера
+    возврат уже не запросит — двух возвратов не будет. False — уже
+    запрошен (расписанием или другим кассиром).
     """
-    from savdex.market.payments import base
-
     _need(admin, f"{SECTION}.moderate")
 
     with transaction.atomic():
-        order = base.order_by_id(order_id, lock=True)
+        order = _order_number(order_id, lock=True)
+        payment = _refund_payment(order_id)
 
-        if order is None or order["status"] != orders.REFUND_PENDING:
-            raise CashRefused("Заказ не ждёт возврата.")
+        if payment is None or payment["refund_requested_at"] is not None:
+            return False
 
-        claimed = write(
-            "update market_payments set refund_requested_at = %s, note = %s, updated_at = %s "
-            "where order_id = %s and status = %s and refund_requested_at is null",
-            [now(), f"возврат вручную берёт касса: {admin.name}"[:500], now(), order_id, base.PAID],
+        write(
+            "update market_payments set refund_requested_at = %s, refund_mode = 'claimed', "
+            "refund_claimed_by = %s, note = %s, updated_at = %s where id = %s",
+            [
+                now(),
+                admin.id,
+                _append_note(payment["note"], f"возврат вручную взял {admin.name}"),
+                now(),
+                payment["id"],
+            ],
+        )
+        audit.record(
+            connection,
+            action="refund_claimed",
+            section=SECTION,
+            actor=admin,
+            subject_type="Savdex\\Market\\Order",
+            subject_id=order_id,
+            subject_label=str(order["number"]),
+            ip=ip,
         )
 
-        if claimed:
-            audit.record(
-                connection,
-                action="refund_claimed",
-                section=SECTION,
-                actor=admin,
-                subject_type="Savdex\\Market\\Order",
-                subject_id=order_id,
-                subject_label=str(order["number"]),
-                ip=ip,
-            )
+    return True
 
-    return bool(claimed)
+
+def _may_settle(admin: Admin, payment: Mapping[str, Any]) -> None:
+    """Взятый возврат отмечает или отпускает только взявший — или суперадмин."""
+    if (
+        payment["refund_mode"] == "claimed"
+        and payment["refund_claimed_by"] != admin.id
+        and not admin.is_superadmin
+    ):
+        raise CashRefused("Возврат взял другой кассир — отмечает он (или суперадмин).")
+
+
+def unclaim_refund(admin: Admin, order_id: int, reason: str, *, ip: str | None = None) -> None:
+    """
+    Снять взятие (передумали возвращать вручную): возврат снова ждёт
+    расписания — то запросит его через API провайдера. С причиной.
+    """
+    _need(admin, f"{SECTION}.moderate")
+    text = _text(reason)
+
+    if len(text) < 5:
+        raise CashRefused("Напишите причину — не короче 5 знаков.")
+
+    with transaction.atomic():
+        order = _order_number(order_id, lock=True)
+        payment = _refund_payment(order_id)
+
+        if payment is None or payment["refund_mode"] != "claimed":
+            raise CashRefused("Возврат не взят вручную.")
+
+        _may_settle(admin, payment)
+        write(
+            "update market_payments set refund_requested_at = null, refund_mode = null, "
+            "refund_claimed_by = null, note = %s, updated_at = %s where id = %s",
+            [
+                _append_note(payment["note"], f"взятие снял {admin.name}: {text}"),
+                now(),
+                payment["id"],
+            ],
+        )
+        audit.record(
+            connection,
+            action="refund_unclaimed",
+            section=SECTION,
+            actor=admin,
+            subject_type="Savdex\\Market\\Order",
+            subject_id=order_id,
+            subject_label=str(order["number"]),
+            note=text,
+            ip=ip,
+        )
 
 
 def mark_refunded(
     admin: Admin, order_id: int, refund_reference: str, note: str, *, ip: str | None = None
 ) -> bool:
     """
-    Касса вернула деньги в кабинете провайдера и отмечает это: только по
-    оплате, возврат по которой уже запрошен (refund_requested_at: итог
-    расписания manual или error, либо касса взяла возврат на себя —
-    claim_refund), и с номером возврата у провайдера.
+    Касса вернула деньги в кабинете провайдера и отмечает это: только в
+    режимах claimed (взявший или суперадмин), manual и error — не пока
+    расписание запрашивает возврат через API (api). Номер возврата у
+    провайдера обязателен и один на возврат (уникальный индекс).
     payments.base.refund_payment (оплата paid → refunded, заказ
     refund_pending → refunded, проводка — один раз) и строка журнала
     действий — одной транзакцией. False — заказ уже не ждёт возврата.
@@ -798,26 +1066,43 @@ def mark_refunded(
         raise CashRefused("Напишите, где и когда вернули деньги — не короче 5 знаков.")
 
     with transaction.atomic():
-        order = base.order_by_id(order_id, lock=True)
-        found = one(
-            "select id from market_payments where order_id = %s and status = %s "
-            "order by id desc limit 1",
-            [order_id, base.PAID],
-        )
-        payment = base.payment(int(found["id"]), lock=True) if found else None
+        order = _order_number(order_id, lock=True)
+        payment = _refund_payment(order_id)
 
-        if order is None or payment is None:
+        if payment is None:
             raise CashRefused("У заказа нет проведённой оплаты картой.")
 
-        if payment["refund_requested_at"] is None:
+        if payment["refund_mode"] not in MANUAL_MODES:
             raise CashRefused(
-                "Возврат ещё не запрошен: сначала «Возвращаю вручную» — иначе расписание "
-                "вернёт деньги через API провайдера второй раз."
+                "Возврат вручную не начат: сначала «Беру возврат на себя». Если идёт запрос "
+                "через API провайдера — дождитесь его итога."
             )
 
-        if not base.refund_payment(
-            payment, note=f"возврат отмечен кассой: {reference}; {text}"[:500]
+        _may_settle(admin, payment)
+
+        if one(
+            "select id from market_payments where refund_reference = %s and id <> %s",
+            [reference, payment["id"]],
         ):
+            raise CashRefused("Возврат с таким номером уже отмечен по другой оплате.")
+
+        try:
+            with transaction.atomic():
+                write(
+                    "update market_payments set refund_reference = %s, updated_at = %s "
+                    "where id = %s",
+                    [reference, now(), payment["id"]],
+                )
+        except IntegrityError as error:
+            raise CashRefused("Возврат с таким номером уже отмечен по другой оплате.") from error
+
+        full = base.payment(int(payment["id"]))
+        assert full is not None
+
+        if not base.refund_payment(full, note=f"возврат отмечен кассой: {reference}; {text}"[:500]):
+            # Откат и номера возврата: заказ уже не ждёт возврата
+            transaction.set_rollback(True)
+
             return False
 
         audit.record(
@@ -829,7 +1114,7 @@ def mark_refunded(
             subject_id=order_id,
             subject_label=str(order["number"]),
             changes={
-                "before": {"status": orders.REFUND_PENDING},
+                "before": {"status": orders.REFUND_PENDING, "refund_mode": payment["refund_mode"]},
                 "after": {
                     "status": orders.REFUNDED,
                     "amount": order["total"],
@@ -844,20 +1129,16 @@ def mark_refunded(
     return True
 
 
-def acknowledge_refund(admin: Admin, order_id: int, note: str, *, ip: str | None = None) -> bool:
+def acknowledge_refund(admin: Admin, order_id: int, note: str) -> bool:
     """
-    «Проверено у провайдера»: зависший возврат разобран (payments.base.acknowledge
-    — сверка больше не считает его расхождением) — и строка журнала
-    действий, одной транзакцией. False — уже отмечено или оплаты нет.
+    «Проверено у провайдера»: зависший возврат разобран —
+    payments.base.acknowledge (право, заметка, строка журнала
+    payment_checked и пометка в истории заказа — там). False — уже
+    отмечено или оплаты нет.
     """
     from savdex.market.payments import base
 
     _need(admin, f"{SECTION}.moderate")
-    text = _text(note)
-
-    if len(text) < 5:
-        raise CashRefused("Напишите, что проверили у провайдера — не короче 5 знаков.")
-
     found = one(
         "select id from market_payments where order_id = %s and status = %s "
         "order by id desc limit 1",
@@ -867,24 +1148,14 @@ def acknowledge_refund(admin: Admin, order_id: int, note: str, *, ip: str | None
     if found is None:
         return False
 
-    with transaction.atomic():
-        if not base.acknowledge(int(found["id"]), admin.id, text):
-            return False
-
-        order = one("select number from market_orders where id = %s", [order_id])
-        audit.record(
-            connection,
-            action="refund_checked",
-            section=SECTION,
-            actor=admin,
-            subject_type="Savdex\\Market\\Order",
-            subject_id=order_id,
-            subject_label=str(order["number"]) if order else None,
-            note=text,
-            ip=ip,
-        )
-
-    return True
+    try:
+        return base.acknowledge(int(found["id"]), admin.id, note)
+    except ValueError as error:
+        raise CashRefused(
+            f"Напишите, что проверили у провайдера — не короче {base.ACK_NOTE_MIN} знаков."
+        ) from error
+    except PermissionError as error:
+        raise CashRefused("Нет права на это действие в кассе.") from error
 
 
 # ── Кабинет продавца ────────────────────────────────────────────────

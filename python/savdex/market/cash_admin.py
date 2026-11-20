@@ -28,10 +28,12 @@ from __future__ import annotations
 from typing import Any
 
 from django.contrib import admin, messages
+from django.contrib.admin import helpers
 from django.core.exceptions import PermissionDenied
-from django.db.models import QuerySet
+from django.db.models import F, QuerySet
 from django.db.models.expressions import RawSQL
 from django.http import HttpRequest, HttpResponse, HttpResponseRedirect
+from django.template.response import TemplateResponse
 from django.urls import path, reverse
 from django.utils.html import format_html, format_html_join
 
@@ -556,25 +558,44 @@ class PayoutAdmin(_ReadOnly):
 # ── Наличные к сверке с отчётом BTS ────────────────────────────────
 
 
+class Reconciled(admin.SimpleListFilter):
+    title = "сверка с BTS"
+    parameter_name = "reconciled"
+
+    def lookups(self, request: HttpRequest, model_admin: Any) -> list[tuple[str, str]]:  # noqa: ANN401
+        return [("no", "ждут сверки"), ("yes", "сверены")]
+
+    def queryset(self, request: HttpRequest, queryset: QuerySet[Any]) -> QuerySet[Any]:
+        if self.value() == "no":
+            return queryset.filter(cash_reconciled_at__isnull=True)
+
+        if self.value() == "yes":
+            return queryset.filter(cash_reconciled_at__isnull=False)
+
+        return queryset
+
+
 @register(CashOrder, section="market_cash")
 class CashOrderAdmin(_ReadOnly):
     laravel_model = "Savdex\\Market\\Order"
-    title_list = "Наличные к сверке с отчётом BTS"
+    title_list = "Наличные: сверка с отчётом BTS"
     title_change = "Наличные заказа"
 
-    list_display = ("number", "total_text", "point", "issued")
+    list_display = ("number", "total_text", "point", "issued", "reconciled")
+    list_filter = (Reconciled,)
     search_fields = ("number",)
-    ordering = ("issued_at", "id")
     list_per_page = 100
-    fields = ("number", "total_text", "point", "issued")
+    fields = ("number", "total_text", "point", "issued", "reconciled")
     readonly_fields = fields
 
     def get_queryset(self, request: HttpRequest) -> QuerySet[CashOrder]:
         found: QuerySet[CashOrder] = super().get_queryset(request)
 
-        return found.filter(
-            payment_method="cash", status=orders.ISSUED, cash_reconciled_at__isnull=True
-        )
+        return found.filter(payment_method="cash", status=orders.ISSUED)
+
+    def get_ordering(self, request: HttpRequest) -> Any:  # noqa: ANN401
+        # Сначала ждущие сверки, старые выше
+        return (F("cash_reconciled_at").asc(nulls_first=True), "issued_at", "id")
 
     def get_actions(self, request: HttpRequest) -> dict[str, Any]:
         """Сверка пачкой — отмеченные строки списка (POST с CSRF, как у Django)."""
@@ -585,24 +606,61 @@ class CashOrderAdmin(_ReadOnly):
             "reconcile": (
                 type(self).reconcile_action,
                 "reconcile",
-                "Сверено с отчётом BTS",
+                "Сверено с отчётом BTS…",
             )
         }
 
-    def reconcile_action(self, request: HttpRequest, queryset: QuerySet[CashOrder]) -> None:
-        try:
-            done = cash.reconcile_cash(
-                _admin_of(request),
-                [order.pk for order in queryset],
-                note="пачкой из списка",
-                ip=audit.client_ip(request),
+    def reconcile_action(
+        self, request: HttpRequest, queryset: QuerySet[CashOrder]
+    ) -> HttpResponse | None:
+        """
+        Пачкой — через страницу подтверждения: сколько заказов ждут сверки и
+        на какую сумму, номер или дата отчёта BTS — один на всю пачку.
+        """
+        ids = [int(pk) for pk in queryset.values_list("pk", flat=True)[: cash.RECONCILE_BATCH + 1]]
+
+        if len(ids) > cash.RECONCILE_BATCH:
+            self.message_user(
+                request,
+                f"Не больше {cash.RECONCILE_BATCH} заказов за одну сверку.",
+                messages.ERROR,
             )
-        except cash.CashRefused as refused:
-            self.message_user(request, str(refused), messages.ERROR)
 
-            return
+            return None
 
-        self.message_user(request, f"Сверено с отчётом BTS: {done}.", messages.SUCCESS)
+        count, total = cash.cash_pending(ids)
+
+        if request.POST.get("confirm") == "yes":
+            try:
+                done = cash.reconcile_cash(
+                    _admin_of(request),
+                    ids,
+                    request.POST.get("report") or "",
+                    ip=audit.client_ip(request),
+                )
+            except cash.CashRefused as refused:
+                self.message_user(request, str(refused), messages.ERROR)
+
+                return None
+
+            self.message_user(request, f"Сверено с отчётом BTS: {done}.", messages.SUCCESS)
+
+            return None
+
+        return TemplateResponse(
+            request,
+            "admin/market/cash_reconcile_confirm.html",
+            {
+                **self.admin_site.each_context(request),
+                "title": "Сверка наличных с отчётом BTS",
+                "opts": self.model._meta,
+                "ids": ids,
+                "count": count,
+                "total": cash.money(total),
+                "report_min": cash.REPORT_MIN,
+                "action_checkbox_name": helpers.ACTION_CHECKBOX_NAME,
+            },
+        )
 
     def get_urls(self) -> list[Any]:
         return [
@@ -626,37 +684,70 @@ class CashOrderAdmin(_ReadOnly):
     def issued(self, obj: CashOrder) -> str:
         return when(obj.issued_at)
 
+    @admin.display(description="сверка", ordering="cash_reconciled_at")
+    def reconciled(self, obj: CashOrder) -> str:
+        if obj.cash_reconciled_at is None:
+            return "ждёт"
+
+        return format_html(
+            "{} <small>({}; {})</small>",
+            when(obj.cash_reconciled_at),
+            obj.cash_reconciled_ref or "",
+            _staff_name(obj.cash_reconciled_by),
+        )
+
     def cash_forms(self, request: HttpRequest, obj: CashOrder) -> list[dict[str, Any]]:
         if not _admin_of(request).can(f"{cash.SECTION}.moderate"):
             return []
+
+        url = reverse("savdex_admin:market_cashorder_reconcile", args=[obj.pk])
+
+        if obj.cash_reconciled_at is not None:
+            return [
+                {
+                    "title": "Снять сверку",
+                    "help": "Ошиблись заказом или отчётом. Нельзя, если деньги заказа уже в "
+                    "выплате — сначала отмените её.",
+                    "url": url,
+                    "code": "unreconcile",
+                    "button": "Снять сверку",
+                    "fields": [{"name": "reason", "label": "Причина", "type": "textarea"}],
+                }
+            ]
 
         return [
             {
                 "title": "Сверено с отчётом BTS",
                 "help": "Сумма заказа есть в отчёте пункта выдачи: деньги пойдут продавцу "
-                "«к выплате».",
-                "url": reverse("savdex_admin:market_cashorder_reconcile", args=[obj.pk]),
+                f"«к выплате». Номер или дата отчёта — не короче {cash.REPORT_MIN} знаков.",
+                "url": url,
                 "code": "reconcile",
                 "button": "Сверено",
-                "fields": [{"name": "note", "label": "Отчёт BTS (номер, дата)", "type": "text"}],
+                "fields": [{"name": "report", "label": "Отчёт BTS (номер, дата)", "type": "text"}],
             }
         ]
 
     def reconcile_view(self, request: HttpRequest, object_id: str) -> HttpResponse:
         obj = self._post(request, object_id, f"{cash.SECTION}.moderate")
-        done = cash.reconcile_cash(
-            _admin_of(request),
-            [obj.pk],
-            note=request.POST.get("note"),
-            ip=audit.client_ip(request),
-        )
-        self.message_user(
-            request,
-            f"Заказ {obj.number}: сверено." if done else "Заказ уже сверен.",
-            messages.SUCCESS if done else messages.WARNING,
-        )
+        admin_ = _admin_of(request)
+        ip = audit.client_ip(request)
 
-        return HttpResponseRedirect(reverse("savdex_admin:market_cashorder_changelist"))
+        try:
+            if request.POST.get("do") == "unreconcile":
+                cash.unreconcile_cash(admin_, obj.pk, request.POST.get("reason") or "", ip=ip)
+
+                return self._back(request, obj, f"Заказ {obj.number}: сверка снята.", None)
+
+            done = cash.reconcile_cash(admin_, [obj.pk], request.POST.get("report") or "", ip=ip)
+        except cash.CashRefused as refused:
+            return self._back(request, obj, None, str(refused))
+
+        return self._back(
+            request,
+            obj,
+            f"Заказ {obj.number}: сверено." if done else None,
+            None if done else "Заказ уже сверен.",
+        )
 
 
 # ── Реквизиты ───────────────────────────────────────────────────────
@@ -719,6 +810,14 @@ class SellerRequisitesAdmin(_ReadOnly):
 
 # ── Возвраты покупателям ────────────────────────────────────────────
 
+_REFUND_MODES = {
+    None: "не запрошен",
+    "api": "запрос к провайдеру идёт (API)",
+    "manual": "API нет — вернуть в кабинете провайдера",
+    "error": "сбой связи — итог неизвестен, проверить у провайдера",
+    "claimed": "касса возвращает вручную",
+}
+
 
 @register(RefundOrder, section="market_cash")
 class RefundOrderAdmin(_ReadOnly):
@@ -751,8 +850,8 @@ class RefundOrderAdmin(_ReadOnly):
     @staticmethod
     def _payment(obj: RefundOrder) -> dict[str, Any] | None:
         return one(
-            "select provider, provider_transaction_id, refund_requested_at, note, "
-            "rejection_checked_at "
+            "select provider, provider_transaction_id, refund_requested_at, refund_mode, "
+            "refund_claimed_by, note, rejection_checked_at "
             "from market_payments where order_id = %s and status = 'paid' order by id desc limit 1",
             [obj.pk],
         )
@@ -769,9 +868,11 @@ class RefundOrderAdmin(_ReadOnly):
             return "проведённой оплаты картой нет"
 
         return format_html(
-            "{} · транзакция {}<br><small>возврат запрошен: {}; {}</small>",
+            "{} · транзакция {}<br><small>возврат: {}{}; запрошен: {}; {}</small>",
             found["provider"],
             found["provider_transaction_id"] or "—",
+            _REFUND_MODES.get(found["refund_mode"], found["refund_mode"]),
+            f" ({_staff_name(found['refund_claimed_by'])})" if found["refund_claimed_by"] else "",
             found["refund_requested_at"] or "нет",
             found["note"] or "",
         )
@@ -783,31 +884,21 @@ class RefundOrderAdmin(_ReadOnly):
         )
 
     def cash_forms(self, request: HttpRequest, obj: RefundOrder) -> list[dict[str, Any]]:
-        found = self._payment(obj)
+        from savdex.market.payments import base
 
-        if not _admin_of(request).can(f"{cash.SECTION}.moderate") or found is None:
+        found = self._payment(obj)
+        admin_ = _admin_of(request)
+
+        if not admin_.can(f"{cash.SECTION}.moderate") or found is None:
             return []
 
         url = reverse("savdex_admin:market_refundorder_refund", args=[obj.pk])
-        checked: list[dict[str, Any]] = (
-            []
-            if found["rejection_checked_at"] is not None
-            else [
-                {
-                    "title": "Проверено у провайдера",
-                    "help": "Возврат завис (ошибка связи, ждём отмену от провайдера): "
-                    "проверили в кабинете провайдера — сверка больше не покажет его "
-                    "расхождением. Заказ остаётся «ждёт возврата».",
-                    "url": url,
-                    "code": "check",
-                    "button": "Проверено",
-                    "fields": [{"name": "note", "label": "Что проверили", "type": "textarea"}],
-                }
-            ]
-        )
+        mode = found["refund_mode"]
+        mine = found["refund_claimed_by"] == admin_.id or admin_.is_superadmin
+        forms: list[dict[str, Any]] = []
 
         if found["refund_requested_at"] is None:
-            return [
+            forms.append(
                 {
                     "title": "Возвращаю вручную",
                     "help": "Возврат ещё не запрашивали. Возьмите его на себя до того, как "
@@ -817,45 +908,72 @@ class RefundOrderAdmin(_ReadOnly):
                     "code": "claim",
                     "button": "Беру возврат на себя",
                     "fields": [],
-                },
-                *checked,
-            ]
+                }
+            )
 
-        return [
-            {
-                "title": "Деньги вернули в кабинете провайдера",
-                "help": "Только после возврата в кабинете Uzum, Payme или Click: заказ станет "
-                "«деньги возвращены», в журнале денег — проводка возврата.",
-                "url": url,
-                "code": "refund",
-                "button": "Отметить возврат",
-                "fields": [
-                    {
-                        "name": "refund_reference",
-                        "label": "Номер возврата у провайдера",
-                        "type": "text",
-                    },
-                    {"name": "note", "label": "Где и когда вернули", "type": "textarea"},
-                ],
-            },
-            *checked,
-        ]
+        if mode in cash.MANUAL_MODES and (mode != "claimed" or mine):
+            forms.append(
+                {
+                    "title": "Деньги вернули в кабинете провайдера",
+                    "help": "Только после возврата в кабинете Uzum, Payme или Click: заказ "
+                    "станет «деньги возвращены», в журнале денег — проводка возврата.",
+                    "url": url,
+                    "code": "refund",
+                    "button": "Отметить возврат",
+                    "fields": [
+                        {
+                            "name": "refund_reference",
+                            "label": "Номер возврата у провайдера",
+                            "type": "text",
+                        },
+                        {"name": "note", "label": "Где и когда вернули", "type": "textarea"},
+                    ],
+                }
+            )
+
+        if mode == "claimed" and mine:
+            forms.append(
+                {
+                    "title": "Отпустить возврат",
+                    "help": "Вручную возвращать не будете — возврат снова запросит расписание "
+                    "через API провайдера.",
+                    "url": url,
+                    "code": "unclaim",
+                    "button": "Отпустить",
+                    "fields": [{"name": "reason", "label": "Причина", "type": "textarea"}],
+                }
+            )
+
+        if found["rejection_checked_at"] is None:
+            forms.append(
+                {
+                    "title": "Проверено у провайдера",
+                    "help": "Возврат завис (сбой связи, ждём отмену от провайдера): проверили "
+                    "в кабинете провайдера — сверка больше не покажет его расхождением. Заказ "
+                    f"остаётся «ждёт возврата». Заметка — не короче {base.ACK_NOTE_MIN} знаков.",
+                    "url": url,
+                    "code": "check",
+                    "button": "Проверено",
+                    "fields": [{"name": "note", "label": "Что проверили", "type": "textarea"}],
+                }
+            )
+
+        return forms
 
     def refund_view(self, request: HttpRequest, object_id: str) -> HttpResponse:
         obj = self._post(request, object_id, f"{cash.SECTION}.moderate")
         admin_ = _admin_of(request)
         ip = audit.client_ip(request)
+        do = request.POST.get("do")
 
         try:
-            if request.POST.get("do") == "check":
-                if not cash.acknowledge_refund(
-                    admin_, obj.pk, request.POST.get("note") or "", ip=ip
-                ):
+            if do == "check":
+                if not cash.acknowledge_refund(admin_, obj.pk, request.POST.get("note") or ""):
                     return self._back(request, obj, None, "Уже отмечено — обновите страницу.")
 
                 return self._back(request, obj, "Отмечено: проверено у провайдера.", None)
 
-            if request.POST.get("do") == "claim":
+            if do == "claim":
                 if not cash.claim_refund(admin_, obj.pk, ip=ip):
                     return self._back(
                         request, obj, None, "Возврат уже запрошен — обновите страницу."
@@ -864,6 +982,11 @@ class RefundOrderAdmin(_ReadOnly):
                 return self._back(
                     request, obj, "Возврат за вами: верните деньги в кабинете провайдера.", None
                 )
+
+            if do == "unclaim":
+                cash.unclaim_refund(admin_, obj.pk, request.POST.get("reason") or "", ip=ip)
+
+                return self._back(request, obj, "Возврат отпущен — его запросит расписание.", None)
 
             done = cash.mark_refunded(
                 admin_,
