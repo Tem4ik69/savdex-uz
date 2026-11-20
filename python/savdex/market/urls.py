@@ -8,7 +8,12 @@
 
 from __future__ import annotations
 
-from django.urls import re_path
+from collections.abc import Callable
+from functools import wraps
+from typing import Any
+
+from django.http import HttpRequest, HttpResponse
+from django.urls import URLPattern, re_path
 
 from savdex.market import api
 
@@ -64,3 +69,28 @@ urlpatterns = [
         name="market.api.me.product.images.delete",
     ),
 ]
+
+
+def _open_only(view: Callable[..., HttpResponse]) -> Callable[..., HttpResponse]:
+    """Пока маркетплейс не запущен (savdex.web.shared.market_open) — 404, как у страниц."""
+
+    @wraps(view)
+    def wrapped(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        from savdex.web import fallback
+        from savdex.web.shared import market_open
+
+        if not market_open():
+            return fallback.page_not_found(request)
+
+        return view(request, *args, **kwargs)
+
+    return wrapped
+
+
+def _gated(route: URLPattern) -> URLPattern:
+    return re_path(route.pattern.regex.pattern, _open_only(route.callback), name=route.name)
+
+
+# Каждый адрес — за проверкой «маркетплейс открыт»: и записанные выше, и
+# добавленные позже
+urlpatterns = [_gated(route) for route in urlpatterns]
