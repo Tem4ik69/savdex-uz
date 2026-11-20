@@ -32,7 +32,7 @@ from typing import Any, ClassVar
 from django import forms
 from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied
-from django.db import connection
+from django.db import connection, transaction
 from django.db.models import Count, OuterRef, QuerySet, Subquery
 from django.forms.models import BaseInlineFormSet
 from django.http import HttpRequest, HttpResponse, HttpResponseRedirect
@@ -138,6 +138,13 @@ def _notify(
     )
 
 
+class DecisionRefused(Exception):  # noqa: N818 — отказ сотруднику, а не сбой
+    """
+    Решение не принято (статус уже сменили, не хватило остатка): decide
+    бросает его с текстом — панель покажет предупреждение, а не «готово».
+    """
+
+
 class DecisionsMixin:
     """
     Кнопки решений под карточкой — общая панель модерации.
@@ -231,9 +238,14 @@ class DecisionsMixin:
 
             seen = _version(obj.updated_at)
 
-        self.message_user(  # type: ignore[attr-defined]
-            request, self.decide(request, obj, decision, note, seen), messages.SUCCESS
-        )
+        try:
+            done = self.decide(request, obj, decision, note, seen)
+        except DecisionRefused as refused:
+            self.message_user(request, str(refused), messages.WARNING)  # type: ignore[attr-defined]
+
+            return HttpResponseRedirect(page)
+
+        self.message_user(request, done, messages.SUCCESS)  # type: ignore[attr-defined]
 
         return HttpResponseRedirect(page)
 
@@ -625,6 +637,11 @@ class ProductAdmin(DecisionsMixin, SavdexModelAdmin):
         if formset.model is not Variant or not _admin_of(request).can("market.edit"):
             return
 
+        # Строка товара — раньше вариантов, как у правки продавцом
+        # (products.save) и у заказа (orders.checkout, release_reserve): без
+        # взаимных блокировок. Держится до конца транзакции карточки
+        # (changeform_view), то есть и через пересчёт сводки в save_related
+        one("select id from market_products where id = %s for update", [form.instance.pk])
         skipped: list[str] = []
 
         for variant_form in formset.initial_forms:
@@ -1151,18 +1168,105 @@ class OrderStatus(admin.SimpleListFilter):
         return queryset.filter(status=self.value()) if self.value() else queryset
 
 
+#: Кнопки шагов заказа в админке: в коде решения — статус, который видел
+#: сотрудник, чтобы повторный щелчок не продвинул заказ на шаг дальше
+_STEP_LABELS = {
+    orders.ASSEMBLING: "В сборку",
+    orders.IN_TRANSIT: "Отгружен со склада",
+    orders.READY: "Прибыл в пункт выдачи",
+    orders.ISSUED: "Выдан покупателю",
+}
+
+
 @register(Order, section="market_orders")
-class OrderAdmin(SavdexModelAdmin):
+class OrderAdmin(DecisionsMixin, SavdexModelAdmin):
     """
-    Заказы — только смотреть (статусы меняют оформление, отмена и
-    расписание, дальше — оплата и склад). Поддержка видит состав и статус,
-    но не суммы (access._DETAILS_HIDDEN). Телефона и почты покупателя здесь
-    нет: заказ выдаёт пункт выдачи.
+    Заказы: поля только смотреть. Статус двигает сотрудник с правом
+    market_orders.moderate (администратор) кнопками под карточкой: в сборку
+    → отгружен → в пункте → выдан; заказ с оплатой при получении — ещё и
+    отменить до отгрузки. Только POST с CSRF, только через orders.advance и
+    orders.staff_cancel (условный переход, резерв и обратная проводка),
+    каждое действие — строка журнала. Поддержка видит состав и статус, но
+    не суммы (access._DETAILS_HIDDEN), и статус не двигает. Телефона и
+    почты покупателя здесь нет: заказ выдаёт пункт выдачи.
     """
 
     laravel_model = "Savdex\\Market\\Order"
     title_list = "Заказы маркетплейса"
     title_change = "Заказ"
+    change_form_template = "admin/market/order_change_form.html"  # type: ignore[misc]
+    decide_ability = "market_orders.moderate"
+    decide_url_name = "market_order_decide"
+    changed_message = "Заказ изменился — обновите страницу."
+    #: Версию карточки не сверяем: каждый шаг — условный переход из
+    #: статуса, который видел сотрудник (он в коде решения)
+    permissive: ClassVar[frozenset[str]] = frozenset()
+
+    def decisions(self, obj: Order) -> list[tuple[str, str, bool]]:
+        found: list[tuple[str, str, bool]] = []
+        after = orders.STAFF_STEPS.get(obj.status)
+
+        if after is not None:
+            found.append((f"to:{obj.status}:{after}", _STEP_LABELS[after], False))
+
+        if orders.staff_can_cancel(obj.status, obj.payment_method):
+            label = (
+                "Отменить заказ (деньги — к возврату)"
+                if obj.paid_at is not None
+                else "Отменить заказ"
+            )
+            found.append((f"cancel:{obj.status}", label, False))
+
+        return found
+
+    def decide(
+        self,
+        request: HttpRequest,
+        obj: Order,
+        decision: str,
+        note: str,
+        version: str | None,
+    ) -> str:
+        """
+        Шаг или отмена и строка журнала — одной транзакцией. Не вышло —
+        DecisionRefused (предупреждение), ничего не записано.
+        """
+        admin = _admin_of(request)
+        kind, before, *rest = decision.split(":")
+        text = note[:500] or None
+
+        try:
+            with transaction.atomic():
+                if kind == "cancel":
+                    after = orders.staff_cancel(
+                        obj.pk, before, actor_user_id=admin.id, note=text or "отменён сотрудником"
+                    )
+                else:
+                    moved = orders.advance(obj.pk, before, actor_user_id=admin.id, note=text)
+                    after = rest[0] if moved else None
+
+                if after is None:
+                    raise DecisionRefused("Статус заказа уже изменился — обновите страницу.")
+
+                audit.record(
+                    connection,
+                    action="cancelled" if kind == "cancel" else "status_changed",
+                    section="market_orders",
+                    actor=admin,
+                    subject_type=self.laravel_model,
+                    subject_id=obj.pk,
+                    subject_label=obj.number,
+                    changes={"before": {"status": before}, "after": {"status": after}},
+                    note=text,
+                    ip=audit.client_ip(request),
+                )
+        except orders.WriteOffError as error:
+            raise DecisionRefused(
+                "Заказ не выдан: остаток или резерв товара меньше заказанного — "
+                "проверьте остатки в карточке товара."
+            ) from error
+
+        return f"Заказ {obj.number}: {orders.STATUSES.get(after, after)}."
 
     list_display = ("number", "buyer", "state", "method", "point", "total_text", "created")
     list_filter = (OrderStatus, "payment_method")
