@@ -328,3 +328,33 @@ def test_кнопка_фон_и_скачивание_на_базе(tmp_path):
         ("exported", "backups", f"Выгрузка базы в Excel: {run['id']}"),
         ("downloaded", "backups", f"Скачан файл выгрузки {run['id']}/{run['files'][0]}"),
     ]
+
+
+def test_run_json_никогда_не_пустой(tmp_path, monkeypatch):
+    """
+    Пока run.json перезаписывается, читатель (страница выгрузки, _update,
+    проверка выше) видит прежнее содержимое целиком, а не пустой файл:
+    запись — во временный файл и подмена одним шагом. Раньше write_text
+    поверх на миг обнулял файл — CI на ветке wer 20.11 упал ровно на этом.
+    """
+    monkeypatch.setenv("SAVDEX_EXPORTS_DIR", str(tmp_path))
+    номер = "2026-11-20-170000-ab12"
+    exports._save(номер, {"id": номер, "status": exports.QUEUED})
+    посреди: list[str] = []
+    прежняя = Path.write_text
+
+    def запись_с_читателем(self: Path, data: str, *args: Any, **kwargs: Any) -> int:
+        # Файл уже открыт на запись и обнулён — в этот миг его читают
+        with self.open("w", encoding=kwargs.get("encoding")) as f:
+            посреди.append((tmp_path / номер / "run.json").read_text())
+            f.write(data)
+
+        return len(data)
+
+    monkeypatch.setattr(Path, "write_text", запись_с_читателем)
+    exports._save(номер, {"id": номер, "status": exports.RUNNING})
+    monkeypatch.setattr(Path, "write_text", прежняя)
+
+    assert json.loads(посреди[0])["status"] == exports.QUEUED
+    assert (exports.find(номер) or {})["status"] == exports.RUNNING
+    assert not list((tmp_path / номер).glob(".run.json.*")), "временный файл не остаётся"
