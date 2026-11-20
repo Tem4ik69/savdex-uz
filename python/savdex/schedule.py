@@ -346,6 +346,16 @@ def send_ga4_purchases(now: datetime, due: datetime) -> str:
     return product_events.send_purchases(now, due)
 
 
+def expire_market_orders(now: datetime, due: datetime) -> str:
+    """
+    Каждый час: неоплаченные картой заказы маркетплейса старше N минут
+    (настройка, по умолчанию 30) — отменить, резерв остатка — снять.
+    """
+    from savdex.market import orders
+
+    return f"Отменено неоплаченных заказов: {orders.expire()}."
+
+
 JOBS: tuple[Job, ...] = (
     Job("ratings_recalculate", time(3, 0), recalculate_ratings),
     Job("audience_views_prune", time(4, 0), prune_audience_views),
@@ -361,6 +371,8 @@ JOBS: tuple[Job, ...] = (
     Job("uzum_probe", time(0, 0), probe_uzum, every=1),
     # ТЗ-03: оплаты — в GA4 как purchase (Measurement Protocol)
     Job("ga4_purchases", time(0, 10), send_ga4_purchases, every=1),
+    # Маркетплейс: резерв неоплаченных заказов не держим дольше часа с лишним
+    Job("market_expire_orders", time(0, 25), expire_market_orders, every=1),
 )
 
 

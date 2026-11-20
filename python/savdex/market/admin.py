@@ -13,8 +13,12 @@
 - **Категории** (market_catalog.*): дерево до трёх уровней,
   характеристики для фильтров. Удалить можно только пустую категорию.
 
+- **Заказы** (market_orders.*): только смотреть — состав, статус,
+  история; суммы — администратору (поддержке не видны). **Пункты
+  выдачи** — заводит администратор.
+
 Каждое решение — строка журнала действий и уведомление компании.
-Денег в разделе нет: модератор их не видит (ТЗ, раздел 9).
+Денег в разделах модератора нет: он их не видит (ТЗ, раздел 9).
 """
 
 from __future__ import annotations
@@ -22,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
+from datetime import UTC
 from typing import Any, ClassVar
 
 from django import forms
@@ -31,14 +36,23 @@ from django.db import connection
 from django.db.models import Count, OuterRef, QuerySet, Subquery
 from django.http import HttpRequest, HttpResponse, HttpResponseRedirect
 from django.urls import path, reverse
+from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 
 from savdex import audit
 from savdex.adminsite import SavdexModelAdmin, _admin_of, register
 from savdex.crm.admin import _badge, when
-from savdex.market import products, sellers
-from savdex.market.common import t
-from savdex.market.models import Attribute, Category, Product, Seller, Variant
+from savdex.market import orders, products, sellers
+from savdex.market.common import som, t
+from savdex.market.models import (
+    Attribute,
+    Category,
+    Order,
+    PickupPoint,
+    Product,
+    Seller,
+    Variant,
+)
 from savdex.moderation.services import context_of, notify_company
 from savdex.web.shared import public_url
 
@@ -371,13 +385,40 @@ class ProductStatus(admin.SimpleListFilter):
         return queryset.filter(status=self.value()) if self.value() else queryset
 
 
+class VariantForm(forms.ModelForm):  # type: ignore[type-arg]
+    class Meta:
+        model = Variant
+        fields = ("stock",)
+
+    def clean_stock(self) -> int:
+        """
+        Остаток меньше резерва под оформленные заказы — понятная ошибка, а
+        не 500 от ограничения базы (docs/marketplace-security.md, раздел 1).
+        Резерв — свежий из базы: заказ мог появиться, пока форма была открыта.
+        """
+        stock = int(self.cleaned_data.get("stock") or 0)
+        reserved = (
+            Variant.objects.filter(pk=self.instance.pk).values_list("reserved", flat=True).first()
+            if self.instance.pk
+            else 0
+        ) or 0
+
+        if stock < reserved:
+            raise forms.ValidationError(
+                f"Под оформленные заказы отложено {reserved} шт. — остаток не может быть меньше."
+            )
+
+        return stock
+
+
 class VariantInline(admin.TabularInline):  # type: ignore[type-arg]
     """
     Варианты: цена — только смотреть (её задаёт продавец), остаток — до
-    появления склада BTS ставит сотрудник.
+    появления склада BTS ставит сотрудник; не меньше резерва под заказы.
     """
 
     model = Variant
+    form = VariantForm
     extra = 0
     can_delete = False
     fields = ("title", "sku", "price_label", "stock", "reserved", "is_active")
@@ -395,8 +436,6 @@ class VariantInline(admin.TabularInline):  # type: ignore[type-arg]
 
     @admin.display(description="цена")
     def price_label(self, obj: Variant) -> str:
-        from savdex.market.common import som
-
         price = som(obj.price)
         old = som(obj.old_price)
         text = f"{price:,}".replace(",", " ") + " сум"
@@ -820,3 +859,244 @@ class CategoryAdmin(SavdexModelAdmin):
     @admin.display(description="товаров")
     def products_count(self, obj: Category) -> int:
         return int(getattr(obj, "_products", 0) or 0)
+
+
+# ── Заказы и пункты выдачи ──────────────────────────────────────────
+
+
+def _money(value: int | None) -> str:
+    amount = som(value)
+
+    return f"{amount:,}".replace(",", " ") + " сум" if amount is not None else "—"
+
+
+_ORDER_TONES = {
+    orders.CREATED: "warning",
+    orders.PAID: "success",
+    orders.CASH_ON_PICKUP: "info",
+    orders.ASSEMBLING: "info",
+    orders.IN_TRANSIT: "info",
+    orders.READY: "success",
+    orders.ISSUED: "gray",
+    orders.CANCELLED: "danger",
+    orders.REFUND_PENDING: "warning",
+    orders.REFUNDED: "gray",
+}
+
+_METHODS = {"card": "картой на сайте", "cash": "при получении"}
+
+
+class OrderStatus(admin.SimpleListFilter):
+    title = "статус"
+    parameter_name = "status"
+
+    def lookups(self, request: HttpRequest, model_admin: Any) -> list[tuple[str, str]]:  # noqa: ANN401
+        return list(orders.STATUSES.items())
+
+    def queryset(self, request: HttpRequest, queryset: QuerySet[Any]) -> QuerySet[Any]:
+        return queryset.filter(status=self.value()) if self.value() else queryset
+
+
+@register(Order, section="market_orders")
+class OrderAdmin(SavdexModelAdmin):
+    """
+    Заказы — только смотреть (статусы меняют оформление, отмена и
+    расписание, дальше — оплата и склад). Поддержка видит состав и статус,
+    но не суммы (access._DETAILS_HIDDEN). Телефона и почты покупателя здесь
+    нет: заказ выдаёт пункт выдачи.
+    """
+
+    laravel_model = "Savdex\\Market\\Order"
+    title_list = "Заказы маркетплейса"
+    title_change = "Заказ"
+
+    list_display = ("number", "buyer", "state", "method", "point", "total_text", "created")
+    list_filter = (OrderStatus, "payment_method")
+    search_fields = ("number",)
+    ordering = ("-created_at", "-id")
+    list_per_page = 50
+
+    fields = ("number", "buyer", "state", "method", "point", "contents", "money", "history")
+    readonly_fields = fields
+    #: Что не видит роль без подробностей (Admin.sees_details)
+    detail_fields = ("money",)
+    detail_columns = ("total_text",)
+
+    def sees_details(self, request: HttpRequest) -> bool:
+        return _admin_of(request).sees_details(self.section)
+
+    def get_fields(self, request: HttpRequest, obj: Any = None) -> Any:  # noqa: ANN401
+        shown = super().get_fields(request, obj)
+
+        if self.sees_details(request):
+            return shown
+
+        return [f for f in shown if f not in self.detail_fields]
+
+    def get_list_display(self, request: HttpRequest) -> Any:  # noqa: ANN401
+        shown = super().get_list_display(request)
+
+        if self.sees_details(request):
+            return shown
+
+        return tuple(column for column in shown if column not in self.detail_columns)
+
+    def has_add_permission(self, request: HttpRequest) -> bool:
+        return False
+
+    def has_change_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
+        return False
+
+    def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
+        return False
+
+    @admin.display(description="покупатель")
+    def buyer(self, obj: Order) -> str:
+        with connection.cursor() as cursor:
+            cursor.execute("select name from users where id = %s", [obj.buyer_user_id])
+            row = cursor.fetchone()
+
+        return format_html("{} <small>№{}</small>", row[0] if row else "—", obj.buyer_user_id)
+
+    @admin.display(description="статус", ordering="status")
+    def state(self, obj: Order) -> str:
+        return format_html(
+            "{}<br><small>{}</small>",
+            _badge(
+                orders.STATUSES.get(obj.status, obj.status), _ORDER_TONES.get(obj.status, "gray")
+            ),
+            obj.cancel_reason or "",
+        )
+
+    @admin.display(description="оплата", ordering="payment_method")
+    def method(self, obj: Order) -> str:
+        return _METHODS.get(obj.payment_method, obj.payment_method)
+
+    @admin.display(description="пункт выдачи")
+    def point(self, obj: Order) -> str:
+        return format_html(
+            "{}<br><small>{}</small>", obj.pickup_point_name, obj.pickup_point_address
+        )
+
+    @admin.display(description="итого", ordering="total")
+    def total_text(self, obj: Order) -> str:
+        return _money(obj.total)
+
+    @admin.display(description="оформлен", ordering="created_at")
+    def created(self, obj: Order) -> str:
+        return when(obj.created_at)
+
+    @admin.display(description="состав")
+    def contents(self, obj: Order) -> str:
+        """Продавец, товар и количество — без цен: их видит только поле «деньги»."""
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "select c.name, mp.status, i.title, i.quantity "
+                "from market_order_items i "
+                "join market_order_parts mp on mp.id = i.part_id "
+                "join market_sellers s on s.id = mp.seller_id "
+                "join companies c on c.id = s.company_id "
+                "where i.order_id = %s order by mp.id, i.id",
+                [obj.pk],
+            )
+            found = cursor.fetchall()
+
+        return format_html_join(
+            "<br>",
+            "{} — {} × {} <small>({})</small>",
+            (
+                (seller, title, quantity, orders.STATUSES.get(status, status))
+                for seller, status, title, quantity in found
+            ),
+        )
+
+    @admin.display(description="деньги")
+    def money(self, obj: Order) -> str:
+        """Итоги заказа и части продавцов: сумма, комиссия, к выплате."""
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "select c.name, mp.subtotal, mp.commission from market_order_parts mp "
+                "join market_sellers s on s.id = mp.seller_id "
+                "join companies c on c.id = s.company_id "
+                "where mp.order_id = %s order by mp.id",
+                [obj.pk],
+            )
+            parts = cursor.fetchall()
+
+        return format_html(
+            "товары {}, доставка {}, итого {}<br><small>комиссия площадки {}</small><br>{}",
+            _money(obj.items_total),
+            _money(obj.delivery_total),
+            _money(obj.total),
+            _money(obj.commission_total),
+            format_html_join(
+                "<br>",
+                "{}: {}, комиссия {}, продавцу {}",
+                (
+                    (seller, _money(subtotal), _money(commission), _money(subtotal - commission))
+                    for seller, subtotal, commission in parts
+                ),
+            ),
+        )
+
+    @admin.display(description="история")
+    def history(self, obj: Order) -> str:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "select created_at, from_status, to_status, actor, note from market_order_events "
+                "where order_id = %s order by id",
+                [obj.pk],
+            )
+            found = cursor.fetchall()
+
+        return format_html_join(
+            "<br>",
+            "{} · {} → {} <small>({}{})</small>",
+            (
+                (
+                    when(timezone.make_aware(created, UTC) if created else None),
+                    orders.STATUSES.get(before, before or "—"),
+                    orders.STATUSES.get(after, after),
+                    actor,
+                    f": {note}" if note else "",
+                )
+                for created, before, after, actor, note in found
+            ),
+        )
+
+
+class PickupPointForm(forms.ModelForm):  # type: ignore[type-arg]
+    class Meta:
+        model = PickupPoint
+        fields = ("code", "name", "address", "city", "is_active", "sort")
+
+    def clean_code(self) -> str:
+        code = str(self.cleaned_data.get("code") or "").strip().lower()
+
+        if not SLUG.fullmatch(code) or len(code) > 32:
+            raise forms.ValidationError("Только латиница, цифры и дефис: chilonzor-1.")
+
+        return code
+
+
+@register(PickupPoint, section="market_orders")
+class PickupPointAdmin(SavdexModelAdmin):
+    """Пункты выдачи: пока Ташкент; код после создания не меняется — он в заказах."""
+
+    laravel_model = "Savdex\\Market\\PickupPoint"
+    title_list = "Пункты выдачи"
+    title_add = "Новый пункт выдачи"
+    title_change = "Пункт выдачи"
+
+    form = PickupPointForm
+    list_display = ("name", "code", "address", "city", "is_active", "sort")
+    list_filter = ("is_active",)
+    search_fields = ("name", "code", "address")
+    ordering = ("sort", "name")
+
+    def get_readonly_fields(self, request: HttpRequest, obj: Any = None) -> Any:  # noqa: ANN401
+        return ("code",) if obj is not None else ()
+
+    def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
+        """Пункт с заказами не удаляется (база держит), выключите его."""
+        return False

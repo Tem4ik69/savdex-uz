@@ -36,6 +36,10 @@ ROLES: dict[str, str] = {
     "finance": "Финансы",
     "support": "Поддержка",
     "content_manager": "Контент-менеджер",
+    # TODO(маркетплейс, этап 3): роли «Склад» (warehouse, раздел market_stock)
+    # и «Касса» (cashier, раздел market_cash) — docs/marketplace-security.md,
+    # раздел 4. Заводятся вместе со своими разделами: роль без раздела ничего
+    # не открывает, а новая роль меняет счёт прав в tests/test_access_parity.py
 }
 
 #: Роли, которые предлагает панель: мегаадмина назначают только на сервере
@@ -81,6 +85,9 @@ SECTIONS: dict[str, str] = {
     # маркетплейса — отдельным разделом, когда появятся заказы
     "market": "Маркетплейс — продавцы и товары",
     "market_catalog": "Маркетплейс — категории",
+    # Заказы маркетплейса и пункты выдачи (savdex/market/orders.py): в
+    # админке пока только смотреть; суммы поддержке не видны (_DETAILS_HIDDEN)
+    "market_orders": "Маркетплейс — заказы",
     "support": "Обращения в поддержку",
     "payments": "Счета и оплаты",
     "subscriptions": "Подписки",
@@ -129,6 +136,8 @@ _MATRIX: dict[str, dict[str, str]] = {
         "ilmora": "r",
         # Маркетплейс: проверка продавцов и товаров, дерево категорий
         "market": "m", "market_catalog": "w",
+        # Заказы — смотреть; пункты выдачи — заводить и править
+        "market_orders": "m",
     },
     "sales": {
         "companies": "r", "listings": "r", "tenders": "r",
@@ -175,6 +184,8 @@ _MATRIX: dict[str, dict[str, str]] = {
         "contacts": "r", "tasks": "wo", "communications": "wo",
         "support": "w", "subscriptions": "r",
         "market": "r",
+        # Заказы маркетплейса — смотреть, без сумм (_DETAILS_HIDDEN)
+        "market_orders": "r",
     },
     "content_manager": {
         "content": "w", "catalogs": "w", "broadcasts": "r",
@@ -232,6 +243,9 @@ def scope_is_own(role: str | None, section: str) -> bool:
 #: и parity-тест это не затрагивает
 _DETAILS_HIDDEN: dict[str, frozenset[str]] = {
     MODERATOR: frozenset({"leads", "deals"}),
+    # Поддержке заказы маркетплейса — состав и статус, без сумм
+    # (docs/marketplace-security.md, раздел 4)
+    "support": frozenset({"market_orders"}),
 }
 
 

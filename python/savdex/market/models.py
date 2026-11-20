@@ -210,3 +210,72 @@ class Variant(models.Model):
         return ", ".join(f"{k}: {v}" for k, v in options.items() if not k.startswith("_")) or (
             "без выбора"
         )
+
+
+class PickupPoint(models.Model):
+    """Пункт выдачи (миграция 2026_11_21_100000): пока Ташкент, заводит администратор."""
+
+    code = models.CharField(
+        "код",
+        max_length=32,
+        unique=True,
+        help_text="Латиница, цифры и дефис: chilonzor-1. Попадает в заказы — не меняйте.",
+    )
+    name = models.CharField("название", max_length=200)
+    address = models.CharField("адрес", max_length=500)
+    city = models.CharField("город", max_length=64, default="Ташкент")
+    is_active = models.BooleanField("принимает заказы", default=True)
+    sort = models.IntegerField("порядок", default=0)
+    created_at = UTCDateTimeField(auto_now_add=True)
+    updated_at = UTCDateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "market_pickup_points"
+        ordering = ("sort", "name")
+        verbose_name = "пункт выдачи"
+        verbose_name_plural = "пункты выдачи"
+
+    def __str__(self) -> str:
+        return self.name if self.pk else "новый пункт выдачи"
+
+
+class Order(models.Model):
+    """
+    Заказ (savdex/market/orders.py). В админке — только смотреть: статусы
+    меняют оформление, отмена и расписание, дальше — оплата и склад.
+    """
+
+    number = models.CharField("номер", max_length=16, unique=True)
+    buyer_user_id = models.BigIntegerField("покупатель")
+    status = models.CharField("статус", max_length=20)
+    payment_method = models.CharField("оплата", max_length=8)
+    pickup_point = models.ForeignKey(
+        PickupPoint,
+        on_delete=models.DO_NOTHING,
+        db_column="pickup_point_id",
+        verbose_name="пункт выдачи",
+    )
+    pickup_point_name = models.CharField("пункт выдачи", max_length=200)
+    pickup_point_address = models.CharField("адрес пункта", max_length=500)
+    items_total = models.BigIntegerField("товары, тийин")
+    delivery_total = models.BigIntegerField("доставка, тийин", default=0)
+    total = models.BigIntegerField("итого, тийин")
+    commission_total = models.BigIntegerField("комиссия, тийин", default=0)
+    paid_at = UTCDateTimeField("оплачен", null=True)
+    cancelled_at = UTCDateTimeField("отменён", null=True)
+    cancel_reason = models.CharField("причина отмены", max_length=500, null=True)
+    issued_at = UTCDateTimeField("выдан", null=True)
+    reserve_released_at = UTCDateTimeField("резерв снят", null=True)
+    created_at = UTCDateTimeField("оформлен", auto_now_add=True)
+    updated_at = UTCDateTimeField("изменён", auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "market_orders"
+        ordering = ("-created_at", "-id")
+        verbose_name = "заказ"
+        verbose_name_plural = "заказы"
+
+    def __str__(self) -> str:
+        return f"Заказ {self.number}"
