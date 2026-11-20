@@ -1400,18 +1400,20 @@ def test_отклонённый_и_снятый_товар_только_чере
     assert на_продажу() == "pending", "отклонённый — через модератора"
     assert статус() == ("pending", True)
 
-    django(модератор, ("post", решение, {"decision": "approve"}))
+    def решить(decision: str, **поля: str) -> None:
+        """Решение по той версии товара, что сейчас в базе (как в карточке)."""
+        версия = _версия("market_products", товар)
+        django(модератор, ("post", решение, {"decision": decision, "version": версия, **поля}))
+
+    решить("approve")
     assert статус() == ("active", False)
 
-    django(
-        модератор,
-        ("post", решение, {"decision": "block", "note": "Жалоба покупателя на подделку"}),
-        ("post", решение, {"decision": "unblock"}),
-    )
+    решить("block", note="Жалоба покупателя на подделку")
+    решить("unblock")
     assert статус() == ("draft", True), "причина снятия остаётся продавцу"
     assert на_продажу() == "pending", "возвращённый после снятия — через модератора"
 
-    django(модератор, ("post", решение, {"decision": "approve"}))
+    решить("approve")
     assert _post(сайт, f"/market/api/me/products/{товар}/hide", владелец)["status"] == 200
     assert статус() == ("hidden", False)
     assert на_продажу() == "active", "снятый самим продавцом — сразу назад"
