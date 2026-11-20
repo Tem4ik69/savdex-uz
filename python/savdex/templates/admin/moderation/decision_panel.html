@@ -6,6 +6,8 @@
 {% if decisions %}
   <form method="post" action="{{ decide_url }}" class="module aligned" id="decision">
     {% csrf_token %}
+    {# Версия записи, которую видит модератор: изменится до решения — решение не примется #}
+    {% if decision_version %}<input type="hidden" name="version" value="{{ decision_version }}">{% endif %}
     <h2>Решение</h2>
     <div class="form-row">
       <label for="decision-note">Формулировка решения:</label>

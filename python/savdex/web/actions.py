@@ -146,7 +146,10 @@ def notification_read(request: HttpRequest, notification_id: str) -> HttpRespons
     if url is not None and url.startswith(ctx.root + "/"):
         url = url[len(ctx.root) :]
 
-    return redirect(ctx, url) if url is not None and url.startswith("/") else back(ctx)
+    # Только путь своего сайта: «//адрес» и «/\адрес» браузер увёл бы на чужой
+    safe = url is not None and url.startswith("/") and not url.startswith("//") and "\\" not in url
+
+    return redirect(ctx, url) if safe and url is not None else back(ctx)
 
 
 @form()

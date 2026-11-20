@@ -176,6 +176,29 @@ def _сотрудник(role: str) -> int:
     return int(found[0][0]) if found else сотрудник(role)
 
 
+def _версия(table: str, pk: int) -> str:
+    """
+    Версия записи для решения модератора, как в форме решения: updated_at;
+    у заявки продавца — ещё число и время документов компании.
+    """
+    [(версия,)] = sql(
+        f"select to_char(updated_at, 'YYYY-MM-DD HH24:MI:SS') from {table} where id = %s", [pk]
+    )
+
+    if table != "market_sellers":
+        return str(версия)
+
+    [(n, last)] = sql(
+        "select count(*), coalesce(to_char(max(greatest(d.created_at, coalesce(d.updated_at, "
+        "d.created_at))), 'YYYY-MM-DD HH24:MI:SS'), '') from company_documents d "
+        "join market_sellers s on s.company_id = d.company_id where s.id = %s "
+        "and d.type in ('registration', 'license', 'certificate', 'quality')",
+        [pk],
+    )
+
+    return f"{версия}|{n}:{last}"
+
+
 def _категория(slug: str) -> int:
     return _id("select id from market_categories where slug = %s", [slug])
 
@@ -613,12 +636,14 @@ def test_первые_товары_на_модерации(сайт, витри�
     # Модератор одобряет — первый (и единственный по настройке) проверенный товар
     модератор = _сотрудник("moderator")
     адрес_товара = f"/py/admin/market/product/{первый['id']}/"
+    версия = _версия("market_products", первый["id"])
     _, карточка, решение = django(
         модератор,
         ("get", адрес_товара + "change/", None),
-        ("post", адрес_товара + "decide/", {"decision": "approve"}),
+        ("post", адрес_товара + "decide/", {"decision": "approve", "version": версия}),
     )
     assert карточка["status"] == 200 and "Одобрить" in карточка["body"]
+    assert f'name="version" value="{версия}"' in карточка["body"]
     assert решение["status"] == 302
     assert sql("select status from market_products where id = %s", [первый["id"]]) == [("active",)]
     assert _get(сайт, f"/market/api/product/{slug}")["status"] == 200
@@ -671,7 +696,11 @@ def test_админка_продавцов(сайт, витрина):
         (
             "post",
             адрес_заявки + "decide/",
-            {"decision": "reject", "note": "Нет свидетельства о регистрации"},
+            {
+                "decision": "reject",
+                "note": "Нет свидетельства о регистрации",
+                "version": _версия("market_sellers", заявка),
+            },
         ),
     )
     assert список["status"] == 200 and "Guli Cosmetics" in список["body"]
@@ -682,7 +711,14 @@ def test_админка_продавцов(сайт, витрина):
 
     # Подал снова — модератор подтверждает
     sql("update market_sellers set status = 'pending' where id = %s", [заявка])
-    django(модератор, ("post", адрес_заявки + "decide/", {"decision": "approve"}))
+    django(
+        модератор,
+        (
+            "post",
+            адрес_заявки + "decide/",
+            {"decision": "approve", "version": _версия("market_sellers", заявка)},
+        ),
+    )
     assert sql("select status, verified_via from market_sellers where id = %s", [заявка]) == [
         ("approved", "documents")
     ]
@@ -690,6 +726,345 @@ def test_админка_продавцов(сайт, витрина):
 
     _, чужим = django(финансы, ("get", "/py/admin/market/seller/", None))
     assert чужим["status"] == 403
+
+
+@нужна_база
+def test_остаток_вариантов_в_админке(сайт, витрина):
+    """Модератор видит варианты и правит остаток; поддержка — только смотрит; финансам — нет."""
+    компания = _компания("Stock Admin", "stock-admin")
+    товар, вариант = _товар(_продавец(компания), "textile", "Плед", "pled", price=100_000)
+    адрес_товара = f"/py/admin/market/product/{товар}/change/"
+
+    _, модератору = django(_сотрудник("moderator"), ("get", адрес_товара, None))
+    assert модератору["status"] == 200
+    assert '-0-stock"' in модератору["body"], "поле остатка у модератора"
+
+    _, поддержке = django(_сотрудник("support"), ("get", адрес_товара, None))
+    assert поддержке["status"] == 200
+    assert "Плед" in поддержке["body"] and '-0-stock"' not in поддержке["body"]
+
+    _, финансам = django(_сотрудник("finance"), ("get", адрес_товара, None))
+    assert финансам["status"] == 403
+    assert вариант
+
+
+@нужна_база
+def test_остаток_пишется_точечно(сайт, витрина):
+    """
+    Сохранение карточки товара пишет только остаток варианта: ни строку
+    товара, ни цену, резерв и выбор варианта не переписывает. Меньше нуля и
+    меньше резерва — ошибка формы, а не 500.
+    """
+    компания = _компания("Stock Write", "stock-write")
+    товар, вариант = _товар(
+        _продавец(компания), "textile", "Покрывало", "pokryvalo", price=200_000, stock=5
+    )
+    sql("update market_product_variants set reserved = 2 where id = %s", [вариант])
+    адрес_товара = f"/py/admin/market/product/{товар}/change/"
+    версия = _версия("market_products", товар)
+
+    def форма(stock: int) -> dict[str, str]:
+        return {
+            "variants-TOTAL_FORMS": "1",
+            "variants-INITIAL_FORMS": "1",
+            "variants-MIN_NUM_FORMS": "0",
+            "variants-MAX_NUM_FORMS": "1000",
+            "variants-0-id": str(вариант),
+            "variants-0-product": str(товар),
+            "variants-0-stock": str(stock),
+            "_save": "Сохранить",
+        }
+
+    # Запись столбцов, которых карточка не правит, — сразу ошибка базы:
+    # UPDATE строки целиком их перечисляет, точечный — нет
+    sql(
+        "create or replace function test_full_write() returns trigger language plpgsql "
+        "as $$ begin raise exception 'строка переписана целиком'; end $$"
+    )
+    sql(
+        "create trigger test_variant_full_write before update of "
+        "price, old_price, reserved, is_active, options, sku, sort on market_product_variants "
+        f"for each row when (old.product_id = {товар}) execute function test_full_write()"
+    )
+    sql(
+        "create trigger test_product_full_write before update of "
+        "title, description, status, updated_at on market_products "
+        f"for each row when (old.id = {товар}) execute function test_full_write()"
+    )
+
+    try:
+        _, ниже_нуля, ниже_резерва, сохранил = django(
+            _сотрудник("moderator"),
+            ("post", адрес_товара, форма(-1)),
+            ("post", адрес_товара, форма(1)),
+            ("post", адрес_товара, форма(9)),
+        )
+    finally:
+        sql("drop trigger if exists test_variant_full_write on market_product_variants")
+        sql("drop trigger if exists test_product_full_write on market_products")
+        sql("drop function if exists test_full_write()")
+
+    assert ниже_нуля["status"] == 200 and "меньше нуля" in ниже_нуля["body"]
+    assert ниже_резерва["status"] == 200 and "не меньше резерва" in ниже_резерва["body"]
+    assert сохранил["status"] == 302, сохранил["body"][:3000]
+    assert sql(
+        "select stock, reserved, price from market_product_variants where id = %s", [вариант]
+    ) == [(9, 2, 20_000_000)]
+    # Сводка товара пересчитана (остаток за вычетом резерва), сама строка не тронута
+    assert sql("select stock from market_products where id = %s", [товар]) == [(7,)]
+    assert _версия("market_products", товар) == версия
+    [(изменения,)] = sql(
+        "select changes from admin_actions where subject_id = %s and note = 'остаток вариантов'",
+        [товар],
+    )
+    правка = json.loads(изменения) if isinstance(изменения, str) else изменения
+    assert правка == {"before": {str(вариант): 5}, "after": {str(вариант): 9}}
+
+
+@нужна_база
+def test_решение_по_той_версии_что_видел_модератор(сайт, витрина):
+    """
+    Товар или заявка изменились после того, как модератор открыл карточку, —
+    решение не принимается: продавец не подменит товар под «Одобрить».
+    """
+    модератор = _сотрудник("moderator")
+    товар, _ = _товар(
+        _продавец(_компания("Toctou Shop", "toctou-shop")),
+        "textile",
+        "Скатерть",
+        "skatert",
+        status="pending",
+        price=150_000,
+    )
+    sql("update market_products set updated_at = '2026-11-01 10:00:00' where id = %s", [товар])
+    адрес_товара = f"/py/admin/market/product/{товар}/"
+
+    _, карточка = django(модератор, ("get", адрес_товара + "change/", None))
+    assert 'name="version" value="2026-11-01 10:00:00"' in карточка["body"]
+
+    # Продавец поменял товар, пока модератор смотрел старую версию
+    sql(
+        "update market_products set title = 'Подменённая скатерть', "
+        "updated_at = '2026-11-01 10:05:00' where id = %s",
+        [товар],
+    )
+    _, по_старой, без_версии = django(
+        модератор,
+        (
+            "post",
+            адрес_товара + "decide/",
+            {"decision": "approve", "version": "2026-11-01 10:00:00"},
+        ),
+        ("post", адрес_товара + "decide/", {"decision": "approve"}),
+    )
+    assert по_старой["status"] == 302 and без_версии["status"] == 302
+    assert sql("select status from market_products where id = %s", [товар]) == [("pending",)]
+    assert sql(
+        "select count(*) from admin_actions where subject_type = %s and subject_id = %s",
+        ["Savdex\\Market\\Product", товар],
+    ) == [(0,)]
+
+    django(
+        модератор,
+        (
+            "post",
+            адрес_товара + "decide/",
+            {"decision": "approve", "version": "2026-11-01 10:05:00"},
+        ),
+    )
+    assert sql("select status from market_products where id = %s", [товар]) == [("active",)]
+
+    # Заявка продавца — так же, по времени её правки
+    заявка = _продавец(_компания("Toctou Seller", "toctou-seller"), "pending")
+    sql("update market_sellers set updated_at = '2026-11-01 11:00:00' where id = %s", [заявка])
+    адрес_заявки = f"/py/admin/market/seller/{заявка}/decide/"
+
+    django(
+        модератор,
+        ("post", адрес_заявки, {"decision": "approve", "version": "2026-11-01 10:59:59|0:"}),
+    )
+    assert sql("select status from market_sellers where id = %s", [заявка]) == [("pending",)]
+
+    # Компания заменила документ, пока модератор смотрел, — заявка та же, а
+    # версия другая: одобрение по старой не проходит
+    увиденная = _версия("market_sellers", заявка)
+    assert увиденная == "2026-11-01 11:00:00|0:"
+    sql(
+        "insert into company_documents (company_id, type, title, file_path, created_at, "
+        "updated_at) select company_id, 'registration', 'Свидетельство', 'docs/y.pdf', "
+        "'2026-11-01 11:01:00', '2026-11-01 11:01:00' from market_sellers where id = %s",
+        [заявка],
+    )
+    django(модератор, ("post", адрес_заявки, {"decision": "approve", "version": увиденная}))
+    assert sql("select status from market_sellers where id = %s", [заявка]) == [("pending",)]
+
+    django(
+        модератор,
+        (
+            "post",
+            адрес_заявки,
+            {"decision": "approve", "version": _версия("market_sellers", заявка)},
+        ),
+    )
+    assert sql("select status from market_sellers where id = %s", [заявка]) == [("approved",)]
+
+    # Запретить можно и без версии: правка продавца не мешает снять товар
+    sql("update market_products set updated_at = '2026-11-01 12:00:00' where id = %s", [товар])
+    django(
+        модератор,
+        (
+            "post",
+            адрес_товара + "decide/",
+            {"decision": "block", "note": "Подделка известного бренда", "version": "старая"},
+        ),
+    )
+    assert sql("select status from market_products where id = %s", [товар]) == [("blocked",)]
+
+
+@нужна_база
+def test_характеристики_в_админке_категорий(сайт, витрина):
+    """
+    Характеристики категории видны и правятся по правам раздела
+    «market_catalog», правка попадает в журнал, а удалить заполненную у
+    товаров характеристику нельзя — каскад стёр бы значения.
+    """
+    категория = _id(
+        "insert into market_categories (slug, name, sort) "
+        "values ('attr-admin', 'Проверка характеристик', 990) returning id"
+    )
+    размер = _id(
+        "insert into market_attributes (category_id, key, name, kind) "
+        "values (%s, 'size', 'Размер', 'text') returning id",
+        [категория],
+    )
+    оттенок = _id(
+        "insert into market_attributes (category_id, key, name, kind) "
+        "values (%s, 'shade', 'Оттенок', 'text') returning id",
+        [категория],
+    )
+    sql(
+        "insert into market_product_values (product_id, attribute_id, value_text) "
+        "values (%s, %s, 'XL')",
+        [витрина["наушники"], размер],
+    )
+    адрес_категории = f"/py/admin/market/category/{категория}/change/"
+
+    def форма(**правка: str) -> dict[str, str]:
+        поля = {
+            "parent": "",
+            "slug": "attr-admin",
+            "name": "Проверка характеристик",
+            "name_uz": "",
+            "name_en": "",
+            "icon": "",
+            "sort": "990",
+            "is_active": "on",
+            "attributes-TOTAL_FORMS": "2",
+            "attributes-INITIAL_FORMS": "2",
+            "attributes-MIN_NUM_FORMS": "0",
+            "attributes-MAX_NUM_FORMS": "1000",
+        }
+
+        for i, (pk, key, name) in enumerate(
+            [(размер, "size", "Размер"), (оттенок, "shade", "Оттенок")]
+        ):
+            поля |= {
+                f"attributes-{i}-id": str(pk),
+                f"attributes-{i}-category": str(категория),
+                f"attributes-{i}-key": key,
+                f"attributes-{i}-name": name,
+                f"attributes-{i}-kind": "text",
+                f"attributes-{i}-unit": "",
+                f"attributes-{i}-options": "[]",
+                f"attributes-{i}-is_filter": "on",
+                f"attributes-{i}-sort": "0",
+            }
+
+        return поля | правка
+
+    def журнал_категории() -> dict[str, Any]:
+        [(изменения,)] = sql(
+            "select changes from admin_actions where subject_type = %s and subject_id = %s "
+            "order by id desc limit 1",
+            ["Savdex\\Market\\Category", категория],
+        )
+
+        return dict(json.loads(изменения) if isinstance(изменения, str) else изменения)
+
+    try:
+        контент = _сотрудник("content_manager")
+        _, редактору, правка = django(
+            контент,
+            ("get", адрес_категории, None),
+            ("post", адрес_категории, форма(**{"attributes-0-is_required": "on"})),
+        )
+        assert редактору["status"] == 200
+        assert 'name="attributes-TOTAL_FORMS"' in редактору["body"]
+        assert 'name="attributes-0-key"' in редактору["body"]
+        assert 'name="attributes-0-DELETE"' not in редактору["body"], "удалять — не редактору"
+        assert правка["status"] == 302, правка["body"][:3000]
+        assert sql("select is_required from market_attributes where id = %s", [размер]) == [(True,)]
+        изменения = журнал_категории()
+        assert изменения["before"]["attributes"][0] == {
+            "key": "size",
+            "kind": "text",
+            "options": [],
+            "is_required": False,
+        }
+        assert изменения["after"]["attributes"][0]["is_required"] is True
+
+        _, модератору = django(_сотрудник("moderator"), ("get", адрес_категории, None))
+        assert модератору["status"] == 200 and "Оттенок" in модератору["body"]
+        assert 'name="attributes-0-key"' not in модератору["body"], "модератор только смотрит"
+
+        главный = _сотрудник("superadmin")
+        _, заполненную, пустую = django(
+            главный,
+            (
+                "post",
+                адрес_категории,
+                форма(**{"attributes-0-is_required": "on", "attributes-0-DELETE": "on"}),
+            ),
+            (
+                "post",
+                адрес_категории,
+                форма(**{"attributes-0-is_required": "on", "attributes-1-DELETE": "on"}),
+            ),
+        )
+        assert заполненную["status"] == 200
+        assert "Нельзя удалить характеристику" in заполненную["body"]
+        assert пустую["status"] == 302, пустую["body"][:3000]
+        assert sql("select id from market_attributes where category_id = %s", [категория]) == [
+            (размер,)
+        ]
+        assert sql(
+            "select value_text from market_product_values where attribute_id = %s", [размер]
+        ) == [("XL",)]
+        удаление = журнал_категории()
+        assert [a["key"] for a in удаление["before"]["attributes"]] == ["size", "shade"]
+        assert [a["key"] for a in удаление["after"]["attributes"]] == ["size"]
+    finally:
+        sql("delete from market_product_values where attribute_id = %s", [размер])
+        sql("delete from market_attributes where category_id = %s", [категория])
+        sql("delete from market_categories where id = %s", [категория])
+
+
+@нужна_база
+def test_роль_сайта_не_удаляет_продавцов_и_товары(сайт):
+    """Продавцов, товары и варианты сайт не удаляет — права DELETE у его роли нет."""
+    if not sql("select 1 from pg_roles where rolname = 'savdex_django'"):
+        pytest.skip("нет роли savdex_django")
+
+    for таблица in ("market_sellers", "market_products", "market_product_variants"):
+        assert sql("select has_table_privilege('savdex_django', %s, 'DELETE')", [таблица]) == [
+            (False,)
+        ], таблица
+
+    # Корзину и фото сайт удаляет штатно
+    for таблица in ("market_cart_items", "market_product_images", "market_product_values"):
+        assert sql("select has_table_privilege('savdex_django', %s, 'DELETE')", [таблица]) == [
+            (True,)
+        ], таблица
 
 
 @нужна_база
@@ -782,6 +1157,53 @@ def test_фото_товара(сайт, витрина):
     finally:
         for файл in файлы:
             файл.unlink(missing_ok=True)
+
+
+@нужна_база
+def test_фото_не_больше_предела(сайт, витрина):
+    """Одиннадцатое фото — 422, файлы на диске не остаются; не картинка — 422."""
+    from pathlib import Path
+
+    from savdex.market.products import MAX_IMAGES
+
+    from .pg_admin import КОРЕНЬ
+    from .test_web_company_profile_actions import multipart, картинка
+
+    компания = _компания("Foto Limit", "foto-limit")
+    владелец = _человек("owner@foto-limit.uz", компания)
+    товар, _ = _товар(
+        _продавец(компания), "textile", "Ковёр", "kovyor", status="draft", price=500_000
+    )
+    for номер in range(MAX_IMAGES):
+        sql(
+            "insert into market_product_images (product_id, path, thumb_path, sort) "
+            "values (%s, %s, %s, %s)",
+            [
+                товар,
+                f"market/products/x{номер}.webp",
+                f"market/products/thumbs/x{номер}.webp",
+                номер,
+            ],
+        )
+    диск = Path(КОРЕНЬ) / "storage/app/public/market/products"
+    было = set(диск.rglob("*.webp")) if диск.exists() else set()
+
+    тело, тип = multipart({"file": ("photo.png", картинка(800, 800))})
+    ответ = отправить(
+        сайт,
+        f"/market/api/me/products/{товар}/images",
+        lambda: None,
+        uid=владелец,
+        body=тело,
+        content_type=тип,
+        headers={**JSON, "X-XSRF-TOKEN": xsrf()},
+    )["ответ"]
+
+    assert ответ["status"] == 422, ответ["body"]
+    assert sql("select count(*) from market_product_images where product_id = %s", [товар]) == [
+        (MAX_IMAGES,)
+    ]
+    assert (set(диск.rglob("*.webp")) if диск.exists() else set()) == было
 
 
 @нужна_база
