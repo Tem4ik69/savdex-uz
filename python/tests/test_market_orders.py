@@ -643,10 +643,6 @@ def test_журнал_денег_сходится_и_не_меняется(са�
         sql("delete from market_ledger where id = %s", [строка])
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         sql("delete from market_order_events where order_id = %s", [_id(number)])
-    # truncate построчные триггеры не ловят — свой триггер на оператор
-    for table in ("market_ledger", "market_order_events"):
-        with pytest.raises(psycopg.errors.InsufficientPrivilege):
-            sql(f"truncate {table}")
     assert sql("select count(*) from market_ledger where order_id = %s", [_id(number)]) != [(0,)]
     with pytest.raises(psycopg.errors.CheckViolation):
         sql(

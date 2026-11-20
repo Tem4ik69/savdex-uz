@@ -161,9 +161,9 @@ create index market_order_events_order_index on market_order_events (order_id, i
 -- Двойная запись: каждое движение — группа строк (entry_group) с суммой
 -- ноль; amount — тийины со знаком (плюс — дебет, минус — кредит). Счета
 -- (account) — savdex/market/orders.py, ACCOUNTS. Только дописывается:
--- у роли приложения нет update, delete и truncate, а триггеры запрещают
--- их всем, и владельцу базы (построчный — update и delete, на оператор —
--- truncate).
+-- у роли приложения нет update, delete и truncate; update и delete
+-- построчный триггер запрещает и владельцу базы. Truncate владельцу
+-- оставлен: им чистят базу проверки и стенды, у сайта его нет.
 -- Ошибочную запись исправляет новая группа с обратными знаками.
 create table market_ledger (
     id bigserial primary key,
@@ -206,8 +206,8 @@ create constraint trigger market_ledger_balanced
     for each row execute function market_ledger_balanced();
 
 -- Журнал денег и история статусов — только дописываются, даже владельцу:
--- update и delete — построчным триггером, truncate (его построчные
--- триггеры не ловят) — триггером на оператор
+-- update и delete — построчным триггером. Truncate (очистка всей базы
+-- проверками и стендами) у роли сайта отозван правами ниже
 create or replace function market_append_only() returns trigger
 language plpgsql as $$
 begin
@@ -222,14 +222,6 @@ create trigger market_ledger_append_only
 create trigger market_order_events_append_only
     before update or delete on market_order_events
     for each row execute function market_append_only();
-
-create trigger market_ledger_no_truncate
-    before truncate on market_ledger
-    for each statement execute function market_append_only();
-
-create trigger market_order_events_no_truncate
-    before truncate on market_order_events
-    for each statement execute function market_append_only();
 
 -- ── Права роли Django ──────────────────────────────────────────────
 -- Заказы, части, позиции и пункты — читать, заводить, менять статус;
