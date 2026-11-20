@@ -195,9 +195,11 @@ def check_common(day: date, moment: datetime | None = None) -> Report:
 
     for order in rows(
         "select o.number from market_orders o where o.status = %s and o.cancelled_at < %s "
-        # Проверенный сотрудником (base.acknowledge) — не расхождение
+        # Проверенный сотрудником (base.acknowledge) — не расхождение. Только
+        # отметка на самой оплате возврата (paid): проверенный отказ другой
+        # оплаты того же заказа зависший возврат не глушит
         "and not exists (select 1 from market_payments p where p.order_id = o.id "
-        "and p.rejection_checked_at is not null) order by o.id",
+        "and p.status = 'paid' and p.rejection_checked_at is not null) order by o.id",
         [orders.REFUND_PENDING, cutoff],
     ):
         report.problems.append(f"{order['number']} ждёт возврата дольше {hours} ч")
