@@ -302,10 +302,13 @@ def _get(сайт: str, path: str, headers: dict[str, str] | None = None) -> dic
 
 
 def _посетитель() -> dict[str, str]:
-    """Свой адрес гостя (документационная сеть IPv6): отсев повторных просмотров — только наш."""
-    return {
-        "X-Forwarded-For": f"2001:db8::{secrets.randbelow(0xFFFF):x}:{secrets.randbelow(0xFFFF):x}"
-    }
+    """
+    Свой гость (документационная сеть IPv6): отсев повторных просмотров —
+    только наш. Гость IPv6 — это сеть /64, поэтому случайны первые 64 бита.
+    """
+    сеть = f"{secrets.randbelow(0xFFFF):x}:{secrets.randbelow(0xFFFF):x}"
+
+    return {"X-Forwarded-For": f"2001:db8:{сеть}::1"}
 
 
 def _премодерация(n: int) -> None:
