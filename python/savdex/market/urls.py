@@ -15,7 +15,7 @@ from typing import Any
 from django.http import HttpRequest, HttpResponse
 from django.urls import URLPattern, re_path
 
-from savdex.market import api
+from savdex.market import api, oneid
 
 _P = r"^(?:(?:uz|en|zh|tr)/)?market/api/"
 _ID = r"[0-9]{1,18}"
@@ -36,6 +36,9 @@ urlpatterns = [
     ),
     re_path(_P + r"me/seller$", api.seller_state, name="market.api.me.seller"),
     re_path(_P + r"me/seller/apply$", api.seller_apply, name="market.api.me.seller.apply"),
+    re_path(_P + r"oneid/start$", api.oneid_start, name="market.api.oneid.start"),
+    # Без языкового префикса: адрес возврата у OneID — один, из настроек
+    re_path(r"^market/api/oneid/callback$", oneid.callback, name="market.api.oneid.callback"),
     re_path(_P + r"me/products$", api.my_products, name="market.api.me.products"),
     re_path(
         _P + r"me/products/create$", api.my_product_create, name="market.api.me.products.create"

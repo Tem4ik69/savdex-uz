@@ -48,6 +48,14 @@ def now() -> str:
     return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def unchanged_since(seen: str | None) -> tuple[str, list[Any]]:
+    """
+    Условие к UPDATE решения модератора: запись не менялась с тех пор, как
+    он её видел (seen — её updated_at видом now()). None — без условия.
+    """
+    return (" and updated_at = %s", [seen]) if seen is not None else ("", [])
+
+
 #: Типы json и jsonb в PostgreSQL: Django отдаёт их строкой (её разбирает
 #: JSONField), запросам маркетплейса нужны словари и списки
 _JSON_TYPES = frozenset({114, 3802})
