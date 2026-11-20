@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import io
+import struct
+import zlib
 
 import pytest
 from PIL import Image
@@ -69,6 +71,49 @@ def test_бомба_распаковки_отвергается_до_распа�
     """PNG 9000×9000 сплошной заливкой весит килобайты — но 81 Мп."""
     with pytest.raises(images.NotAnImageError, match="Слишком большое"):
         images.process(_picture((9000, 9000), "PNG", "L"), images.BANNER)
+
+
+def _png_header(width: int, height: int) -> io.BytesIO:
+    """
+    PNG, у которого есть только заголовок с размерами: Pillow читает их при
+    открытии, не распаковывая растр, — так проверяется отказ по размеру без
+    гигабайт в памяти проверки.
+    """
+
+    def chunk(kind: bytes, data: bytes) -> bytes:
+        return (
+            struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data))
+        )
+
+    ihdr = struct.pack(">IIBBBBB", width, height, 1, 0, 0, 0, 0)
+
+    return io.BytesIO(
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", ihdr)
+        + chunk(b"IDAT", zlib.compress(b""))
+        + chunk(b"IEND", b"")
+    )
+
+
+def test_огромный_заголовок_422_а_не_500():
+    """
+    20000×20000 — больше 2 × Image.MAX_IMAGE_PIXELS: Pillow сам бросает
+    DecompressionBombError ещё при открытии — это отказ формы, а не 500.
+    """
+    with pytest.raises(images.NotAnImageError, match="Слишком большое"):
+        images.process(_png_header(20_000, 20_000), images.BANNER)
+
+
+def test_свой_предел_пикселей_у_рамки():
+    """6000×5000 = 30 Мп: общий предел (48 Мп) пропускает, рамка с 25 Мп — нет."""
+    строгая = images.Frame(1600, 1600, 82, max_pixels=25_000_000)
+
+    with pytest.raises(images.NotAnImageError, match="Слишком большое"):
+        images.process(_png_header(6000, 5000), строгая)
+
+    # Общей рамке размер подходит — отказ уже по содержимому (растра нет)
+    with pytest.raises(images.NotAnImageError, match="не является"):
+        images.process(_png_header(6000, 5000), images.BANNER)
 
 
 def test_запись_и_удаление(settings, tmp_path):

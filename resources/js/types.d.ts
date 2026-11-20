@@ -136,9 +136,9 @@ export interface SharedProps extends InertiaPageProps {
     /** Маркетплейс открыт на этом сервере: на боевом до запуска — false, и пункта в шапке нет. */
     market?: boolean;
     /**
-     * Адреса маркетплейса здесь: base — с чего начинаются его страницы («» на его
-     * своём адресе, «/market» на основном), site — основной сайт, market — адрес
-     * маркетплейса или null, пока своего адреса нет.
+     * Адреса маркетплейса (savdex/market/domain.py): base — начало адресов его
+     * страниц здесь («» на его своём адресе, «/market» на основном), site —
+     * основной сайт, market — адрес маркетплейса или null.
      */
     marketLinks?: { base: string; site: string | null; market: string | null };
     /**

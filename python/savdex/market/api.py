@@ -2,7 +2,7 @@
 Адреса /market/api/… — JSON для страниц маркетплейса (ветка maksud).
 
 Витрина — GET без входа: категории, каталог, подсказки, товар, продавец.
-Корзина, избранное, «Стать продавцом» и «Мои товары» — только со входом:
+Корзина, избранное, заказы, «Стать продавцом» и «Мои товары» — только со входом:
 гость получает 401 и адрес входа (``login``), а адрес страницы, с которой
 он пришёл, запоминается — после входа он вернётся к товару (ТЗ, раздел 4).
 
@@ -23,9 +23,11 @@ from typing import Any
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
+from savdex.audit import client_ip
 from savdex.market import banners as market_banners
-from savdex.market import cart, catalog, products, sellers
+from savdex.market import cart, catalog, oneid, orders, products, sellers
 from savdex.market.common import t
+from savdex.web import session, throttle
 from savdex.web.actions import form
 from savdex.web.cabinet import _authenticate, company_of
 from savdex.web.forms import action, input_of
@@ -83,6 +85,59 @@ def _get(view: Callable[..., HttpResponse]) -> Callable[..., HttpResponse]:
     return wrapped
 
 
+def _limited(ctx: Context, name: str, per_minute: int) -> JsonResponse | None:
+    """
+    Ограничение частоты витрины: счётчик на посетителя (номер или IP) и
+    адрес — поиск и каталог дорогие, без предела их можно заваливать.
+    """
+    from savdex import laravel_cache
+
+    if not laravel_cache.is_file_store():
+        return None
+
+    import time
+
+    key = f"market-{name}|{throttle.signature(ctx)}"
+    # Гость считается по адресу, а у мобильных операторов один адрес — на
+    # многих абонентов (CGNAT): гостю предел втрое выше, чем вошедшему
+    limit = per_minute if ctx.visitor.user_id is not None else per_minute * 3
+
+    if throttle.too_many(key, limit):
+        response = _json({"message": "Too many requests"}, 429)
+        until = laravel_cache._to_int(laravel_cache.get(f"{key}:timer") or 0)
+        response["Retry-After"] = str(max(1, until - int(time.time())))
+
+        return response
+
+    throttle.hit(key)
+
+    return None
+
+
+def _visitor_net(request: HttpRequest) -> str | None:
+    """
+    Гость для счётчика просмотров: IPv4 — адрес, IPv6 — сеть /64. У одного
+    абонента IPv6 — целая /64, и по адресу каждый запрос был бы «новым
+    гостем»: накрутка и бесконечные пометки в кэше.
+    """
+    import ipaddress
+
+    raw = client_ip(request)
+
+    if not raw:
+        return None
+
+    try:
+        address = ipaddress.ip_address(raw)
+    except ValueError:
+        return raw
+
+    if address.version == 6:
+        return str(ipaddress.ip_network(f"{address}/64", strict=False))
+
+    return str(address)
+
+
 def _id(value: Any) -> int | None:  # noqa: ANN401
     try:
         number = int(str(value))
@@ -112,6 +167,9 @@ def listing(request: HttpRequest) -> HttpResponse:
     if isinstance(ctx, HttpResponse):
         return ctx
 
+    if (refused := _limited(ctx, "listing", 120)) is not None:
+        return refused
+
     user = ctx.user
     query = catalog.Query.parse(request.GET)
 
@@ -125,6 +183,9 @@ def suggest(request: HttpRequest) -> HttpResponse:
     if isinstance(ctx, HttpResponse):
         return ctx
 
+    if (refused := _limited(ctx, "suggest", 120)) is not None:
+        return refused
+
     return _json(catalog.suggest(str(request.GET.get("q", ""))[:100], ctx.locale))
 
 
@@ -135,13 +196,18 @@ def product(request: HttpRequest, slug: str) -> HttpResponse:
     if isinstance(ctx, HttpResponse):
         return ctx
 
+    if (refused := _limited(ctx, "product", 120)) is not None:
+        return refused
+
     user = ctx.user
     found = catalog.product(slug, ctx.locale, user["id"] if user else None)
 
     if found is None:
         return _message(ctx, "not_found", 404)
 
-    catalog.seen(found["id"])
+    # HEAD — не просмотр: так ходят проверки ссылок и роботы
+    if request.method == "GET":
+        catalog.seen(found["id"], f"user:{user['id']}" if user else _visitor_net(request))
 
     return _json({"product": found})
 
@@ -152,6 +218,9 @@ def seller_page(request: HttpRequest, slug: str) -> HttpResponse:
 
     if isinstance(ctx, HttpResponse):
         return ctx
+
+    if (refused := _limited(ctx, "seller_page", 120)) is not None:
+        return refused
 
     user = ctx.user
     found = catalog.seller(
@@ -286,6 +355,125 @@ def favorites(request: HttpRequest) -> HttpResponse:
     return _json({"ids": cart.favorite_ids(user["id"])})
 
 
+# ── Заказ (savdex/market/orders.py) ─────────────────────────────────
+
+
+def _order_refused(ctx: Context, refused: orders.OrderRefused, user_id: int) -> JsonResponse:
+    """Отказ оформления или отмены: 422 — с полем, 409 — со свежей корзиной."""
+    message = t(refused.key, ctx.locale, **refused.replace)
+    body: dict[str, Any] = {"message": message}
+
+    if refused.field:
+        body["errors"] = {refused.field: [message]}
+
+    if refused.fresh_cart:
+        body["cart"] = cart.summary(user_id)
+
+    return _json(body, refused.status)
+
+
+@_get
+def pickup_points(request: HttpRequest) -> HttpResponse:
+    """Пункты выдачи для оформления (пока Ташкент)."""
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    return _json({"pickupPoints": orders.pickup_points()})
+
+
+@form()
+def checkout(request: HttpRequest) -> HttpResponse:
+    """
+    POST {pickupPoint, paymentMethod: card | cash, expectedTotal}: оформить
+    заказ из корзины. Сумма не совпала с серверной или товар кончился —
+    409 и свежая корзина (``cart``).
+    """
+    ctx = action(request, auth=False, throttle=10, throttle_prefix="market-checkout")
+    user = ctx.user
+
+    if user is None:
+        return _guest(ctx)
+
+    user_id = int(user["id"])
+
+    try:
+        number = orders.checkout(user_id, input_of(request))
+    except orders.OrderRefused as refused:
+        return _order_refused(ctx, refused, user_id)
+
+    return _json(
+        {
+            "message": t("order.created", ctx.locale),
+            "order": orders.detail(user_id, number, ctx.locale),
+        },
+        201,
+    )
+
+
+@_get
+def my_orders(request: HttpRequest) -> HttpResponse:
+    """Заказы покупателя — только свои."""
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    user = ctx.user
+
+    if user is None:
+        return _guest(ctx)
+
+    return _json({"orders": orders.mine(int(user["id"]), ctx.locale)})
+
+
+@_get
+def order(request: HttpRequest, number: str) -> HttpResponse:
+    """Заказ по номеру — только свой; чужой и несуществующий — одинаково 404."""
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    user = ctx.user
+
+    if user is None:
+        return _guest(ctx)
+
+    found = orders.detail(int(user["id"]), number, ctx.locale)
+
+    if found is None:
+        return _message(ctx, "order.not_found", 404)
+
+    return _json({"order": found})
+
+
+@form()
+def order_cancel(request: HttpRequest, number: str) -> HttpResponse:
+    """POST {reason?}: отменить свой заказ — только до отгрузки со склада."""
+    ctx = action(request, auth=False, throttle=10, throttle_prefix="market-order")
+    user = ctx.user
+
+    if user is None:
+        return _guest(ctx)
+
+    user_id = int(user["id"])
+    reason = str(input_of(request).get("reason") or "").strip()[:500] or None
+
+    try:
+        status = orders.cancel(user_id, number, reason)
+    except orders.OrderRefused as refused:
+        return _order_refused(ctx, refused, user_id)
+
+    return _json(
+        {
+            "message": t(f"order.{status}", ctx.locale),
+            "order": orders.detail(user_id, number, ctx.locale),
+        }
+    )
+
+
 # ── «Стать продавцом» ───────────────────────────────────────────────
 
 
@@ -337,6 +525,53 @@ def seller_apply(request: HttpRequest) -> HttpResponse:
     return _json({"message": t(key, ctx.locale), "seller": sellers.state(user, company)})
 
 
+@form()
+def oneid_start(request: HttpRequest) -> HttpResponse:
+    """
+    POST {offer: true}: подтверждение продавца через OneID — ответ
+    {redirect: адрес OneID}; state — в сессии (savdex/market/oneid.py).
+    """
+    ctx = action(
+        request, auth=False, throttle=10, throttle_minutes=60, throttle_prefix="market-oneid"
+    )
+    user = ctx.user
+
+    if user is None:
+        return _guest(ctx)
+
+    cfg = oneid.config()
+    started = session.start(request)
+
+    if cfg is None or started is None:
+        return _message(ctx, "oneid.off", 409)
+
+    if input_of(request).get("offer") not in (True, 1, "1", "true", "on", "yes"):
+        return _json(
+            {
+                "message": t("seller.need_offer", ctx.locale),
+                "errors": {"offer": [t("seller.need_offer", ctx.locale)]},
+            },
+            422,
+        )
+
+    company = company_of(ctx)
+    need = sellers.checks(user, company)
+
+    for key in ("company", "owner", "tin"):
+        if not need[key]:
+            return _message(ctx, f"seller.need_{key}", 422)
+
+    assert company is not None
+    seller = sellers.of_company(company["id"])
+
+    if seller is not None and seller["status"] == "blocked":
+        return _message(ctx, "seller.blocked", 422)
+
+    state = oneid.issue_state(started[0], int(user["id"]), int(company["id"]))
+
+    return _json({"redirect": oneid.authorize_url(cfg, state)})
+
+
 # ── «Мои товары» (кабинет продавца) ─────────────────────────────────
 
 
@@ -370,6 +605,27 @@ def my_products(request: HttpRequest) -> HttpResponse:
     assert seller is not None
 
     return _json({"products": products.mine(seller), "needsReview": products.needs_review(seller)})
+
+
+@_get
+def my_seller_orders(request: HttpRequest) -> HttpResponse:
+    """
+    Заказы продавца — только его части; о покупателе — имя и номер заказа,
+    без телефона и почты (ТЗ, раздел 10).
+    """
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    seller, refused = _seller_ctx(ctx)
+
+    if refused is not None:
+        return refused
+
+    assert seller is not None
+
+    return _json({"orders": orders.seller_orders(int(seller["id"]), ctx.locale)})
 
 
 @form()
@@ -465,8 +721,8 @@ def my_product_submit(request: HttpRequest, product_id: str) -> HttpResponse:
         if gaps == ["not_found"]:
             return _message(ctx, "not_found", 404)
 
-        if gaps == ["product.not_draft"]:
-            return _message(ctx, "product.not_draft", 422)
+        if gaps in (["product.not_draft"], ["product.locked"]):
+            return _message(ctx, gaps[0], 422)
 
         fields = ", ".join(t(f"product.field.{gap}", ctx.locale) for gap in gaps)
 

@@ -300,7 +300,15 @@ $DOMAIN {
 	request_header -CF-Connecting-IP
 	request_header -True-Client-IP
 
-	reverse_proxy preview-app:10000
+	# Боевая кука входа (savdex-production-session) ставится на .savdex.uz —
+	# браузер шлёт её и сюда. Код здесь — тестовый и невлитые ветки: куку
+	# срезаем на входе, чтобы приложение её не видело; а ставить куку на
+	# весь .savdex.uz (подбросить боевому сайту) ответам отсюда нельзя —
+	# Domain вычёркивается. Совсем закроет отдельный домен тестового
+	reverse_proxy preview-app:10000 {
+		header_up Cookie "(?:^|;\s*)savdex-production-session=[^;]*" ""
+		header_down Set-Cookie "(?i);\s*domain=\.?savdex\.uz(?:;|$)" ";"
+	}
 
 	log {
 		output stdout

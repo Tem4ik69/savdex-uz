@@ -8,12 +8,19 @@
 
 from __future__ import annotations
 
-from django.urls import re_path
+from collections.abc import Callable
+from functools import wraps
+from typing import Any
 
-from savdex.market import api
+from django.http import HttpRequest, HttpResponse
+from django.urls import URLPattern, re_path
+
+from savdex.market import api, oneid
 
 _P = r"^(?:(?:uz|en|zh|tr)/)?market/api/"
 _ID = r"[0-9]{1,18}"
+#: Номер заказа — случайный код (savdex/market/orders.py)
+_NUMBER = r"[0-9A-Za-z]{8,16}"
 
 urlpatterns = [
     re_path(_P + r"categories$", api.categories, name="market.api.categories"),
@@ -29,8 +36,21 @@ urlpatterns = [
     re_path(
         _P + rf"favorites/(?P<product_id>{_ID})$", api.favorite, name="market.api.favorites.toggle"
     ),
+    re_path(_P + r"pickup-points$", api.pickup_points, name="market.api.pickup_points"),
+    re_path(_P + r"checkout$", api.checkout, name="market.api.checkout"),
+    re_path(_P + r"orders$", api.my_orders, name="market.api.orders"),
+    re_path(_P + rf"orders/(?P<number>{_NUMBER})$", api.order, name="market.api.order"),
+    re_path(
+        _P + rf"orders/(?P<number>{_NUMBER})/cancel$",
+        api.order_cancel,
+        name="market.api.order.cancel",
+    ),
+    re_path(_P + r"me/orders$", api.my_seller_orders, name="market.api.me.orders"),
     re_path(_P + r"me/seller$", api.seller_state, name="market.api.me.seller"),
     re_path(_P + r"me/seller/apply$", api.seller_apply, name="market.api.me.seller.apply"),
+    re_path(_P + r"oneid/start$", api.oneid_start, name="market.api.oneid.start"),
+    # Без языкового префикса: адрес возврата у OneID — один, из настроек
+    re_path(r"^market/api/oneid/callback$", oneid.callback, name="market.api.oneid.callback"),
     re_path(_P + r"me/products$", api.my_products, name="market.api.me.products"),
     re_path(
         _P + r"me/products/create$", api.my_product_create, name="market.api.me.products.create"
@@ -64,3 +84,28 @@ urlpatterns = [
         name="market.api.me.product.images.delete",
     ),
 ]
+
+
+def _open_only(view: Callable[..., HttpResponse]) -> Callable[..., HttpResponse]:
+    """Пока маркетплейс не запущен (savdex.web.shared.market_open) — 404, как у страниц."""
+
+    @wraps(view)
+    def wrapped(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        from savdex.web import fallback
+        from savdex.web.shared import market_open
+
+        if not market_open():
+            return fallback.page_not_found(request)
+
+        return view(request, *args, **kwargs)
+
+    return wrapped
+
+
+def _gated(route: URLPattern) -> URLPattern:
+    return re_path(route.pattern.regex.pattern, _open_only(route.callback), name=route.name)
+
+
+# Каждый адрес — за проверкой «маркетплейс открыт»: и записанные выше, и
+# добавленные позже
+urlpatterns = [_gated(route) for route in urlpatterns]

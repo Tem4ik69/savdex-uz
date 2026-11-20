@@ -49,6 +49,8 @@ class Frame:
     height: int
     quality: int
     lossless: bool = False
+    #: Предел пикселей на входе: у рамки может быть строже общего
+    max_pixels: int = MAX_PIXELS
 
 
 #: ImageStore::BANNER — баннер во всю ширину
@@ -72,7 +74,12 @@ def _random_name() -> str:
 def process(source: IO[bytes], frame: Frame) -> bytes:
     """Прочитать, проверить, вписать в рамку и сжать в WebP."""
     try:
-        image = Image.open(source)
+        # Разбирать только разрешённые форматы: остальные декодеры Pillow
+        # (а их десятки, в том числе редкие и с уязвимостями) файл не видят
+        image = Image.open(source, formats=sorted(FORMATS))
+    except Image.DecompressionBombError as error:
+        # Заголовок обещает больше 2 × MAX_IMAGE_PIXELS — Pillow отказал сам
+        raise NotAnImageError("Слишком большое изображение.") from error
     except (UnidentifiedImageError, OSError) as error:
         raise NotAnImageError("Файл не является изображением.") from error
 
@@ -80,11 +87,13 @@ def process(source: IO[bytes], frame: Frame) -> bytes:
         raise NotAnImageError("Нужна картинка JPG, PNG или WebP.")
 
     # Размер из заголовка — до того, как растр распакован в память
-    if image.width * image.height > MAX_PIXELS:
+    if image.width * image.height > frame.max_pixels:
         raise NotAnImageError("Слишком большое изображение.")
 
     try:
         image.load()
+    except Image.DecompressionBombError as error:
+        raise NotAnImageError("Слишком большое изображение.") from error
     except (OSError, SyntaxError) as error:
         # Заголовок подделан, а внутри не картинка
         raise NotAnImageError("Файл не является изображением.") from error

@@ -5,6 +5,7 @@ import { FlashToast } from '@/components/FlashToast';
 import { SiteFooter } from '@/components/SiteFooter';
 import { Link } from '@/components/ui/Link';
 import { cn } from '@/lib/cn';
+import { localize } from '@/lib/locale';
 import { api } from '@/market/api';
 import { cartCount, startSession, useCart, useCategories, useFavorites, useNotice } from '@/market/store';
 import type { MarketCategory } from '@/market/types';
@@ -37,6 +38,9 @@ export function MarketLayout({
     children: ReactNode;
 }) {
     const { auth, marketLinks } = usePage<SharedProps>().props;
+    // На своём адресе маркетплейса «/» — его главная: на основной сайт —
+    // полным адресом и обычной ссылкой (другой домен, не переход Inertia)
+    const site = marketLinks?.base === '' && marketLinks.site ? marketLinks.site : null;
     const userId = auth.user?.id ?? null;
     const inCart = cartCount(useCart());
     const liked = useFavorites().length;
@@ -59,12 +63,7 @@ export function MarketLayout({
                     </span>
                     <nav aria-label="Служебное меню">
                         <Link href={routes.marketSell}>Стать продавцом</Link>
-                        {/* На своём адресе маркетплейса основной сайт — другой адрес: обычная ссылка */}
-                        {marketLinks?.site && marketLinks.base === '' ? (
-                            <a href={marketLinks.site}>savdex.uz</a>
-                        ) : (
-                            <Link href={routes.home}>savdex.uz</Link>
-                        )}
+                        {site ? <a href={`${site}${localize('/')}`}>savdex.uz</a> : <Link href={routes.home}>savdex.uz</Link>}
                         <Link href={routes.help}>Помощь</Link>
                     </nav>
                 </div>

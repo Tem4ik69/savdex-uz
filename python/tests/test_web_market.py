@@ -96,6 +96,45 @@ def test_на_боевом_демо_не_открывается(сайт):
     assert д["status"] == 404
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/market/api/catalog",
+        "/market/api/categories",
+        "/market/api/me/seller",
+        "/uz/market/api/cart",
+    ],
+)
+def test_на_боевом_json_маркетплейса_закрыт(сайт, path):
+    боевой = {"APP_ENV": "production", "DJANGO_ALLOWED_HOSTS": "*"}
+    д = открыть(сайт, path, headers={"Accept": "application/json"}, env=боевой)
+
+    assert д["status"] == 404
+
+
+@pytest.mark.parametrize(
+    ("окружение", "открыт"),
+    [
+        ("local", True),
+        ("testing", True),
+        ("staging", True),
+        (" Staging ", True),
+        ("production", False),
+        ("prod", False),
+        ("Production", False),
+        ("", False),
+    ],
+)
+def test_маркетплейс_открыт_только_явно(monkeypatch, окружение, открыт):
+    from savdex import demo
+    from savdex.web.shared import market_open
+
+    monkeypatch.setenv("APP_ENV", окружение)
+
+    assert market_open() is открыт
+    assert (demo.refused() is None) is открыт
+
+
 def test_пункт_в_шапке_есть_везде_кроме_боевого(сайт):
     assert страница(открыть(сайт, "/about")["body"])["props"]["market"] is True
 

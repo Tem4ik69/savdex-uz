@@ -25,6 +25,12 @@ TIYIN = 100
 #: Самая большая цена одной штуки — 10 млрд сумов: больше — опечатка
 MAX_PRICE_SOM = 10_000_000_000
 
+#: Самая маленькая цена товара — 100 сумов: дешевле — опечатка или
+#: приманка «за 1 сум» в сортировке «Сначала дешёвые». Проверяет форма
+#: товара (products.clean_variants), а не tiyin: фильтр каталога «цена от»
+#: может быть и меньше
+MIN_PRICE_SOM = 100
+
 #: Таблицы маркетплейса — все пишет только Django (savdex/guards.py)
 TABLES = (
     "market_categories",
@@ -36,6 +42,12 @@ TABLES = (
     "market_product_values",
     "market_favorites",
     "market_cart_items",
+    "market_pickup_points",
+    "market_orders",
+    "market_order_parts",
+    "market_order_items",
+    "market_order_events",
+    "market_ledger",
 )
 
 #: Настройка «сколько первых товаров нового продавца — через модерацию»
@@ -46,6 +58,14 @@ PREMODERATED_DEFAULT = 5
 def now() -> str:
     """Время в UTC строкой, как пишет остальная площадка."""
     return datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def unchanged_since(seen: str | None) -> tuple[str, list[Any]]:
+    """
+    Условие к UPDATE решения модератора: запись не менялась с тех пор, как
+    он её видел (seen — её updated_at видом now()). None — без условия.
+    """
+    return (" and updated_at = %s", [seen]) if seen is not None else ("", [])
 
 
 #: Типы json и jsonb в PostgreSQL: Django отдаёт их строкой (её разбирает
