@@ -34,6 +34,9 @@ export default function MarketCheckout() {
     const [name, setName] = useState(auth.user?.name ?? '');
     const [phone, setPhone] = useState('');
     const [point, setPoint] = useState(POINTS[0].id);
+    // Карта — сторонний сервер (OSM, за рубежом): грузим только по просьбе
+    // покупателя, без Referer и в песочнице — выбор пункта сам не уходит
+    const [showMap, setShowMap] = useState(false);
     const [payment, setPayment] = useState<'card' | 'cash'>('card');
     const [tried, setTried] = useState(false);
 
@@ -153,7 +156,20 @@ export default function MarketCheckout() {
                             ))}
                         </div>
                         <div className="mk-map">
-                            <iframe key={chosen.id} title={`Карта: ${chosen.name}`} src={mapSrc(chosen.lat, chosen.lng)} loading="lazy" />
+                            {showMap ? (
+                                <iframe
+                                    key={chosen.id}
+                                    title={`Карта: ${chosen.name}`}
+                                    src={mapSrc(chosen.lat, chosen.lng)}
+                                    loading="lazy"
+                                    referrerPolicy="no-referrer"
+                                    sandbox="allow-scripts allow-same-origin"
+                                />
+                            ) : (
+                                <button type="button" className="mk-btn mk-btn--ghost" onClick={() => setShowMap(true)}>
+                                    Показать на карте
+                                </button>
+                            )}
                             <p>
                                 {chosen.name} · {chosen.address}. Доставки до двери пока нет — заказ забирают в пункте.
                             </p>
