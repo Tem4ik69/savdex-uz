@@ -133,6 +133,22 @@ def _resolves_to_market(path: str) -> bool:
     return (match.url_name or "").startswith("market")
 
 
+def _away(request: HttpRequest, url: str) -> HttpResponse:
+    """
+    Переход на другой адрес (основной ↔ маркетплейс). Ссылку Inertia
+    (запрос с X-Inertia) браузер не пустит фоновым запросом на чужой домен —
+    клик молча ничего не делает. Inertia ждёт для этого 409 с
+    X-Inertia-Location и сам открывает адрес обычным переходом.
+    """
+    if request.headers.get("X-Inertia"):
+        response = HttpResponse("", status=409)
+        response["X-Inertia-Location"] = url
+
+        return response
+
+    return HttpResponseRedirect(url)
+
+
 class MarketHostMiddleware:
     """Адрес маркетплейса: страницы с корня, остальное — на основной адрес."""
 
@@ -177,7 +193,7 @@ class MarketHostMiddleware:
                 site = os.environ.get("APP_URL", "").rstrip("/")
 
                 if site:
-                    return HttpResponseRedirect(f"{site}{request.path}{_query(request)}")
+                    return _away(request, f"{site}{request.path}{_query(request)}")
 
             return self.get_response(request)
 
@@ -188,7 +204,7 @@ class MarketHostMiddleware:
             if market_open():
                 rest = path[len(PREFIX) :] or ("" if lang else "/")
 
-                return HttpResponseRedirect(f"{_scheme()}://{host}{lang}{rest}{_query(request)}")
+                return _away(request, f"{_scheme()}://{host}{lang}{rest}{_query(request)}")
 
         return self.get_response(request)
 
