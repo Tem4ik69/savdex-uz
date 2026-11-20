@@ -713,7 +713,17 @@ def shared(ctx: Context) -> dict[str, Any]:
         # Маркетплейс пока демо: на боевом закрыт (savdex/web/market.py),
         # и ссылки на него в шапке нет
         "market": market_open(),
+        # Адреса маркетплейса здесь: base — «» на его своём адресе
+        # (MARKET_DOMAIN, страницы с корня), «/market» на основном;
+        # site — основной сайт, market — адрес маркетплейса или null
+        "marketLinks": _market_links(ctx),
     }
+
+
+def _market_links(ctx: Context) -> dict[str, str | None]:
+    from savdex.market.domain import links
+
+    return links(ctx.request)
 
 
 #: Язык словаря, который уже у браузера (resources/js/app.tsx)

@@ -474,7 +474,14 @@ def _set_cookie(
     http_only: bool,
     session_cookie: bool,
 ) -> None:
-    """Кука, как её собирает Symfony Cookie и шифрует EncryptCookies."""
+    """
+    Кука, как её собирает Symfony Cookie и шифрует EncryptCookies.
+
+    Домен (общий для сайта и маркетплейса) — только у куки сессии.
+    XSRF-TOKEN остаётся куки своего адреса: токен в ней тот же, сессия
+    общая, а с одним именем на двух окружениях (боевой .savdex.uz и
+    тестовый) скрипт страницы взял бы чужой токен — и форма получила бы 419.
+    """
     secure = _env_bool("SESSION_SECURE_COOKIE", None)
 
     if secure is None:
@@ -490,7 +497,7 @@ def _set_cookie(
         quote(laravel_session.encrypt_cookie(name, value, key), safe=""),
         max_age=None if (session_cookie and expire_on_close) else laravel_session.lifetime(),
         path=_env_str("SESSION_PATH", "/") or "/",
-        domain=_env_str("SESSION_DOMAIN", None) or None,
+        domain=laravel_session.session_domain() if session_cookie else None,
         secure=secure,
         httponly=http_only,
         samesite=_same_site(same_site),

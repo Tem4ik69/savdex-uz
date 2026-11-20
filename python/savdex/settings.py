@@ -110,6 +110,10 @@ def _allowed_hosts() -> list[str]:
     if app := urlsplit(os.environ.get("APP_URL", "")).hostname:
         hosts.append(app)
 
+    # Свой адрес маркетплейса (savdex/market/domain.py)
+    if market := (os.environ.get("MARKET_DOMAIN") or "").strip().lower():
+        hosts.append(urlsplit(market if "//" in market else f"//{market}").hostname or market)
+
     if microsites := (os.environ.get("MICROSITE_DOMAIN") or "").strip().lower():
         hosts.append("." + microsites)
 
@@ -263,6 +267,9 @@ MIDDLEWARE = [
     "savdex.web.slowdb.SlowDatabaseMiddleware",
     # Служебный адрес Render — на свой домен (CanonicalHost, этап 8)
     "savdex.web.fallback.CanonicalHostMiddleware",
+    # Маркетплейс на своём адресе (MARKET_DOMAIN): страницы с корня,
+    # прочее — на основной адрес (savdex/market/domain.py)
+    "savdex.market.domain.MarketHostMiddleware",
     # POST с _method — PATCH или DELETE, как у Laravel (этап 4, шаг 62)
     "savdex.web.forms.MethodOverrideMiddleware",
     # Стили и скрипты админки — из самого Django, без отдельного сервера
