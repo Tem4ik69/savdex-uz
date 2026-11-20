@@ -9,6 +9,7 @@ import { resolvePage } from '@/lib/pages';
 import { localize, setLocale } from '@/lib/locale';
 import { setTranslations, translationsLocale } from '@/lib/i18n';
 import { startAnalytics } from '@/lib/analytics';
+import { setMarketBase } from '@/routes';
 
 const appName = import.meta.env.VITE_APP_NAME ?? 'SAVDEX';
 
@@ -29,9 +30,10 @@ polyfillCountryFlagEmojis('Twemoji Country Flags', twemojiFlagsFont);
  * и адрес следующего перехода должен собираться уже по новому.
  */
 router.on('navigate', (event) => {
-    const locale = (event.detail.page.props as { locale?: string }).locale;
+    const { locale, marketLinks } = event.detail.page.props as { locale?: string; marketLinks?: { base?: string } };
 
     if (typeof locale === 'string') setLocale(locale);
+    setMarketBase(marketLinks?.base);
 });
 
 /** Просмотры страниц и события продукта — GA4 (lib/analytics.ts) */
@@ -71,9 +73,11 @@ void createInertiaApp({
         const shared = props.initialPage.props as {
             locale?: string;
             translations?: Record<string, unknown> | null;
+            marketLinks?: { base?: string };
         };
 
         if (typeof shared.locale === 'string') setLocale(shared.locale);
+        setMarketBase(shared.marketLinks?.base);
         if (shared.translations) setTranslations(shared.translations, shared.locale ?? 'ru');
 
         // SSR отдаёт готовую разметку — её нужно гидрировать, а не рендерить

@@ -1,27 +1,32 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { MarketCard } from '@/components/market/MarketCard';
+import { MarketCard, MarketGridSkeleton } from '@/components/market/MarketCard';
+import { MarketPhoto } from '@/components/market/MarketPhoto';
 import { Link } from '@/components/ui/Link';
 import { MarketLayout } from '@/layouts/MarketLayout';
-import { BANNERS, CATEGORIES, COUPONS, discount, PRODUCTS, STORIES, type MarketProduct } from '@/market/demo';
+import { api, useApi } from '@/market/api';
+import { BANNERS, COUPONS, STORIES, type ServerBanner } from '@/market/content';
 import { sum } from '@/market/format';
+import { useCategories } from '@/market/store';
+import type { MarketListing, MarketProduct } from '@/market/types';
 import { routes } from '@/routes';
 
 const catalog = (query: string) => (query ? `${routes.marketCatalog}?${query}` : routes.marketCatalog);
+const discount = (p: MarketProduct) => (p.oldPrice ? Math.round((1 - p.price / p.oldPrice) * 100) : 0);
 
 /**
  * Главная маркетплейса: подборки-кружки, «Скидки дня» с баннером,
  * купоны, категории, три подборки — «Хиты», «Распродажа», «Новинки» —
  * и лента «Все товары», которая догружается при прокрутке.
- * Места под баннеры из админки — слайдер и (позже) полосы между
- * подборками; «Стать продавцом» — в конце страницы.
+ *
+ * Товары, категории и баннеры — с сервера (/market/api/…). Подборки —
+ * тот же каталог с отбором only=hit | sale | new. Кружки и купоны пока
+ * статичные (market/content.ts): на сервере их нет.
  */
 export default function MarketHome() {
-    const hits = PRODUCTS.filter((p) => p.badge === 'hit');
-    const sale = PRODUCTS.filter((p) => p.oldPrice).sort((a, b) => discount(b) - discount(a));
-    // Новинок с меткой может быть меньше ряда — добираем самыми свежими из остальных
-    const fresh = [...PRODUCTS.filter((p) => p.badge === 'new'), ...PRODUCTS.filter((p) => p.badge !== 'new').sort((a, b) => b.id - a.id)];
-    const deals = sale.slice(0, 3);
+    const categories = useCategories();
+    const sale = useApi<MarketListing>('catalog?only=sale');
+    const deals = [...(sale.data?.items ?? [])].sort((a, b) => discount(b) - discount(a)).slice(0, 3);
 
     return (
         <MarketLayout title="SavdEx Market" tab="home">
@@ -36,18 +41,19 @@ export default function MarketHome() {
                 </Row>
 
                 <div className="mk-deal">
-                    <section className="mk-flash" aria-label="Скидки дня">
+                    <section className="mk-flash" aria-label="Скидки дня" aria-busy={sale.loading}>
                         <h2>
                             Скидки дня <Countdown />
                         </h2>
                         <div className="mk-flash-items">
                             {deals.map((p) => (
                                 <Link key={p.id} href={routes.marketProduct(p.slug)} aria-label={p.title}>
-                                    <span aria-hidden>{p.emoji}</span>
+                                    <MarketPhoto image={p.image} id={p.id} category={p.category} className="mk-flash-photo" />
                                     {sum(p.price)}
                                     <em>−{discount(p)}%</em>
                                 </Link>
                             ))}
+                            {!sale.loading && deals.length === 0 && <p className="mk-flash-empty">Сегодня без скидок дня — загляните завтра.</p>}
                         </div>
                     </section>
                     <Banners />
@@ -55,18 +61,21 @@ export default function MarketHome() {
 
                 <Coupons />
 
-                <Row className="mk-cats" label="Категории">
-                    {CATEGORIES.slice(0, 11).map((c) => (
-                        <Link key={c.slug} href={catalog(`category=${c.slug}`)} className="mk-cat">
-                            <span aria-hidden>{c.emoji}</span>
-                            {c.name}
-                        </Link>
-                    ))}
-                </Row>
+                {categories !== null && categories.length > 0 && (
+                    <Row className="mk-cats" label="Категории">
+                        {categories.slice(0, 11).map((c) => (
+                            <Link key={c.slug} href={catalog(`category=${c.slug}`)} className="mk-cat">
+                                <span aria-hidden>{c.emoji}</span>
+                                {c.name}
+                            </Link>
+                        ))}
+                    </Row>
+                )}
 
-                <Shelf title="Хиты продаж" query="only=hit" products={hits.slice(0, 5)} />
-                <Shelf title="Распродажа" query="only=sale" products={sale.slice(0, 5)} sale />
-                <Shelf title="Новинки" query="only=new" products={fresh.slice(0, 5)} />
+                <Shelf title="Хиты продаж" query="only=hit" />
+                <Strip />
+                <Shelf title="Распродажа" query="only=sale" sale preloaded={sale} />
+                <Shelf title="Новинки" query="only=new" />
 
                 <Feed />
 
@@ -145,60 +154,123 @@ function Row({ className, label, children }: { className: string; label: string;
     );
 }
 
-function Shelf({ title, query, products, sale = false }: { title: string; query: string; products: MarketProduct[]; sale?: boolean }) {
+/**
+ * Подборка главной: первый ряд каталога с отбором. Пустая подборка не
+ * показывается вовсе — заголовок над пустотой хуже, чем его отсутствие;
+ * не загрузилась — тоже: главная остаётся целой без неё.
+ */
+function Shelf({
+    title,
+    query,
+    sale = false,
+    preloaded,
+}: {
+    title: string;
+    query: string;
+    sale?: boolean;
+    /** Уже запрошенный список — чтобы не спрашивать сервер дважды */
+    preloaded?: { data: MarketListing | null; loading: boolean; error: string | null };
+}) {
+    const own = useApi<MarketListing>(preloaded ? null : `catalog?${query}`);
+    const { data, loading } = preloaded ?? own;
+    const products = data?.items.slice(0, 5) ?? [];
+
+    if (!loading && products.length === 0) return null;
+
     return (
-        <section>
+        <section aria-busy={loading}>
             <div className={sale ? 'mk-sh mk-sh--sale' : 'mk-sh'}>
                 <h2>{title}</h2>
                 <Link href={catalog(query)}>Смотреть все →</Link>
             </div>
             <div className="mk-grid mk-shelf">
-                {products.map((p) => (
-                    <MarketCard key={p.id} product={p} />
-                ))}
+                {loading ? <MarketGridSkeleton /> : products.map((p) => <MarketCard key={p.id} product={p} />)}
             </div>
         </section>
     );
 }
 
-/** Сколько карточек приходит за один раз: два ряда на компьютере */
-const FEED_STEP = 10;
+/** Полоса-баннер между подборками — место strip из админки; пусто — ничего. */
+function Strip() {
+    const { data } = useApi<{ banners: ServerBanner[] }>('banners?place=strip');
+    const banner = data?.banners[0];
+
+    if (!banner) return null;
+
+    const picture = (
+        <picture>
+            {banner.imageMobile && <source media="(max-width: 640px)" srcSet={banner.imageMobile} />}
+            <img src={banner.image} alt={banner.alt} loading="lazy" />
+        </picture>
+    );
+
+    return banner.url ? (
+        <a href={banner.url} className="mk-strip-banner">
+            {picture}
+        </a>
+    ) : (
+        <div className="mk-strip-banner">{picture}</div>
+    );
+}
 
 /**
- * Лента «Все товары» в конце главной: догружается сама, когда до её
- * низа докручивают, — и так до последнего товара. Пока сервера нет,
- * следующая порция берётся из демо-каталога с короткой паузой, чтобы
- * было видно состояние загрузки; с сервером здесь будет запрос
- * следующей страницы. Без наблюдателя (старый браузер) — кнопка
+ * Лента «Все товары» в конце главной: следующая страница каталога
+ * запрашивается сама, когда до низа ленты докручивают, — и так до
+ * последней. Пока страница идёт — карточки-заглушки; не пришла —
+ * сообщение и «Повторить». Без наблюдателя (старый браузер) — кнопка
  * «Показать ещё».
  */
 function Feed() {
-    const all = [...PRODUCTS].sort((a, b) => b.sold - a.sold);
-    const [shown, setShown] = useState(FEED_STEP);
+    const [items, setItems] = useState<MarketProduct[]>([]);
+    const [page, setPage] = useState(0);
+    const [pages, setPages] = useState<number | null>(null);
     const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
     const sentinel = useRef<HTMLDivElement>(null);
-    const done = shown >= all.length;
+    const busy = useRef(false);
+    const done = pages !== null && page >= pages;
 
     const more = () => {
+        if (busy.current) return;
+
+        busy.current = true;
         setLoading(true);
-        window.setTimeout(() => {
-            setShown((count) => Math.min(count + FEED_STEP, all.length));
-            setLoading(false);
-        }, 500);
+        setError(null);
+        api<MarketListing>(`catalog?sort=popular&page=${page + 1}`)
+            .then((data) => {
+                // Товар мог сдвинуться между страницами — повторов в ленте не показываем
+                setItems((prev) => [...prev, ...data.items.filter((p) => !prev.some((x) => x.id === p.id))]);
+                setPage(data.page);
+                setPages(data.pages);
+            })
+            .catch((failure: unknown) => setError(failure instanceof Error ? failure.message : 'Не получилось загрузить товары.'))
+            .finally(() => {
+                busy.current = false;
+                setLoading(false);
+            });
     };
+
+    // Первая страница — сразу
+    useEffect(() => {
+        more();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     useEffect(() => {
         const target = sentinel.current;
 
-        if (!target || done || loading || typeof IntersectionObserver === 'undefined') return;
+        if (!target || done || loading || error || page === 0 || typeof IntersectionObserver === 'undefined') return;
 
-        // Запас в 300 px: порция успевает приехать до того, как докрутят до края
+        // Запас в 300 px: страница успевает приехать до того, как докрутят до края
         const observer = new IntersectionObserver((entries) => entries[0]?.isIntersecting && more(), { rootMargin: '300px' });
 
         observer.observe(target);
 
         return () => observer.disconnect();
-    }, [done, loading, shown]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [done, loading, error, page]);
+
+    if (done && items.length === 0) return null;
 
     return (
         <section aria-busy={loading}>
@@ -207,24 +279,24 @@ function Feed() {
                 <Link href={routes.marketCatalog}>В каталог →</Link>
             </div>
             <div className="mk-grid">
-                {all.slice(0, shown).map((p) => (
+                {items.map((p) => (
                     <MarketCard key={p.id} product={p} />
                 ))}
-                {loading &&
-                    Array.from({ length: Math.min(5, all.length - shown) }, (_, i) => (
-                        <div key={i} className="mk-skel" aria-hidden>
-                            <i />
-                            <i />
-                            <i />
-                            <i />
-                        </div>
-                    ))}
+                {loading && <MarketGridSkeleton />}
             </div>
+            {error && (
+                <div className="mk-failed" style={{ marginTop: 16 }}>
+                    <p>{error}</p>
+                    <button type="button" className="mk-btn" onClick={more}>
+                        Повторить
+                    </button>
+                </div>
+            )}
             {done ? (
                 <p className="mk-feed-end">Вы посмотрели все товары</p>
             ) : (
                 <div ref={sentinel} className="mk-feed-more">
-                    {!loading && (
+                    {!loading && !error && page > 0 && (
                         <button type="button" className="mk-btn mk-btn--ghost" onClick={more}>
                             Показать ещё
                         </button>
@@ -266,31 +338,62 @@ function Countdown() {
     );
 }
 
-/** Слайдер баннеров: листается сам раз в шесть секунд, точки — вручную. */
+/**
+ * Слайдер баннеров: листается сам раз в шесть секунд, точки — вручную.
+ * Баннеры — из админки (место slider); пока там пусто — запасные из
+ * вёрстки, чтобы первый экран не оставался без баннера.
+ */
 function Banners() {
+    const { data } = useApi<{ banners: ServerBanner[] }>('banners?place=slider');
+    const server = data?.banners ?? [];
+    const count = server.length || BANNERS.length;
     const [index, setIndex] = useState(0);
     const [paused, setPaused] = useState(false);
 
     useEffect(() => {
-        if (paused || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+        if (paused || count < 2 || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
 
-        const timer = window.setInterval(() => setIndex((i) => (i + 1) % BANNERS.length), 6000);
+        const timer = window.setInterval(() => setIndex((i) => (i + 1) % count), 6000);
 
         return () => window.clearInterval(timer);
-    }, [paused]);
+    }, [paused, count]);
 
-    const banner = BANNERS[index];
+    const at = index % count;
+    const dots = count > 1 && (
+        <div className="mk-dots">
+            {Array.from({ length: count }, (_, i) => (
+                <button key={i} type="button" aria-current={i === at} aria-label={`Баннер ${i + 1} из ${count}`} onClick={() => setIndex(i)} />
+            ))}
+        </div>
+    );
+    const hold = {
+        onMouseEnter: () => setPaused(true),
+        onMouseLeave: () => setPaused(false),
+        onFocus: () => setPaused(true),
+        onBlur: () => setPaused(false),
+    };
+
+    if (server.length > 0) {
+        const banner = server[at];
+        const picture = (
+            <picture>
+                {banner.imageMobile && <source media="(max-width: 640px)" srcSet={banner.imageMobile} />}
+                <img src={banner.image} alt={banner.alt} />
+            </picture>
+        );
+
+        return (
+            <section className="mk-banner mk-banner--image" aria-roledescription="карусель" aria-label="Акции" {...hold}>
+                {banner.url ? <a href={banner.url}>{picture}</a> : picture}
+                {dots}
+            </section>
+        );
+    }
+
+    const banner = BANNERS[at];
 
     return (
-        <section
-            className="mk-banner"
-            aria-roledescription="карусель"
-            aria-label="Акции"
-            onMouseEnter={() => setPaused(true)}
-            onMouseLeave={() => setPaused(false)}
-            onFocus={() => setPaused(true)}
-            onBlur={() => setPaused(false)}
-        >
+        <section className="mk-banner" aria-roledescription="карусель" aria-label="Акции" {...hold}>
             <div>
                 <small>{banner.eyebrow}</small>
                 <h2>{banner.title}</h2>
@@ -302,17 +405,7 @@ function Banners() {
             <div className="mk-banner-art" aria-hidden>
                 {banner.emoji}
             </div>
-            <div className="mk-dots">
-                {BANNERS.map((b, i) => (
-                    <button
-                        key={b.title}
-                        type="button"
-                        aria-current={i === index}
-                        aria-label={`Баннер ${i + 1} из ${BANNERS.length}`}
-                        onClick={() => setIndex(i)}
-                    />
-                ))}
-            </div>
+            {dots}
         </section>
     );
 }

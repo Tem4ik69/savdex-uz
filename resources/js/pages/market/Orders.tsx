@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react';
+import { MarketPhoto } from '@/components/market/MarketPhoto';
 import { Link } from '@/components/ui/Link';
 import { cn } from '@/lib/cn';
 import { MarketLayout } from '@/layouts/MarketLayout';
@@ -22,7 +23,7 @@ const date = (iso: string) => new Date(iso).toLocaleDateString('ru-RU', { day: '
 
 /**
  * «Мои заказы»: статус полосой шагов, код выдачи, когда заказ приехал,
- * отмена до отгрузки. Свои заказы (оформленные в этом браузере) идут
+ * отмена до отгрузки. Пока демо — заказов на сервере ещё нет (market/orders.ts). Свои заказы (оформленные в этом браузере) идут
  * первыми, под ними — три примера. У своих есть кнопка демо «следующий
  * статус»: без сервера заказ сам по пути не поедет.
  */
@@ -44,6 +45,7 @@ export default function MarketOrders() {
                     <h1>Мои заказы</h1>
                 </div>
 
+                <p className="mk-sample">Раздел в разработке: заказы пока сохраняются только в этом браузере, оплата не списывается.</p>
                 <div className="mk-orders">
                     {own.map((order, i) => (
                         <Order key={order.id} order={order} own fresh={fresh && i === 0} />
@@ -98,11 +100,12 @@ function Order({ order, own = false, fresh = false }: { order: MarketOrder; own?
             <div className="mk-order__body">
                 <div className="mk-order__items">
                     {order.items.map((item) => (
-                        <div key={item.productId} className="mk-mini">
-                            <span style={{ background: item.tint }} aria-hidden>
-                                {item.emoji}
+                        <div key={`${item.productId}-${item.options}`} className="mk-mini">
+                            <span>
+                                <MarketPhoto image={item.image} id={item.productId} />
                             </span>
-                            {item.title} × {item.quantity}
+                            {item.title}
+                            {item.options && ` (${item.options})`} × {item.quantity}
                             <b>{sum(item.price * item.quantity)} сум</b>
                         </div>
                     ))}

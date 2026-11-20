@@ -1,0 +1,181 @@
+/**
+ * Данные маркетплейса — в том виде, в каком их отдаёт сервер
+ * (/market/api/…, docs/marketplace.md). Цены — в сумах.
+ */
+
+/** Карточка товара в списке. */
+export interface MarketProduct {
+    id: number;
+    slug: string;
+    title: string;
+    /** Уменьшенная копия первого общего фото; null — фото ещё нет */
+    image: string | null;
+    price: number;
+    oldPrice: number | null;
+    rating: number;
+    reviews: number;
+    sold: number;
+    /** Остаток по всем вариантам; 0 — купить нельзя */
+    stock: number;
+    /** Адрес самой точной категории товара */
+    category: string;
+    seller: string;
+    sellerName: string;
+    badge: 'hit' | 'new' | 'sale' | null;
+}
+
+export interface MarketCategory {
+    slug: string;
+    name: string;
+    emoji: string;
+    children: MarketCategory[];
+}
+
+export interface MarketSeller {
+    slug: string;
+    name: string;
+    /** Компания проверена площадкой (документы приняты модератором) */
+    verified: boolean;
+    rating: number;
+    logo: string | null;
+}
+
+/** Вариант товара, который кладут в корзину: своё сочетание, цена и остаток. */
+export interface MarketOffer {
+    id: number;
+    options: Record<string, string>;
+    sku: string | null;
+    price: number;
+    oldPrice: number | null;
+    stock: number;
+}
+
+export interface MarketImage {
+    id: number;
+    url: string;
+    thumb: string;
+    /** Фото одного варианта (цвета); null — общее */
+    variantId: number | null;
+}
+
+/** Страница товара: карточка плюс всё для выбора и покупки. */
+export interface MarketProductPage extends MarketProduct {
+    images: MarketImage[];
+    description: string;
+    /** Что выбирать: «Цвет» — [«Чёрный», «Белый»] */
+    variants: { name: string; options: string[] }[];
+    offers: MarketOffer[];
+    specs: [string, string][];
+    categoryPath: { slug: string; name: string }[];
+    sellerInfo: MarketSeller;
+    favorite: boolean;
+}
+
+/** Фильтр категории: у выбора и строки — значения со счётчиком, у числа — от и до. */
+export interface MarketFilter {
+    key: string;
+    name: string;
+    kind: 'choice' | 'text' | 'bool' | 'number';
+    unit: string | null;
+    options?: { value: string; name: string; count: number }[];
+    min?: number | null;
+    max?: number | null;
+}
+
+export interface MarketListing {
+    items: MarketProduct[];
+    total: number;
+    page: number;
+    pages: number;
+    sort: string;
+    /** Точных совпадений не было — показаны похожие по написанию */
+    fuzzy: boolean;
+    price: { min: number | null; max: number | null };
+    filters: MarketFilter[];
+    category: { slug: string; name: string; path: { slug: string; name: string }[] } | null;
+}
+
+export interface MarketShop extends MarketListing {
+    seller: MarketSeller & { description: string; since: number | null; company: string };
+}
+
+export interface CartLine {
+    variantId: number;
+    productId: number;
+    slug: string;
+    title: string;
+    image: string | null;
+    options: Record<string, string>;
+    price: number;
+    oldPrice: number | null;
+    quantity: number;
+    /** Сколько можно купить сейчас; 0 — товара нет или он снят */
+    available: number;
+    buyable: boolean;
+    total: number;
+}
+
+/** Корзина: части по продавцам — в заказе у каждого будет своя. */
+export interface CartSummary {
+    parts: { seller: { slug: string; name: string }; items: CartLine[]; total: number }[];
+    count: number;
+    lines: number;
+    total: number;
+}
+
+export interface SellerApplication {
+    status: 'pending' | 'approved' | 'rejected' | 'blocked' | null;
+    rejectReason: string | null;
+    /** Что нужно для заявки: компания, владелец, ИНН, документы */
+    checks: { company: boolean; owner: boolean; tin: boolean; documents: boolean };
+    canApply: boolean;
+    offerVersion: string;
+}
+
+export type ProductStatus = 'draft' | 'pending' | 'active' | 'rejected' | 'hidden' | 'blocked';
+
+/** Товар в списке «Мои товары». */
+export interface MyProduct {
+    id: number;
+    slug: string;
+    title: string;
+    status: ProductStatus;
+    rejectReason: string | null;
+    price: number | null;
+    oldPrice: number | null;
+    stock: number;
+    sold: number;
+    views: number;
+    image: string | null;
+}
+
+export interface MyVariant {
+    id?: number;
+    options: Record<string, string>;
+    sku: string | null;
+    price: number | null;
+    oldPrice: number | null;
+    stock?: number;
+    active?: boolean;
+}
+
+/** Товар для формы правки. */
+export interface MyProductDetail {
+    id: number;
+    slug: string;
+    status: ProductStatus;
+    rejectReason: string | null;
+    title: string;
+    description: string;
+    locale: string;
+    category: string | null;
+    ikpu: string | null;
+    barcode: string | null;
+    weight_g: number | null;
+    length_mm: number | null;
+    width_mm: number | null;
+    height_mm: number | null;
+    values: Record<string, string | number | boolean>;
+    variants: MyVariant[];
+    images: MarketImage[];
+}
