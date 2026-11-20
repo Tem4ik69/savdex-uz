@@ -973,12 +973,25 @@ def _write_off(order_id: int) -> bool:
     сводка — заново. Не хватило остатка или резерва — WriteOffError, вся
     транзакция (и переход в «выдан») откатывается. False — уже списано.
     """
-    if not write(
-        "update market_orders set stock_written_off_at = %s "
-        "where id = %s and stock_written_off_at is null and reserve_released_at is null",
-        [now(), order_id],
-    ):
+    state = one(
+        "select reserve_released_at, stock_written_off_at from market_orders "
+        "where id = %s for update",
+        [order_id],
+    )
+
+    if state is None or state["stock_written_off_at"] is not None:
         return False
+
+    # Резерв уже снят (отмена, истечение) — выдавать без списания нельзя:
+    # откат перехода, а не «выдан» с нетронутым остатком
+    if state["reserve_released_at"] is not None:
+        raise WriteOffError(f"заказ {order_id}: резерв уже снят")
+
+    write(
+        "update market_orders set stock_written_off_at = %s "
+        "where id = %s and stock_written_off_at is null",
+        [now(), order_id],
+    )
 
     items = rows(
         "select variant_id, product_id, quantity from market_order_items where order_id = %s "

@@ -342,7 +342,19 @@ def test_цена_из_запроса_не_действует(сайт, мага
     до = _резерв(телефон)
 
     # Подменённая цена и сумма — 409 со свежей корзиной, заказа нет, резерва нет
-    подмена = _оформить(сайт, покупатель, 1, price=1, total=1)
+    # Свои «цена» и «итог» в запросе — лишние поля, их сервер не читает
+    подмена = _post(
+        сайт,
+        "/market/api/checkout",
+        покупатель,
+        {
+            "pickupPoint": "chilonzor",
+            "paymentMethod": "cash",
+            "expectedTotal": 1,
+            "price": 1,
+            "total": 1,
+        },
+    )
     assert подмена["status"] == 409, подмена["body"]
     assert _json(подмена)["cart"]["total"] == 8_000_000
     assert sql("select count(*) from market_orders where buyer_user_id = %s", [покупатель]) == [
