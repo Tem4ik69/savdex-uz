@@ -191,6 +191,26 @@ def test_основной_адрес_ведёт_на_маркетплейс(са
 
 
 @нужна_база
+def test_ссылки_inertia_между_адресами(сайт):
+    # Ссылка Inertia — фоновый запрос: на чужой домен браузер его не пустит,
+    # поэтому вместо 302 — 409 и X-Inertia-Location (Inertia сам откроет адрес)
+    inertia = {"X-Inertia": "true", "X-Requested-With": "XMLHttpRequest"}
+
+    туда = открыть(сайт, "/uz/market/catalog?q=a", headers=inertia, env=_env(сайт))
+    assert туда["status"] == 409
+    assert туда["headers"]["x-inertia-location"] == f"http://{РЫНОК}/uz/catalog?q=a"
+
+    рынок = {"Host": РЫНОК, **inertia}
+    обратно = открыть(сайт, "/companies?page=2", headers=рынок, env=_env(сайт))
+    assert обратно["status"] == 409
+    assert обратно["headers"]["x-inertia-location"] == f"{сайт}/companies?page=2"
+
+    # Внутри одного адреса — обычный 302: его Inertia проходит сам
+    свой = открыть(сайт, "/market/catalog", headers=рынок, env=_env(сайт))
+    assert свой["status"] == 302 and свой["headers"]["location"] == "/catalog"
+
+
+@нужна_база
 def test_без_переменной_всё_как_было(сайт):
     page = страница(открыть(сайт, "/market/catalog")["body"])
 
