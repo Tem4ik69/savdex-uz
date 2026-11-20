@@ -346,12 +346,25 @@ def previous(ctx: Context) -> str:
     """UrlGenerator::previous: Referer, адрес из сессии, корень."""
     referer = ctx.request.headers.get("Referer")
 
-    if referer:
+    # Назад — только на свой адрес: чужой Referer (или «//адрес») —
+    # мимо, к адресу из сессии
+    if referer and _own(ctx, referer):
         return _to(ctx, referer)
 
     saved = _store(ctx).get("_previous.url")
 
     return saved if isinstance(saved, str) and saved else ctx.url("/")
+
+
+def _own(ctx: Context, target: str) -> bool:
+    """Адрес своего сайта: путь от корня (не «//», без обратной косой) или полный с ctx.root."""
+    if "\\" in target or any(ord(c) < 32 for c in target):
+        return False
+
+    if target.startswith("/"):
+        return not target.startswith("//")
+
+    return target == ctx.root or target.startswith((ctx.root + "/", ctx.root + "?"))
 
 
 def _to(ctx: Context, target: str) -> str:
