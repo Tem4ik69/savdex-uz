@@ -108,6 +108,11 @@ PENDING_KEYS = {
     "click": "MARKET_CLICK_PENDING_MINUTES",
 }
 
+#: Потолок срока pending в минутах: у Payme — его собственные 12 часов,
+#: у прочих — сутки
+PENDING_CEILING = {"payme": 720}
+PENDING_CEILING_DEFAULT = 1440
+
 #: Провайдеры, чью брошенную попытку (pending старше срока) гасим сами при
 #: новой попытке оплатить тот же заказ. У Payme свой срок — 12 часов, и
 #: отменяет он сам (CancelTransaction)
@@ -127,7 +132,7 @@ BIGINT_MAX = 2**63 - 1
 _COLUMNS = (
     "id, order_id, provider, provider_transaction_id, provider_ref, provider_time, amount, "
     "status, reason, note, created_at, updated_at, performed_at, cancelled_at, "
-    "refund_requested_at, refunded_at, rejected_at"
+    "refund_requested_at, refunded_at, rejected_at, rejection_checked_at, checked_by"
 )
 _ORDER_COLUMNS = (
     "id, number, buyer_user_id, status, payment_method, total, paid_at, reserve_released_at"
@@ -169,8 +174,17 @@ def allowed_here(provider: str) -> bool:
 
 
 def pending_minutes(provider: str) -> int:
-    """Срок жизни заведённой транзакции провайдера (минуты, не меньше 1)."""
-    return max(1, env_int(PENDING_KEYS.get(provider, ""), PENDING_DEFAULT))
+    """
+    Срок жизни заведённой транзакции провайдера: минуты, от 1 до потолка
+    (PENDING_CEILING — у Payme 12 часов, у прочих сутки). Опечатка вида
+    «99999999999» не даст OverflowError в timedelta и не удержит резерв на
+    годы. Значения должны совпадать на машинах сайта и админки:
+    отсрочку истечения считает админка (расписание), брошенные попытки —
+    сайт (колбэки).
+    """
+    value = env_int(PENDING_KEYS.get(provider, ""), PENDING_DEFAULT)
+
+    return min(max(1, value), PENDING_CEILING.get(provider, PENDING_CEILING_DEFAULT))
 
 
 def max_pending_minutes() -> int:
@@ -584,26 +598,93 @@ def complete(found: dict[str, Any]) -> str | None:
         return None
 
     order = order_by_id(order_id)
-    # rejected_at — отказ на шаге проведения: у провайдера деньги могли уже
-    # списать, сверка просит проверить, что он их вернул
-    _set(
-        int(found["id"]),
-        (PENDING,),
-        CANCELLED,
-        cancelled_at=now(),
-        rejected_at=now(),
-        # Код причины — понятие Payme (3 — ошибка проведения); у прочих пусто
+    # Код причины — понятие Payme (3 — ошибка проведения); у прочих пусто
+    reject(
+        found,
         reason=3 if found["provider"] == "payme" else None,
         note="отклонена: заказ уже не ждёт оплаты",
     )
-    log.warning(
-        "market.payment.rejected provider=%s payment=%s status=%s",
-        found["provider"],
-        found["id"],
-        order["status"] if order else None,
-    )
 
     return ALREADY_PAID if order is not None and order["paid_at"] is not None else NOT_PAYABLE
+
+
+def reject(found: dict[str, Any], *, reason: int | None = None, note: str) -> bool:
+    """
+    Провайдер пришёл проводить деньги (Uzum confirm, Payme Perform, Click
+    Complete), а мы отказали: заказ уже не ждёт оплаты, транзакция
+    погашена раньше (брошенная попытка, истёк срок, отмена). Деньги у
+    провайдера могли уже списать — ставим ``rejected_at``: сверка покажет
+    «проверить возврат у провайдера», пока сотрудник не отметит проверку
+    (``acknowledge``). Ждущая транзакция заодно гасится; у уже погашенной
+    отметка ставится один раз. True — что-то записано.
+    """
+    moment = now()
+
+    if found["status"] == PENDING:
+        done = _set(
+            int(found["id"]),
+            (PENDING,),
+            CANCELLED,
+            cancelled_at=moment,
+            rejected_at=moment,
+            reason=reason,
+            note=note[:500],
+        )
+    elif found["status"] in (CANCELLED, REFUNDED):
+        done = bool(
+            write(
+                "update market_payments set rejected_at = %s, updated_at = %s "
+                "where id = %s and status = any(%s) and rejected_at is null",
+                [moment, moment, found["id"], [CANCELLED, REFUNDED]],
+            )
+        )
+    else:
+        return False
+
+    if done:
+        log.warning(
+            "market.payment.rejected provider=%s payment=%s", found["provider"], found["id"]
+        )
+
+    return done
+
+
+def acknowledge(payment_id: int, admin_user_id: int, note: str) -> bool:
+    """
+    Сотрудник проверил у провайдера отказ на проведении (``rejected_at``) или
+    зависший возврат (оплата заказа в refund_pending): деньги вернулись или
+    разобраны вручную. Сверка такую оплату больше не считает расхождением.
+    Ровно один раз: повтор — False. Кнопка в админке — у кассы (этап 3),
+    там же — ``audit.record``; в истории заказа — пометка.
+    """
+    text = (note or "").strip()[:500] or "проверено"
+
+    with transaction.atomic():
+        found = payment(payment_id)
+
+        if found is None:
+            return False
+
+        # Порядок замков: заказ, затем оплата
+        order = order_by_id(int(found["order_id"]), lock=True)
+        payment(payment_id, lock=True)
+        done = write(
+            "update market_payments set rejection_checked_at = %s, checked_by = %s, "
+            "check_note = %s, updated_at = %s where id = %s and rejection_checked_at is null "
+            "and (rejected_at is not null or (status = %s and exists (select 1 from "
+            "market_orders o where o.id = market_payments.order_id and o.status = %s)))",
+            [now(), admin_user_id, text, now(), payment_id, PAID, orders.REFUND_PENDING],
+        )
+
+        if not done:
+            return False
+
+        if order is not None:
+            orders.note(int(order["id"]), f"оплата {payment_id}: проверено — {text}")
+
+    log.info("market.payment.acknowledged payment=%s", payment_id)
+
+    return True
 
 
 def cancel_pending(found: dict[str, Any], *, reason: int | None = None, note: str) -> bool:
@@ -847,14 +928,22 @@ def refund_order(order_id: int) -> str:
 
 
 def refund_all(limit: int = 200) -> dict[str, int]:
-    """Расписание: все заказы в refund_pending, по которым возврат ещё не запрашивали."""
+    """
+    Расписание: заказы в refund_pending, по которым возврат ещё не
+    запрашивали, — только у включённых провайдеров: заказы выключенного не
+    выбираются каждый час и не занимают limit.
+    """
     done: dict[str, int] = {}
+    active = [name for name in PROVIDERS if enabled(name)]
+
+    if not active:
+        return done
 
     for found in rows(
         "select distinct o.id from market_orders o join market_payments p on p.order_id = o.id "
         "where o.status = %s and p.status = %s and p.refund_requested_at is null "
-        "order by o.id limit %s",
-        [orders.REFUND_PENDING, PAID, limit],
+        "and p.provider = any(%s) order by o.id limit %s",
+        [orders.REFUND_PENDING, PAID, active, limit],
     ):
         result = refund_order(int(found["id"]))
         done[result] = done.get(result, 0) + 1
@@ -888,6 +977,8 @@ def _throttled(request: HttpRequest) -> bool:
     from savdex.web import throttle
 
     if not laravel_cache.is_file_store():
+        _warn_store()
+
         return False
 
     rate_key, auth_key = _keys(request)
@@ -903,15 +994,39 @@ def _throttled(request: HttpRequest) -> bool:
     return False
 
 
+_store_warned = False
+
+
+def _warn_store() -> None:
+    """Лимиты включены, а кэш не файловый — считать негде: предупредить один раз."""
+    global _store_warned
+
+    if not _store_warned:
+        _store_warned = True
+        log.warning(
+            "market.payment.throttle_disabled: CACHE_STORE не file — лимиты колбэков не считаются"
+        )
+
+
 def auth_failed(request: HttpRequest, provider: str) -> None:
-    """Неудачная проверка подписи или пароля — в счётчик адреса и в журнал (без данных)."""
+    """
+    Неудачная проверка подписи или пароля — в журнал (без данных) и, если
+    адрес не из списка провайдера, в счётчик блокировки. Адрес из списка —
+    сам провайдер (сбились ключи на его стороне): блокировать его значило
+    бы остановить оплаты — только WARNING.
+    """
     from savdex import laravel_cache
     from savdex.web import throttle
 
     log.warning("market.payment.bad_auth provider=%s", provider)
 
+    if callback_ips(provider):
+        return
+
     if laravel_cache.is_file_store():
         throttle.hit(_keys(request)[1], AUTH_FAILS_WINDOW)
+    else:
+        _warn_store()
 
 
 def market_closed() -> HttpResponse | None:
@@ -967,7 +1082,9 @@ def callback(provider: str, deny: Callable[[HttpRequest], HttpResponse]) -> Call
 
                 return deny(request)
 
-            if _throttled(request):
+            # Адрес из списка провайдера — сам провайдер: лимиты его не
+            # касаются (всплеск колбэков в час пик не должен встать)
+            if not ips and _throttled(request):
                 log.warning("market.payment.throttled provider=%s", provider)
 
                 return deny(request)

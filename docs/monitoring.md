@@ -54,10 +54,16 @@
    - проверка `savdex-market-reconcile` (ночная сверка оплат маркетплейса,
      [docs/marketplace.md](marketplace.md#оплата--этап-2)): Period — 1 day,
      Grace — 2 hours (сверка — в 02:40 UTC, 07:40 по Ташкенту). Её Ping URL
-     — переменной **`MARKET_HC_PING_PAYMENTS`** в окружении сайта
-     (`/opt/savdex/env/app.env`, как прочие ключи приложения), а не в
-     `backup.env`: сигнал шлёт сам сайт, расписание на машине админки. В
-     теле сигнала — только цифры расхождений по провайдерам.
+     — секретом GitHub **`MARKET_HC_PING_PAYMENTS`**, так же как
+     `HC_PING_*`: релиз (prod.yml, шаг «Админка и схема базы») пишет его
+     через stdin в `/opt/savdex/env/signals.env` на машине админки, compose
+     передаёт контейнеру (`deploy/prod/app/compose.yml`). Секрета нет — файл
+     пустой, сигнала нет. Сигнал шлёт само приложение из расписания на
+     **savdex-admin**, а не `backup.sh` на машине базы: у savdex-admin должен
+     быть выход наружу к `hc-ping.com` (порт 443) — тот же, что у агента
+     Grafana Alloy на этой машине. Проверить после релиза: на savdex-admin
+     `curl -fsS -o /dev/null https://hc-ping.com/` без ошибки. В теле сигнала
+     — только цифры расхождений по провайдерам.
 4. **Следующий релиз** (Actions → prod) кладёт адреса в
    `/opt/savdex/env/backup.env` на машине базы — с этой минуты копии
    шлют сигналы. До того Healthchecks будет ждать первого сигнала и

@@ -101,7 +101,8 @@ class Config:
             password=base.env("MARKET_UZUM_CALLBACK_PASSWORD"),
             pay_url=base.env("MARKET_UZUM_PAY_URL"),
             account_field=base.env("MARKET_UZUM_ACCOUNT_FIELD") or "order",
-            confirm_timeout=base.env_int("MARKET_UZUM_CONFIRM_TIMEOUT", 30),
+            # MARKET_UZUM_CONFIRM_TIMEOUT — с потолком (base.pending_minutes)
+            confirm_timeout=base.pending_minutes("uzum"),
         )
 
 
@@ -315,10 +316,17 @@ class _Merchant:
         if payment is None:
             return self.error(ERROR_TRANSACTION_NOT_FOUND)
 
+        # Uzum пришёл проводить то, что мы уже погасили (брошенная попытка,
+        # reverse, срок): отказ — и отметка rejected_at, сверка попросит
+        # проверить, что деньги вернулись
         if payment["status"] == base.CANCELLED:
+            base.reject(payment, note="Uzum: confirm по отменённой транзакции")
+
             return self.error(ERROR_TRANSACTION_CANCELLED)
 
         if payment["status"] == base.REFUNDED:
+            base.reject(payment, note="Uzum: confirm по возвращённой транзакции")
+
             return self.error(
                 ERROR_ALREADY_REVERSED, {"reverseTime": base.ms(payment["refunded_at"])}
             )
@@ -331,7 +339,7 @@ class _Merchant:
         deadline = payment["created_at"] + timedelta(minutes=self.config.confirm_timeout)
 
         if deadline < datetime.now(UTC).replace(tzinfo=None):
-            base.cancel_pending(payment, note="Uzum: подтверждение позже срока")
+            base.reject(payment, note="Uzum: подтверждение позже срока")
 
             return self.error(ERROR_TRANSACTION_CANCELLED)
 

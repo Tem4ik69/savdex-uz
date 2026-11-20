@@ -131,7 +131,7 @@
 - **Журнал денег** `market_ledger` — двойная запись: группа строк с суммой
   ноль (`orders.post`, триггер `market_ledger_balanced` в конце транзакции),
   только дописывается (у роли приложения нет `update`/`delete`/`truncate`,
-  триггеры запрещают их всем, и владельцу). Счета: `buyer_receivable` (покупатель заплатит при
+  `update` и `delete` триггер запрещает и владельцу; `truncate` у владельца оставлен для очистки баз проверок). Счета: `buyer_receivable` (покупатель заплатит при
   получении), `gateway_clearing` (деньги у Uzum), `cash_collected` (наличные
   в ПВЗ, этап кассы), `seller_payable` (должны продавцу, с `seller_id`),
   `commission_revenue` (комиссия), `refund_payable` (вернуть покупателю),
@@ -186,8 +186,10 @@ refunded` и закрытие долга покупателю. Код выдач
   оплата). Заказ уже не ждёт оплаты (отменён, истёк) — ошибка провайдеру на
   любом шаге, включая проведение (Payme Perform → -31008, Click Complete →
   -9, Uzum confirm → 10009): провайдер гасит платёж и возвращает деньги, у
-  нас ничего не начислено; у оплаты — `rejected_at`, и сверка просит
-  проверить, что провайдер деньги вернул. Заказ, по которому провайдер завёл
+  нас ничего не начислено; у оплаты — `rejected_at` (`base.reject`) во всех
+  ветках «провайдер пришёл проводить, мы отказали», в том числе по
+  транзакции, погашенной раньше (брошенная попытка, истёк срок), — и сверка
+  просит проверить, что провайдер деньги вернул. Заказ, по которому провайдер завёл
   транзакцию, `expire` не отменяет, пока она моложе отсрочки — максимума из
   `market_order_expire_minutes` и сроков pending провайдеров; условие
   перепроверяется под замком заказа.
@@ -210,7 +212,11 @@ refunded` и закрытие долга покупателю. Код выдач
 - **Лимиты** (файловый кэш, `savdex/web/throttle.py`): не больше
   `MARKET_CALLBACK_RATE` (120) колбэков в минуту с адреса и не больше
   `MARKET_CALLBACK_AUTH_FAILS` (10) неудачных проверок подписи или пароля за
-  10 минут — дальше отказ в формате провайдера.
+  10 минут — дальше отказ в формате провайдера. Только для адресов **не** из
+  списка провайдера: если список задан (на боевом — всегда), запросы с
+  чужих адресов и так отклоняются, а свои лимитами не режутся, неудачная
+  подпись с адреса провайдера — только WARNING в журнал. Кэш не файловый —
+  считать негде: WARNING один раз.
 - **Кривые значения** при верной подписи — отказ провайдеру, не 500: суммы —
   только цифры ASCII в пределах bigint, `reason` Payme — smallint, `from`/`to`
   — bigint, переполнение Decimal у Click — «сумма не та»; эхо в ответах —
@@ -234,12 +240,12 @@ refunded` и закрытие долга покупателю. Код выдач
 | `MARKET_UZUM_CALLBACK_LOGIN`, `MARKET_UZUM_CALLBACK_PASSWORD` | Basic-авторизация колбэков |
 | `MARKET_UZUM_PAY_URL` | шаблон ссылки на оплату: `{service_id}`, `{order}`, `{amount}` (тийины), `{amount_som}`, `{return_url}`, `{lang}` |
 | `MARKET_UZUM_ACCOUNT_FIELD` | поле номера заказа в `params` (по умолчанию `order`) |
-| `MARKET_UZUM_CONFIRM_TIMEOUT` | минут от create до confirm (по умолчанию 30) |
+| `MARKET_UZUM_CONFIRM_TIMEOUT` | минут от create до confirm (по умолчанию 30, не больше 1440) |
 | `MARKET_UZUM_CALLBACK_IPS`, `MARKET_PAYME_CALLBACK_IPS`, `MARKET_CLICK_CALLBACK_IPS` | адреса провайдеров; на боевом обязательно |
-| `MARKET_PAYME_PENDING_MINUTES`, `MARKET_CLICK_PENDING_MINUTES` | срок pending для отсрочки истечения и брошенных попыток (по умолчанию 30) |
+| `MARKET_PAYME_PENDING_MINUTES`, `MARKET_CLICK_PENDING_MINUTES` | срок pending для отсрочки истечения и брошенных попыток (по умолчанию 30; потолок — Payme 720, Click 1440) |
 | `MARKET_CALLBACK_RATE`, `MARKET_CALLBACK_AUTH_FAILS` | лимиты колбэков с адреса (120 в минуту, 10 неудач за 10 минут) |
 | `MARKET_DELIVERY_IKPU` | ИКПУ доставки для чека Payme (когда `delivery_total > 0`) |
-| `MARKET_HC_PING_PAYMENTS` | Ping URL проверки Healthchecks для ночной сверки (секрет) |
+| `MARKET_HC_PING_PAYMENTS` | Ping URL проверки Healthchecks для ночной сверки — секрет GitHub, релиз пишет его в `signals.env` машины админки (`docs/monitoring.md`) |
 | `MARKET_PAYME_MERCHANT_ID`, `MARKET_PAYME_KEY` | касса и ключ (Basic `Paycom:<KEY>`) |
 | `MARKET_PAYME_CHECKOUT_URL` | по умолчанию `https://checkout.paycom.uz` (песочница — `https://checkout.test.paycom.uz`) |
 | `MARKET_PAYME_ACCOUNT_FIELD` | поле `account` (по умолчанию `order`) |
@@ -247,6 +253,12 @@ refunded` и закрытие долга покупателю. Код выдач
 | `MARKET_CLICK_MERCHANT_USER_ID` | для возврата через Merchant API Click (необязательно) |
 | `MARKET_CLICK_PAY_URL`, `MARKET_CLICK_API_URL` | по умолчанию `https://my.click.uz/services/pay` и `https://api.click.uz/v2/merchant` |
 | `MARKET_PAYMENT_RETURN_URL` | куда вернуть покупателя, `{number}` — номер заказа; по умолчанию страница заказа; с `;` или `=` не берётся (ломает ссылку Payme) |
+
+**Сроки pending** (`MARKET_UZUM_CONFIRM_TIMEOUT`, `MARKET_PAYME_PENDING_MINUTES`,
+`MARKET_CLICK_PENDING_MINUTES`) должны **совпадать на машинах сайта и
+админки**: брошенные попытки гасит сайт (колбэки и счёт), отсрочку истечения
+заказа считает админка (расписание). Разные значения — заказ истечёт под
+идущей оплатой или будет ждать дольше нужного.
 
 НДС в чеке Payme — настройка `market_vat_percent` (по умолчанию 12). Чек с
 пустым кодом не отправляем: у позиции нет ИКПУ (или у доставки —
@@ -282,7 +294,11 @@ refunded` и закрытие долга покупателю. Код выдач
 в ноль; заказы, которые ждут возврата дольше `market_refund_alert_hours`
 (настройка, по умолчанию 24 ч). Расхождение — ERROR в журнале приложения
 (только счётчики) и код выхода 1; номера заказов и оплат — только в вывод
-команды.
+команды. Непроверенные отказы на проведении сверка напоминает каждую ночь,
+пока сотрудник не отметит проверку у провайдера: `base.acknowledge(payment_id,
+admin_user_id, note)` — `rejection_checked_at`, `checked_by`, `check_note`,
+пометка в истории заказа; то же снимает и зависший возврат. Кнопку в админке
+добавит касса (этап 3).
 
 **Тревога** — через Healthchecks, как у резервных копий (тревоги Grafana
 строятся только по цифрам агентов на машинах, журналы приложения туда не

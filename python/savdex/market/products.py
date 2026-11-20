@@ -15,8 +15,13 @@
 - Пока продавец «новый» (одобренных товаров меньше N), правка текста,
   категории, характеристик или фото товара в продаже или на проверке
   возвращает его в черновик: покупатель не должен увидеть непроверенное
-  под проверенной карточкой. У проверенного продавца правка — сразу на
-  витрине, как и новые товары. Цена и варианты статус не меняют никогда.
+  под проверенной карточкой. Названия вариантов (options) и артикулы —
+  тоже содержание. У проверенного продавца правка — сразу на витрине, как
+  и новые товары. Цена и включение вариантов статус не меняют никогда.
+- Отклонённый или снятый модератором товар назад в продажу — только через
+  модератора, даже у проверенного продавца: пометка — reject_reason, её
+  стирает только одобрение (``approve``). Снятый продавцом (hidden) товар
+  без такой пометки проверенный продавец возвращает сразу.
 - Снятый модератором (blocked) товар продавец не правит.
 
 Остаток продавец не задаёт: к продаже доступно только то, что лежит на
@@ -40,6 +45,8 @@ from django.db import transaction
 from savdex import images
 from savdex.market.catalog import attributes_for, image_view
 from savdex.market.common import (
+    MIN_PRICE_SOM,
+    TIYIN,
     now,
     one,
     premoderated_count,
@@ -61,8 +68,11 @@ MAX_VARIANTS = 100
 #: Измерений выбора («Цвет», «Размер», «Объём») — не больше трёх
 MAX_OPTION_NAMES = 3
 
-#: Фото товара — квадрат до 1600 px, WebP
-PHOTO = images.Frame(1600, 1600, 82)
+#: Фото товара — квадрат до 1600 px, WebP. На входе — не больше 25 Мп
+#: (≈ 6100×4100; обычный снимок телефона, 12 Мп, проходит с запасом):
+#: общий предел 48 Мп рассчитан на баннеры, а фото товара грузят чаще и
+#: по десять за раз — распаковка каждого держит память воркера
+PHOTO = images.Frame(1600, 1600, 82, max_pixels=25_000_000)
 
 #: Уменьшенная копия для карточек каталога на телефоне
 THUMB = images.Frame(480, 480, 78)
@@ -75,7 +85,8 @@ BOOL_VALUES = {
     "0": "0", "false": "0", "no": "0", "off": "0", "нет": "0", "yo'q": "0",
 }  # fmt: skip
 
-#: Статусы, в которых продавец может править товар
+#: Статусы, в которых продавец может править товар (тот же список — в
+#: условии записи в save: модератор мог снять товар между чтением и записью)
 EDITABLE = ("draft", "pending", "active", "rejected", "hidden")
 
 STATUSES: dict[str, str] = {
@@ -167,14 +178,16 @@ def clean(data: dict[str, Any], errors: Errors) -> dict[str, Any]:
     else:
         out["category_id"] = category["id"]
 
-    ikpu = re.sub(r"\D", "", str(data.get("ikpu") or ""))
+    # Только ASCII-цифры: \D пропустил бы «٣» и другие цифры Юникода, а
+    # база (market_products_ikpu_check) примет только 0–9 — была бы 500
+    ikpu = re.sub(r"[^0-9]", "", str(data.get("ikpu") or ""))
 
     if ikpu and len(ikpu) != 17:
         errors.add("ikpu", "product.ikpu_format")
     else:
         out["ikpu"] = ikpu or None
 
-    barcode = re.sub(r"\D", "", str(data.get("barcode") or ""))
+    barcode = re.sub(r"[^0-9]", "", str(data.get("barcode") or ""))
 
     if barcode and not 8 <= len(barcode) <= 14:
         errors.add("barcode", "product.barcode_format")
@@ -255,6 +268,8 @@ def clean_variants(data: Any, errors: Errors) -> list[dict[str, Any]]:  # noqa: 
 
         if price is None:
             errors.add(f"{prefix}.price", "product.price_format")
+        elif price < MIN_PRICE_SOM * TIYIN:
+            errors.add(f"{prefix}.price", "product.price_min")
         elif item.get("oldPrice") not in (None, "", 0) and (old is None or old <= price):
             errors.add(f"{prefix}.oldPrice", "product.old_price_format")
 
@@ -355,16 +370,19 @@ def owned(seller_id: int, product_id: int) -> dict[str, Any] | None:
 def refresh(product_id: int) -> None:
     """
     Сводка по вариантам в строке товара: самая низкая цена включённого
-    варианта, её старая цена и сумма остатков (за вычетом резерва).
+    варианта, который можно купить (остаток за вычетом резерва больше
+    нуля), её старая цена и сумма остатков. Купить нечего — цена самого
+    дешёвого включённого. Иначе каталог показывал бы цену варианта,
+    которого нет на складе, а в карточке товар оказывался бы дороже.
     """
     write(
         "update market_products p set "
         "price = v.price, old_price = v.old_price, stock = coalesce(v.stock, 0) "
         "from (select "
         "  (select price from market_product_variants where product_id = %s and is_active "
-        "   order by price, id limit 1) as price, "
+        "   order by stock - reserved > 0 desc, price, id limit 1) as price, "
         "  (select old_price from market_product_variants where product_id = %s and is_active "
-        "   order by price, id limit 1) as old_price, "
+        "   order by stock - reserved > 0 desc, price, id limit 1) as old_price, "
         "  (select sum(stock - reserved) from market_product_variants "
         "   where product_id = %s and is_active) as stock"
         ") v where p.id = %s",
@@ -385,24 +403,39 @@ def _save_variants(product_id: int, variants: list[dict[str, Any]]) -> None:
             [product_id],
         )
     }
-    kept: set[int] = set()
+    kept = {v["id"] for v in variants if v["id"] in existing}
     moment = now()
 
-    # Сначала все существующие — во временные options, чтобы обмен
-    # сочетаниями между вариантами не упёрся в уникальность
-    for variant in variants:
-        if variant["id"] in existing:
-            write(
-                "update market_product_variants set options = jsonb_build_object('_', id) "
-                "where id = %s",
-                [variant["id"]],
-            )
+    # Сначала убранные — пометить: иначе новый вариант с тем же
+    # сочетанием, что у убранного в этом же запросе, упёрся бы в
+    # уникальность (product_id, options) — 500 вместо сохранения
+    for variant_id in set(existing) - kept:
+        # Вариант не удаляется никогда: на него будут ссылаться позиции
+        # заказов (и остаток на складе). Убранный продавцом — выключен и
+        # помечен; его фото становятся общими, из корзин он уходит
+        write(
+            "update market_product_variants set is_active = false, options = "
+            "jsonb_build_object('_removed', id), updated_at = %s where id = %s",
+            [moment, variant_id],
+        )
+        write(
+            "update market_product_images set variant_id = null where variant_id = %s", [variant_id]
+        )
+        write("delete from market_cart_items where variant_id = %s", [variant_id])
+
+    # Затем оставшиеся — во временные options, чтобы обмен сочетаниями
+    # между вариантами не упёрся в уникальность
+    for variant_id in kept:
+        write(
+            "update market_product_variants set options = jsonb_build_object('_', id) "
+            "where id = %s",
+            [variant_id],
+        )
 
     for variant in variants:
         options = json.dumps(variant["options"], ensure_ascii=False)
 
-        if variant["id"] in existing:
-            kept.add(variant["id"])
+        if variant["id"] in kept:
             write(
                 "update market_product_variants set options = %s::jsonb, sku = %s, price = %s, "
                 "old_price = %s, is_active = %s, sort = %s, updated_at = %s where id = %s",
@@ -418,38 +451,22 @@ def _save_variants(product_id: int, variants: list[dict[str, Any]]) -> None:
                 ],
             )
         else:
-            kept.add(
-                write(
-                    "insert into market_product_variants (product_id, options, sku, price, "
-                    "old_price, is_active, sort, created_at, updated_at) "
-                    "values (%s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s) returning id",
-                    [
-                        product_id,
-                        options,
-                        variant["sku"],
-                        variant["price"],
-                        variant["old_price"],
-                        variant["is_active"],
-                        variant["sort"],
-                        moment,
-                        moment,
-                    ],
-                )
+            write(
+                "insert into market_product_variants (product_id, options, sku, price, "
+                "old_price, is_active, sort, created_at, updated_at) "
+                "values (%s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)",
+                [
+                    product_id,
+                    options,
+                    variant["sku"],
+                    variant["price"],
+                    variant["old_price"],
+                    variant["is_active"],
+                    variant["sort"],
+                    moment,
+                    moment,
+                ],
             )
-
-    for variant_id in set(existing) - kept:
-        # Вариант не удаляется никогда: на него будут ссылаться позиции
-        # заказов (и остаток на складе). Убранный продавцом — выключен и
-        # помечен; его фото становятся общими, из корзин он уходит
-        write(
-            "update market_product_variants set is_active = false, options = "
-            "jsonb_build_object('_removed', id), updated_at = %s where id = %s",
-            [moment, variant_id],
-        )
-        write(
-            "update market_product_images set variant_id = null where variant_id = %s", [variant_id]
-        )
-        write("delete from market_cart_items where variant_id = %s", [variant_id])
 
 
 def _save_values(product_id: int, values: list[tuple[int, str | None, Decimal | None]]) -> None:
@@ -500,8 +517,22 @@ def save(
 
             return None, errors
 
+        # Товару в продаже или на проверке нужны цена и ИКПУ: в продаже без них
+        # запись упёрлась бы в market_products_active_check — 500, а товар на
+        # проверке модератор не смог бы одобрить
+        if row["status"] in ("active", "pending") and not any(v["is_active"] for v in variants):
+            errors.add("variants", "product.active_variant_required")
+
+        if row["status"] in ("active", "pending") and not fields["ikpu"]:
+            errors.add("ikpu", "product.ikpu_required")
+
+        if errors:
+            return None, errors
+
     moment = now()
-    draft = row is not None and _content_changed(row, fields, values) and needs_review(seller)
+    draft = (
+        row is not None and _content_changed(row, fields, values, variants) and needs_review(seller)
+    )
 
     with transaction.atomic():
         if row is None:
@@ -527,10 +558,13 @@ def save(
                 ],
             )
         else:
-            write(
+            # Статус проверен выше, но модератор мог снять товар за это
+            # время: тогда правка не проходит
+            changed = write(
                 "update market_products set category_id = %s, title = %s, description = %s, "
                 "locale = %s, ikpu = %s, barcode = %s, weight_g = %s, length_mm = %s, "
-                "width_mm = %s, height_mm = %s, updated_at = %s where id = %s",
+                "width_mm = %s, height_mm = %s, updated_at = %s "
+                "where id = %s and status in ('draft', 'pending', 'active', 'rejected', 'hidden')",
                 [
                     fields["category_id"],
                     fields["title"],
@@ -547,6 +581,11 @@ def save(
                 ],
             )
 
+            if not changed:
+                errors.add("product", "product.locked")
+
+                return None, errors
+
         assert product_id is not None
 
         if draft:
@@ -559,9 +598,29 @@ def save(
     return product_id, errors
 
 
+#: Сколько дней после отказа или снятия товары продавца снова проверяет модератор
+RECENT_REFUSAL_DAYS = 30
+
+
 def needs_review(seller: dict[str, Any]) -> bool:
-    """Продавец ещё «новый»: его товары и их правки проверяет модератор."""
-    return moderated_count(seller["id"]) < premoderated_count()
+    """
+    Товары и правки продавца проверяет модератор: продавец ещё «новый» —
+    или недавно получил отказ или снятие (у товара осталась причина). Иначе
+    отклонённый товар выходил бы в продажу копией — новым товаром с тем же
+    содержимым, который проверенному продавцу публиковать можно сразу.
+    """
+    if moderated_count(seller["id"]) < premoderated_count():
+        return True
+
+    return (
+        one(
+            "select 1 as x from market_products where seller_id = %s "
+            "and reject_reason is not null and moderated_at > "
+            "(now() at time zone 'utc') - make_interval(days => %s) limit 1",
+            [seller["id"], RECENT_REFUSAL_DAYS],
+        )
+        is not None
+    )
 
 
 def _to_draft(product_id: int) -> None:
@@ -573,15 +632,38 @@ def _to_draft(product_id: int) -> None:
     )
 
 
+def _variant_text(options: dict[str, Any], sku: str | None) -> tuple[str, str | None]:
+    """Что покупатель читает у варианта: сочетание выбора и артикул — без цены."""
+    return repr(sorted((str(k), str(v)) for k, v in options.items())), sku
+
+
 def _content_changed(
     row: dict[str, Any],
     fields: dict[str, Any],
     values: list[tuple[int, str | None, Decimal | None]],
+    variants: list[dict[str, Any]],
 ) -> bool:
-    """Поменялось ли то, что проверяет модератор: текст, категория, характеристики."""
+    """
+    Поменялось ли то, что проверяет модератор: текст, категория,
+    характеристики, названия вариантов и артикулы. Цена, включение и
+    порядок вариантов — нет; убрать вариант — тоже нет: непроверенного
+    текста от этого не прибавляется.
+    """
     for name in ("title", "description", "category_id"):
         if row[name] != fields[name]:
             return True
+
+    shown = {
+        _variant_text(r["options"] or {}, r["sku"])
+        for r in rows(
+            "select options, sku from market_product_variants where product_id = %s "
+            "and not options ? '_removed'",
+            [row["id"]],
+        )
+    }
+
+    if any(_variant_text(v["options"], v["sku"]) not in shown for v in variants):
+        return True
 
     before = {
         (r["attribute_id"], r["value_text"], r["value_number"])
@@ -653,6 +735,12 @@ def submit(seller: dict[str, Any], product_id: int) -> tuple[str | None, list[st
     """
     «Отправить на продажу»: (новый статус, чего не хватает). Новичок —
     на модерацию, проверенный продавец — сразу в продажу.
+
+    Отклонённый или снятый модератором товар (пометка reject_reason — до
+    одобрения) — на модерацию всегда: иначе проверенный продавец вернул бы
+    на витрину ровно то, что модератор убрал. Снятый самим продавцом после
+    продажи (hidden без пометки) и ни разу не отклонённый черновик у
+    проверенного продавца — сразу в продажу.
     """
     row = owned(seller["id"], product_id)
 
@@ -670,23 +758,28 @@ def submit(seller: dict[str, Any], product_id: int) -> tuple[str | None, list[st
     moment = now()
     slug = row["slug"] or numbered_slug(row["title"], row["id"])[:80].strip("-")
 
-    if needs_review(seller):
-        write(
+    refused = row["status"] == "rejected" or row["reject_reason"] is not None
+
+    # В условии записи — те же статусы, что проверены выше: модератор мог
+    # снять товар за это время, и тогда отправка не проходит. Причина
+    # отказа не стирается: она — пометка «только через модератора»
+    if refused or needs_review(seller):
+        changed = write(
             "update market_products set status = 'pending', slug = %s, submitted_at = %s, "
-            "reject_reason = null, updated_at = %s where id = %s",
+            "updated_at = %s where id = %s and status in ('draft', 'rejected', 'hidden')",
             [slug, moment, moment, product_id],
         )
 
-        return "pending", []
+        return ("pending", []) if changed else (None, ["product.locked"])
 
-    write(
+    changed = write(
         "update market_products set status = 'active', slug = %s, submitted_at = %s, "
-        "published_at = coalesce(published_at, %s), reject_reason = null, updated_at = %s "
-        "where id = %s",
+        "published_at = coalesce(published_at, %s), updated_at = %s "
+        "where id = %s and status in ('draft', 'hidden') and reject_reason is null",
         [slug, moment, moment, moment, product_id],
     )
 
-    return "active", []
+    return ("active", []) if changed else (None, ["product.locked"])
 
 
 def hide(seller: dict[str, Any], product_id: int) -> bool:
@@ -1002,13 +1095,17 @@ def block(product_id: int, admin_id: int, reason: str, *, seen: str | None = Non
 
 
 def unblock(product_id: int, admin_id: int, *, seen: str | None = None) -> bool:
-    """Вернуть снятый модератором товар — в черновик: продавец проверит и отправит."""
+    """
+    Вернуть снятый модератором товар — в черновик: продавец проверит и
+    отправит. Причина снятия остаётся: продавец видит, что исправить, а
+    отправка идёт через модератора (submit), пока тот не одобрит.
+    """
     moment = now()
     same, version = unchanged_since(seen)
 
     return bool(
         write(
-            "update market_products set status = 'draft', reject_reason = null, "
+            "update market_products set status = 'draft', "
             "moderated_by = %s, moderated_at = %s, updated_at = %s "
             "where id = %s and status = 'blocked'" + same,
             [admin_id, moment, moment, product_id, *version],
