@@ -797,12 +797,17 @@ class UserAdmin(SavdexModelAdmin):
 
 
 def _has_market_orders(user_id: int) -> bool:
-    """Есть ли у пользователя заказы маркетплейса или записи в их истории."""
+    """
+    Есть ли у пользователя заказы маркетплейса, записи в их истории или
+    отметки «проверено» на оплатах (market_payments.checked_by) — всё это
+    держит строку users внешним ключом.
+    """
     with connections["default"].cursor() as cursor:
         cursor.execute(
             "select exists (select from market_orders where buyer_user_id = %s) "
-            "or exists (select from market_order_events where actor_user_id = %s)",
-            [user_id, user_id],
+            "or exists (select from market_order_events where actor_user_id = %s) "
+            "or exists (select from market_payments where checked_by = %s)",
+            [user_id, user_id, user_id],
         )
         row = cursor.fetchone()
 

@@ -167,6 +167,7 @@ STAGES: tuple[Stage, ...] = (
             "market_order_items",
             "market_order_events",
             "market_ledger",
+            "market_payments",
         ),
     ),
     Stage(
