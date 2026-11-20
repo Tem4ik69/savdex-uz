@@ -629,23 +629,34 @@ class CashOrderAdmin(_ReadOnly):
             return None
 
         count, total = cash.cash_pending(ids)
+        changed: str | None = None
 
         if request.POST.get("confirm") == "yes":
+            # Цифры, которые кассир видел, — скрытыми полями; сервер
+            # пересчитывает под замком и при расхождении показывает новые
+            try:
+                seen = (int(request.POST.get("count") or -1), int(request.POST.get("total") or -1))
+            except ValueError:
+                seen = (-1, -1)
+
             try:
                 done = cash.reconcile_cash(
                     _admin_of(request),
                     ids,
                     request.POST.get("report") or "",
+                    expect=seen,
                     ip=audit.client_ip(request),
                 )
+            except cash.ReconcileChanged as moved:
+                count, total, changed = moved.count, moved.total, str(moved)
             except cash.CashRefused as refused:
                 self.message_user(request, str(refused), messages.ERROR)
 
                 return None
+            else:
+                self.message_user(request, f"Сверено с отчётом BTS: {done}.", messages.SUCCESS)
 
-            self.message_user(request, f"Сверено с отчётом BTS: {done}.", messages.SUCCESS)
-
-            return None
+                return None
 
         return TemplateResponse(
             request,
@@ -657,6 +668,8 @@ class CashOrderAdmin(_ReadOnly):
                 "ids": ids,
                 "count": count,
                 "total": cash.money(total),
+                "total_tiyin": total,
+                "changed": changed,
                 "report_min": cash.REPORT_MIN,
                 "action_checkbox_name": helpers.ACTION_CHECKBOX_NAME,
             },
@@ -849,12 +862,8 @@ class RefundOrderAdmin(_ReadOnly):
 
     @staticmethod
     def _payment(obj: RefundOrder) -> dict[str, Any] | None:
-        return one(
-            "select provider, provider_transaction_id, refund_requested_at, refund_mode, "
-            "refund_claimed_by, note, rejection_checked_at "
-            "from market_payments where order_id = %s and status = 'paid' order by id desc limit 1",
-            [obj.pk],
-        )
+        """Оплата заказа; зависший api (cash.API_STALE_MINUTES) — уже error."""
+        return cash.refund_payment_view(obj.pk)
 
     @admin.display(description="сумма", ordering="total")
     def total_text(self, obj: RefundOrder) -> str:
@@ -895,6 +904,7 @@ class RefundOrderAdmin(_ReadOnly):
         url = reverse("savdex_admin:market_refundorder_refund", args=[obj.pk])
         mode = found["refund_mode"]
         mine = found["refund_claimed_by"] == admin_.id or admin_.is_superadmin
+        stale = mode == "error" and found["refund_mode_stored"] == "api"
         forms: list[dict[str, Any]] = []
 
         if found["refund_requested_at"] is None:
@@ -915,7 +925,13 @@ class RefundOrderAdmin(_ReadOnly):
             forms.append(
                 {
                     "title": "Деньги вернули в кабинете провайдера",
-                    "help": "Только после возврата в кабинете Uzum, Payme или Click: заказ "
+                    "help": (
+                        f"Запрос к провайдеру завис дольше {cash.API_STALE_MINUTES} минут — "
+                        "проверьте в кабинете провайдера, вернул ли он деньги. "
+                        if stale
+                        else ""
+                    )
+                    + "Только после возврата в кабинете Uzum, Payme или Click: заказ "
                     "станет «деньги возвращены», в журнале денег — проводка возврата.",
                     "url": url,
                     "code": "refund",
@@ -931,12 +947,26 @@ class RefundOrderAdmin(_ReadOnly):
                 }
             )
 
-        if mode == "claimed" and mine:
+        if mode == "api" and admin_.is_superadmin:
             forms.append(
                 {
-                    "title": "Отпустить возврат",
-                    "help": "Вручную возвращать не будете — возврат снова запросит расписание "
-                    "через API провайдера.",
+                    "title": "Запрос к провайдеру завис",
+                    "help": "Итога запроса через API нет: переведите возврат в «сбой» — касса "
+                    f"отметит его вручную (сама — через {cash.API_STALE_MINUTES} минут).",
+                    "url": url,
+                    "code": "api_error",
+                    "button": "Перевести в «сбой»",
+                    "fields": [{"name": "reason", "label": "Причина", "type": "textarea"}],
+                }
+            )
+
+        if mode == "claimed" and admin_.is_superadmin:
+            forms.append(
+                {
+                    "title": "Снять взятие возврата",
+                    "help": "Внимание: если деньги уже вернули в кабинете провайдера — не "
+                    "снимайте, иначе расписание вернёт их ещё раз через API. Снимайте, только "
+                    "если вручную точно не возвращали.",
                     "url": url,
                     "code": "unclaim",
                     "button": "Отпустить",
@@ -982,6 +1012,11 @@ class RefundOrderAdmin(_ReadOnly):
                 return self._back(
                     request, obj, "Возврат за вами: верните деньги в кабинете провайдера.", None
                 )
+
+            if do == "api_error":
+                cash.api_to_error(admin_, obj.pk, request.POST.get("reason") or "", ip=ip)
+
+                return self._back(request, obj, "Возврат переведён в «сбой».", None)
 
             if do == "unclaim":
                 cash.unclaim_refund(admin_, obj.pk, request.POST.get("reason") or "", ip=ip)

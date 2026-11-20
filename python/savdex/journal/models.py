@@ -47,6 +47,7 @@ ACTIONS = {
     "refund_claimed": "Возврат взят вручную",
     "cash_unreconciled": "Сверка наличных снята",
     "refund_unclaimed": "Возврат вручную отпущен",
+    "refund_api_failed": "Возврат: запрос API завис (сбой)",
     "refund_marked": "Возврат отмечен вручную",
     "payment_checked": "Оплата проверена у провайдера",
 }

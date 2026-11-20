@@ -785,8 +785,25 @@ def cash_pending(order_ids: Iterable[int]) -> tuple[int, int]:
     return (int(found["n"]), int(found["total"])) if found else (0, 0)
 
 
+class ReconcileChanged(CashRefused):
+    """Пока кассир смотрел подтверждение, пачка изменилась: новые цифры."""
+
+    def __init__(self, count: int, total: int) -> None:
+        super().__init__(
+            f"Пачка изменилась: ждут сверки {count} на {money(total)} — проверьте и "
+            "подтвердите ещё раз."
+        )
+        self.count = count
+        self.total = total
+
+
 def reconcile_cash(
-    admin: Admin, order_ids: Iterable[int], report: str, *, ip: str | None = None
+    admin: Admin,
+    order_ids: Iterable[int],
+    report: str,
+    *,
+    expect: tuple[int, int] | None = None,
+    ip: str | None = None,
 ) -> int:
     """
     Касса сверила наличные выданных заказов «при получении» с отчётом BTS
@@ -794,7 +811,10 @@ def reconcile_cash(
     REPORT_MIN знаков): ставит ``cash_reconciled_at`` — с этого момента
     деньги заказа идут продавцу «к выплате». Не больше RECONCILE_BATCH
     заказов за раз. Каждый заказ — условно (ещё не сверен) и строкой
-    журнала действий. Возвращает, сколько отмечено.
+    журнала действий. expect — (сколько, сумма), которые кассир видел на
+    странице подтверждения: под замком строк пересчитываются, не совпали —
+    ReconcileChanged с новыми цифрами, ничего не записано. Возвращает,
+    сколько отмечено.
     """
     _need(admin, f"{SECTION}.moderate")
     text = _text(report, 100)
@@ -809,6 +829,13 @@ def reconcile_cash(
     done = 0
 
     with transaction.atomic():
+        if expect is not None:
+            rows("select id from market_orders where id = any(%s) order by id for update", [ids])
+            fresh = cash_pending(ids)
+
+            if fresh != expect:
+                raise ReconcileChanged(*fresh)
+
         for order_id in ids:
             # Номер и сумма — тем же условным обновлением (returning)
             with allowed_writes("market_orders"):
@@ -908,14 +935,33 @@ _REFUND_REF = re.compile(r"[0-9A-Za-z/._:-]{3,64}")
 #: возврат вручную; api — запрос к провайдеру в полёте, его не трогаем
 MANUAL_MODES = ("claimed", "manual", "error")
 
+#: Запрос api без итога дольше стольких минут (по refund_requested_at) —
+#: процесс упал посреди вызова: считаем его error, касса разбирается вручную
+API_STALE_MINUTES = 15
+
+_REFUND_COLUMNS = (
+    "id, order_id, provider, status, refund_requested_at, refund_claimed_by, "
+    "refund_reference, note, "
+    # Зависший api — как error (API_STALE_MINUTES)
+    "case when refund_mode = 'api' and refund_requested_at < %s then 'error' "
+    "else refund_mode end as refund_mode, refund_mode as refund_mode_stored"
+)
+
+
+def stale_api_cutoff() -> str:
+    """Граница «зависшего» запроса api: refund_requested_at раньше — уже error."""
+    return _ago(timedelta(minutes=API_STALE_MINUTES))
+
 
 def _refund_payment(order_id: int) -> dict[str, Any] | None:
-    """Проведённая оплата заказа — под замком (после замка заказа)."""
+    """
+    Проведённая оплата заказа — под замком (после замка заказа);
+    refund_mode — с поправкой на зависший api (API_STALE_MINUTES).
+    """
     from savdex.market.payments import base
 
     found = one(
-        "select id, provider, status, refund_requested_at, refund_mode, refund_claimed_by, "
-        "refund_reference, note from market_payments where order_id = %s and status = %s "
+        "select id from market_payments where order_id = %s and status = %s "
         "order by id desc limit 1",
         [order_id, base.PAID],
     )
@@ -924,9 +970,19 @@ def _refund_payment(order_id: int) -> dict[str, Any] | None:
         return None
 
     return one(
-        "select id, order_id, provider, status, refund_requested_at, refund_mode, "
-        "refund_claimed_by, refund_reference, note from market_payments where id = %s for update",
-        [found["id"]],
+        f"select {_REFUND_COLUMNS} from market_payments where id = %s for update",
+        [stale_api_cutoff(), found["id"]],
+    )
+
+
+def refund_payment_view(order_id: int) -> dict[str, Any] | None:
+    """Та же оплата для админки — без замка."""
+    from savdex.market.payments import base
+
+    return one(
+        f"select {_REFUND_COLUMNS}, rejection_checked_at, provider_transaction_id "
+        "from market_payments where order_id = %s and status = %s order by id desc limit 1",
+        [stale_api_cutoff(), order_id, base.PAID],
     )
 
 
@@ -991,7 +1047,7 @@ def claim_refund(admin: Admin, order_id: int, *, ip: str | None = None) -> bool:
 
 
 def _may_settle(admin: Admin, payment: Mapping[str, Any]) -> None:
-    """Взятый возврат отмечает или отпускает только взявший — или суперадмин."""
+    """Взятый возврат отмечает только взявший — или суперадмин."""
     if (
         payment["refund_mode"] == "claimed"
         and payment["refund_claimed_by"] != admin.id
@@ -1003,9 +1059,13 @@ def _may_settle(admin: Admin, payment: Mapping[str, Any]) -> None:
 def unclaim_refund(admin: Admin, order_id: int, reason: str, *, ip: str | None = None) -> None:
     """
     Снять взятие (передумали возвращать вручную): возврат снова ждёт
-    расписания — то запросит его через API провайдера. С причиной.
+    расписания — то запросит его через API провайдера. Только суперадмин и
+    с причиной: если деньги уже вернули в кабинете провайдера, снятие
+    вернуло бы их второй раз.
     """
-    _need(admin, f"{SECTION}.moderate")
+    if not admin.is_superadmin:
+        raise CashRefused("Снять взятие возврата может только суперадмин.")
+
     text = _text(reason)
 
     if len(text) < 5:
@@ -1018,7 +1078,6 @@ def unclaim_refund(admin: Admin, order_id: int, reason: str, *, ip: str | None =
         if payment is None or payment["refund_mode"] != "claimed":
             raise CashRefused("Возврат не взят вручную.")
 
-        _may_settle(admin, payment)
         write(
             "update market_payments set refund_requested_at = null, refund_mode = null, "
             "refund_claimed_by = null, note = %s, updated_at = %s where id = %s",
@@ -1031,6 +1090,49 @@ def unclaim_refund(admin: Admin, order_id: int, reason: str, *, ip: str | None =
         audit.record(
             connection,
             action="refund_unclaimed",
+            section=SECTION,
+            actor=admin,
+            subject_type="Savdex\\Market\\Order",
+            subject_id=order_id,
+            subject_label=str(order["number"]),
+            note=text,
+            ip=ip,
+        )
+
+
+def api_to_error(admin: Admin, order_id: int, reason: str, *, ip: str | None = None) -> None:
+    """
+    Суперадмин переводит возврат из api в error (запрос к провайдеру
+    завис и не ждём API_STALE_MINUTES): дальше касса отмечает его вручную.
+    С причиной и строкой журнала.
+    """
+    if not admin.is_superadmin:
+        raise CashRefused("Перевести возврат в «сбой» может только суперадмин.")
+
+    text = _text(reason)
+
+    if len(text) < 5:
+        raise CashRefused("Напишите причину — не короче 5 знаков.")
+
+    with transaction.atomic():
+        order = _order_number(order_id, lock=True)
+        payment = _refund_payment(order_id)
+
+        if payment is None or payment["refund_mode_stored"] != "api":
+            raise CashRefused("Возврат не в запросе через API.")
+
+        write(
+            "update market_payments set refund_mode = 'error', note = %s, updated_at = %s "
+            "where id = %s and refund_mode = 'api'",
+            [
+                _append_note(payment["note"], f"api → error ({admin.name}): {text}"),
+                now(),
+                payment["id"],
+            ],
+        )
+        audit.record(
+            connection,
+            action="refund_api_failed",
             section=SECTION,
             actor=admin,
             subject_type="Savdex\\Market\\Order",
@@ -1114,7 +1216,10 @@ def mark_refunded(
             subject_id=order_id,
             subject_label=str(order["number"]),
             changes={
-                "before": {"status": orders.REFUND_PENDING, "refund_mode": payment["refund_mode"]},
+                "before": {
+                    "status": orders.REFUND_PENDING,
+                    "refund_mode": payment["refund_mode_stored"],
+                },
                 "after": {
                     "status": orders.REFUNDED,
                     "amount": order["total"],

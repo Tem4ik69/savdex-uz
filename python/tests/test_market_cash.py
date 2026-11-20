@@ -636,9 +636,16 @@ def test_наличные_к_выплате_после_сверки(сайт):
     django(кассир, ("post", список, {**выбор, "confirm": "yes", "report": "отчёт 1"}))
     assert sql("select cash_reconciled_at from market_orders where id = %s", [pk]) == [(None,)]
 
-    _, итог = django(
-        кассир, ("post", список, {**выбор, "confirm": "yes", "report": "BTS-2026-11-20 №77"})
-    )
+    # Пачка изменилась, пока кассир смотрел (показано 2 заказа) — снова
+    # страница подтверждения с пересчитанными цифрами, ничего не записано
+    отчёт = {**выбор, "confirm": "yes", "report": "BTS-2026-11-20 №77"}
+    _, снова = django(кассир, ("post", список, {**отчёт, "count": "2", "total": "18000000"}))
+    assert снова["status"] == 200 and "Пачка изменилась" in снова["body"]
+    assert 'name="count" value="1"' in снова["body"]
+    assert 'name="total" value="9000000"' in снова["body"]
+    assert sql("select cash_reconciled_at from market_orders where id = %s", [pk]) == [(None,)]
+
+    _, итог = django(кассир, ("post", список, {**отчёт, "count": "1", "total": "9000000"}))
     assert итог["status"] == 302
     assert sql(
         "select cash_reconciled_at is not null, cash_reconciled_by, cash_reconciled_ref "
@@ -843,18 +850,22 @@ def test_режимы_ручного_возврата(сайт):
     первый, второй = _кассир(1), _кассир(2)
     отметить = {"do": "refund", "refund_reference": "PAYME-R-1", "note": "вернули в кабинете"}
 
-    # Запрос через API в полёте (api) — отметить вручную нельзя
+    # Запрос через API в полёте (api, минуту назад) — отметить вручную нельзя
     number, pk = _ждёт_возврата(сайт, данные, "payme")
     sql(
-        "update market_payments set refund_requested_at = now() at time zone 'utc', "
-        "refund_mode = 'api' where order_id = %s",
+        "update market_payments set refund_requested_at = now() at time zone 'utc' "
+        "- interval '1 minute', refund_mode = 'api' where order_id = %s",
         [pk],
     )
     assert "дождитесь его итога" in _возврат(первый, pk, отметить)["body"]
     assert _статус(number) == "refund_pending"
 
-    # Итог manual — отметить может любой кассир
-    sql("update market_payments set refund_mode = 'manual' where order_id = %s", [pk])
+    # api без итога 20 минут — зависший, как error: касса отмечает
+    sql(
+        "update market_payments set refund_requested_at = now() at time zone 'utc' "
+        "- interval '20 minutes' where order_id = %s",
+        [pk],
+    )
     assert _возврат(второй, pk, отметить)["status"] == 302
     assert _статус(number) == "refunded"
     assert sql("select refund_reference from market_payments where order_id = %s", [pk]) == [
@@ -872,10 +883,17 @@ def test_режимы_ручного_возврата(сайт):
     assert "уже отмечен по другой оплате" in _возврат(первый, другой, отметить)["body"]
     assert _статус(другой_номер) == "refund_pending"
 
-    # Отпустить — только взявший, с причиной; возврат снова ждёт расписания
-    чужой = _возврат(второй, другой, {"do": "unclaim", "reason": "не мой возврат"})
-    assert "другой кассир" in чужой["body"]
-    assert _возврат(первый, другой, {"do": "unclaim", "reason": "вернёт API"})["status"] == 302
+    # Снять взятие — только суперадмин (и не взявший), с причиной; возврат
+    # снова ждёт расписания
+    сам = _возврат(первый, другой, {"do": "unclaim", "reason": "вернёт API"})
+    assert "только суперадмин" in сам["body"]
+    assert sql("select refund_mode from market_payments where order_id = %s", [другой]) == [
+        ("claimed",)
+    ]
+    суперадмин = _сотрудник("superadmin")
+    _, форма = django(суперадмин, ("get", f"/py/admin/market/refundorder/{другой}/change/", None))
+    assert "расписание вернёт их ещё раз" in форма["body"]
+    assert _возврат(суперадмин, другой, {"do": "unclaim", "reason": "вернёт API"})["status"] == 302
     assert sql(
         "select refund_mode, refund_requested_at, refund_claimed_by from market_payments "
         "where order_id = %s",
@@ -886,6 +904,23 @@ def test_режимы_ручного_возврата(сайт):
     # «Проверено» с короткой заметкой — понятный отказ, не 500
     коротко = _возврат(первый, другой, {"do": "check", "note": "провер"})
     assert коротко["status"] == 302 and "не короче 10 знаков" in коротко["body"]
+
+    # Свежий api суперадмин переводит в «сбой» с причиной — касса отмечает
+    третий_номер, третий = _ждёт_возврата(сайт, данные)
+    sql(
+        "update market_payments set refund_requested_at = now() at time zone 'utc', "
+        "refund_mode = 'api' where order_id = %s",
+        [третий],
+    )
+    причина = {"do": "api_error", "reason": "процесс упал посреди запроса"}
+    assert "только суперадмин" in _возврат(первый, третий, причина)["body"]
+    assert _возврат(суперадмин, третий, причина)["status"] == 302
+    assert sql("select refund_mode from market_payments where order_id = %s", [третий]) == [
+        ("error",)
+    ]
+    assert журнал("refund_api_failed")["subject_label"] == третий_номер
+    assert _возврат(первый, третий, {**отметить, "refund_reference": "CLK-R-3"})["status"] == 302
+    assert _статус(третий_номер) == "refunded"
 
 
 @нужна_база
