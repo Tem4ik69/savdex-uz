@@ -369,13 +369,19 @@ def complete(request: HttpRequest) -> HttpResponse:
         # Повтор Complete по проведённой — тот же успех, второго зачисления нет
         return _answer(form, OK, merchant_confirm_id=int(payment["id"]))
 
-    if payment["status"] != base.PENDING:
-        return _answer(form, ERROR_CANCELLED)
-
     try:
         click_error = int(form.get("error") or 0)
     except ValueError:
         click_error = 0
+
+    if payment["status"] != base.PENDING:
+        # Complete по уже погашенной (брошенная попытка, отказ): Click мог
+        # списать деньги — отметка rejected_at, сверка попросит проверить.
+        # Если Click сам говорит «не прошла» (error < 0) — денег нет, отметки нет
+        if click_error >= 0:
+            base.reject(payment, note="Click: Complete по отменённой транзакции")
+
+        return _answer(form, ERROR_CANCELLED)
 
     if click_error < 0:
         base.cancel_pending(payment, note=f"Click: оплата не прошла (error {click_error})")

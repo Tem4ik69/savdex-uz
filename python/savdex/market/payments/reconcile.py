@@ -139,10 +139,13 @@ def check_provider(provider: str, day: date) -> Report:
         if wrong:
             report.problems.append(str(order["number"]))
 
+    # Отказы на проведении — все непроверенные до конца суток, а не только
+    # за сутки: пока сотрудник не отметит проверку (base.acknowledge), сверка
+    # напоминает каждую ночь
     for rejected in rows(
-        "select id from market_payments where provider = %s and rejected_at >= %s "
-        "and rejected_at < %s order by id",
-        [provider, start, end],
+        "select id from market_payments where provider = %s and rejected_at < %s "
+        "and rejection_checked_at is null order by id",
+        [provider, end],
     ):
         report.problems.append(
             f"оплата {rejected['id']} отклонена на проведении — проверить возврат у провайдера"
@@ -191,7 +194,10 @@ def check_common(day: date, moment: datetime | None = None) -> Report:
     cutoff = ((moment or datetime.now(UTC)) - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
 
     for order in rows(
-        "select number from market_orders where status = %s and cancelled_at < %s order by id",
+        "select o.number from market_orders o where o.status = %s and o.cancelled_at < %s "
+        # Проверенный сотрудником (base.acknowledge) — не расхождение
+        "and not exists (select 1 from market_payments p where p.order_id = o.id "
+        "and p.rejection_checked_at is not null) order by o.id",
         [orders.REFUND_PENDING, cutoff],
     ):
         report.problems.append(f"{order['number']} ждёт возврата дольше {hours} ч")
@@ -208,9 +214,9 @@ def run(day: date) -> list[Report]:
     active = {
         str(r["provider"])
         for r in rows(
-            "select distinct provider from market_payments where updated_at >= %s "
-            "and updated_at < %s",
-            [start, end],
+            "select distinct provider from market_payments where (updated_at >= %s "
+            "and updated_at < %s) or (rejected_at < %s and rejection_checked_at is null)",
+            [start, end, end],
         )
     }
     reports = [

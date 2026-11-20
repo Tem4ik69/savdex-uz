@@ -23,6 +23,9 @@
 -- refund_requested_at — возврат уже запрошен (ровно один раз).
 -- rejected_at — отклонена на шаге проведения (заказ уже не ждал оплаты):
 -- провайдер мог списать деньги, сверка просит проверить, что он их вернул.
+-- rejection_checked_at, checked_by, check_note — сотрудник проверил у
+-- провайдера отказ или зависший возврат (payments/base.py, acknowledge):
+-- сверка такую оплату больше не считает расхождением.
 -- created_at — когда провайдер завёл транзакцию (у открытого счёта —
 -- когда счёт открыт): от него считаются сроки провайдера.
 create table market_payments (
@@ -43,6 +46,9 @@ create table market_payments (
     refund_requested_at timestamp(0) without time zone,
     refunded_at timestamp(0) without time zone,
     rejected_at timestamp(0) without time zone,
+    rejection_checked_at timestamp(0) without time zone,
+    checked_by bigint references users (id) on delete restrict,
+    check_note varchar(500),
     constraint market_payments_provider_check check (provider in ('uzum', 'payme', 'click')),
     constraint market_payments_status_check
         check (status in ('created', 'pending', 'paid', 'cancelled', 'refunded')),

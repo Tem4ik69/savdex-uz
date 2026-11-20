@@ -62,6 +62,9 @@ TIMEOUT_MS = 43_200_000
 #: Причина отмены «истёк срок» (Payme reason 4)
 REASON_TIMEOUT = 4
 
+#: Причина отмены «ошибка выполнения» (Payme reason 3): заказ уже не ждёт оплаты
+REASON_ORDER_GONE = 3
+
 #: reason хранится в smallint
 REASON_MAX = 32767
 
@@ -382,8 +385,15 @@ class _Rpc:
 
                 return _error(self.id, ERROR_CANNOT_PERFORM)
 
-            if (problem := base.refusal(order, amount)) is not None:
-                return self.refused(problem)
+            # Заказ за это время истёк или отменён: нашу строку гасим (Payme
+            # затем вызовет CancelTransaction и увидит -1) и отвечаем -31008,
+            # как при истёкшей транзакции
+            if base.refusal(order, amount) is not None:
+                base.cancel_pending(
+                    existing, reason=REASON_ORDER_GONE, note="Payme: заказ уже не ждёт оплаты"
+                )
+
+                return _error(self.id, ERROR_CANNOT_PERFORM)
 
             return self.created(existing)
 
@@ -423,7 +433,9 @@ class _Rpc:
 
         if payment["status"] == base.PENDING:
             if _timed_out(payment):
-                base.cancel_pending(payment, reason=REASON_TIMEOUT, note="Payme: истёк срок 12 ч")
+                # Payme пришёл проводить после срока — отказ с отметкой
+                # rejected_at (деньги могли списать, сверка попросит проверить)
+                base.reject(payment, reason=REASON_TIMEOUT, note="Payme: истёк срок 12 ч")
 
                 return _error(self.id, ERROR_CANNOT_PERFORM)
 
@@ -434,6 +446,9 @@ class _Rpc:
             assert payment is not None
 
         if payment["status"] != base.PAID:
+            # Проводить погашенную (отменена нами или Payme) — тоже отказ с отметкой
+            base.reject(payment, note="Payme: Perform по отменённой транзакции")
+
             return _error(self.id, ERROR_CANNOT_PERFORM)
 
         return _result(

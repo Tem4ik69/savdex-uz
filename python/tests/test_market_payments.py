@@ -26,6 +26,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
@@ -149,6 +150,40 @@ def test_кривые_значения_не_роняют(monkeypatch):
     assert base.echo("x" * 64) == "x" * 64
     assert base.echo("x" * 65) is None and base.echo(2**70) is None
     assert base.echo({"a": 1}) is None and base.echo(True) is None
+
+
+def test_сроки_pending_с_потолком(monkeypatch):
+    from datetime import timedelta
+
+    from savdex.market.payments import uzum
+
+    monkeypatch.setenv("MARKET_PAYME_PENDING_MINUTES", "99999999999999999999")
+    monkeypatch.setenv("MARKET_CLICK_PENDING_MINUTES", "-5")
+    monkeypatch.setenv("MARKET_UZUM_CONFIRM_TIMEOUT", str(10**30))
+    assert base.pending_minutes("payme") == 720
+    assert base.pending_minutes("click") == 1
+    assert base.pending_minutes("uzum") == 1440
+    assert uzum.Config.from_env().confirm_timeout == 1440
+    assert base.max_pending_minutes() == 1440
+    # Никакого OverflowError у expire и у проверки брошенной попытки
+    assert timedelta(minutes=base.max_pending_minutes())
+    monkeypatch.setenv("MARKET_CLICK_PENDING_MINUTES", "не число")
+    assert base.pending_minutes("click") == 30
+
+
+def test_лимиты_без_файлового_кэша_предупреждают_один_раз(monkeypatch, caplog):
+    import logging
+
+    from django.test import RequestFactory
+
+    monkeypatch.setenv("CACHE_STORE", "array")
+    monkeypatch.setattr(base, "_store_warned", False)
+
+    with caplog.at_level(logging.WARNING, logger="savdex.market.payments"):
+        for _ in range(3):
+            assert base._throttled(RequestFactory().post("/")) is False
+
+    assert sum("throttle_disabled" in r.getMessage() for r in caplog.records) == 1
 
 
 def test_адрес_возврата_без_точки_с_запятой(monkeypatch):
@@ -882,6 +917,17 @@ def test_лимит_колбэков_и_неудачных_подписей(са
             ответ = _payme(сайт, "CheckTransaction", {"id": "x"}, env=предел)
             assert ответ["error"]["code"] == -31003
         assert _payme(сайт, "CheckTransaction", {"id": "x"}, env=предел)["error"]["code"] == -32504
+
+        # Адрес из списка провайдера — сам провайдер: ни блокировки за
+        # неудачные подписи, ни общего предела
+        _сбросить_счётчики()
+        свой = {**счётчик, "MARKET_CALLBACK_RATE": "2", "MARKET_PAYME_CALLBACK_IPS": "127.0.0.1"}
+        for _ in range(3):
+            ответ = _payme(сайт, "CheckTransaction", {"id": "x"}, key="wrong", env=свой)
+            assert ответ["error"]["code"] == -32504
+        for _ in range(3):
+            ответ = _payme(сайт, "CheckTransaction", {"id": "x"}, env=свой)
+            assert ответ["error"]["code"] == -31003
     finally:
         _сбросить_счётчики()
 
@@ -950,9 +996,17 @@ def test_брошенная_попытка_не_держит_заказ(сайт
     )
     assert _click(сайт, "prepare", {**первая, "click_trans_id": "9802"})["error"] == 0
     assert _оплаты(pk) == [("click", "cancelled"), ("click", "pending")]
-    # Complete по погашенной — отказ, Click вернёт деньги
+    # Complete по погашенной — отказ, Click вернёт деньги; но деньги он мог
+    # уже списать — отметка rejected_at, и сверка это видит
     итог = {**первая, "merchant_prepare_id": str(готов["merchant_prepare_id"])}
     assert _click(сайт, "complete", итог)["error"] == -9
+    [(брошенная, отклонена)] = sql(
+        "select id, rejected_at is not null from market_payments "
+        "where provider_transaction_id = '9801'"
+    )
+    assert отклонена
+    сегодня = _manage("market_reconcile_payments", "--day", str(datetime.now(UTC).date()))
+    assert f"оплата {брошенная} отклонена на проведении" in сегодня.stdout, сегодня.stdout
 
     # И со страницы заказа брошенная попытка счёт не блокирует
     sql(
@@ -1130,6 +1184,27 @@ def test_сверка_оплат(сайт, магазин):
         # В журнал приложения — только счётчики, без номеров заказов
         for номер in (фальшивый, ждёт):
             assert номер not in грязно.stderr
+
+        # Сотрудник проверил у провайдера отказ и зависший возврат — сверка
+        # их больше не считает; повторная отметка — False
+        [(возврат,)] = sql(
+            "select id from market_payments where order_id = %s and status = 'paid'", [ждёт_pk]
+        )
+        for pk_ in (отклонена, возврат):
+            код = (
+                "from savdex.market.payments import base; "
+                f"print(base.acknowledge({pk_}, {покупатель}, 'деньги вернулись'))"
+            )
+            assert _python_env(код) == "True"
+            assert _python_env(код) == "False"
+        assert sql(
+            "select checked_by, check_note from market_payments where id = %s", [отклонена]
+        ) == [(покупатель, "деньги вернулись")]
+        проверено = _manage("market_reconcile_payments", "--day", ДЕНЬ)
+        assert f"оплата {отклонена} отклонена" not in проверено.stdout
+        assert f"{ждёт} ждёт возврата" not in проверено.stdout
+        # Фальшивая оплата без начисления — по-прежнему расхождение
+        assert проверено.returncode == 1 and фальшивый in проверено.stdout
     finally:
         # Прочие проверки после этой сверку не запускают, но порядок мог
         # бы смениться: долгий возврат возвращаем в «сейчас»

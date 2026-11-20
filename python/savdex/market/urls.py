@@ -108,8 +108,10 @@ def _gated(route: URLPattern) -> URLPattern:
     return re_path(route.pattern.regex.pattern, _open_only(route.callback), name=route.name)
 
 
-# Каждый адрес — за проверкой «маркетплейс открыт»: и записанные выше, и
-# добавленные позже
+# Каждый адрес из списка выше — за проверкой «маркетплейс открыт».
+# Исключение одно — колбэки оплаты ниже: их список дописан после этой
+# строки (``+=``) намеренно, и _open_only их не оборачивает. Новый адрес
+# страниц — в список выше, не ниже
 urlpatterns = [_gated(route) for route in urlpatterns]
 
 # Колбэки провайдеров оплаты (savdex/market/payments): сервер — серверу,
