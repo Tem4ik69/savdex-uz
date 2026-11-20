@@ -42,6 +42,12 @@ TABLES = (
     "market_product_values",
     "market_favorites",
     "market_cart_items",
+    "market_pickup_points",
+    "market_orders",
+    "market_order_parts",
+    "market_order_items",
+    "market_order_events",
+    "market_ledger",
 )
 
 #: Настройка «сколько первых товаров нового продавца — через модерацию»

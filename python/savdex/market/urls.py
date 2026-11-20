@@ -19,6 +19,8 @@ from savdex.market import api, oneid
 
 _P = r"^(?:(?:uz|en|zh|tr)/)?market/api/"
 _ID = r"[0-9]{1,18}"
+#: Номер заказа — случайный код (savdex/market/orders.py)
+_NUMBER = r"[0-9A-Za-z]{8,16}"
 
 urlpatterns = [
     re_path(_P + r"categories$", api.categories, name="market.api.categories"),
@@ -34,6 +36,16 @@ urlpatterns = [
     re_path(
         _P + rf"favorites/(?P<product_id>{_ID})$", api.favorite, name="market.api.favorites.toggle"
     ),
+    re_path(_P + r"pickup-points$", api.pickup_points, name="market.api.pickup_points"),
+    re_path(_P + r"checkout$", api.checkout, name="market.api.checkout"),
+    re_path(_P + r"orders$", api.my_orders, name="market.api.orders"),
+    re_path(_P + rf"orders/(?P<number>{_NUMBER})$", api.order, name="market.api.order"),
+    re_path(
+        _P + rf"orders/(?P<number>{_NUMBER})/cancel$",
+        api.order_cancel,
+        name="market.api.order.cancel",
+    ),
+    re_path(_P + r"me/orders$", api.my_seller_orders, name="market.api.me.orders"),
     re_path(_P + r"me/seller$", api.seller_state, name="market.api.me.seller"),
     re_path(_P + r"me/seller/apply$", api.seller_apply, name="market.api.me.seller.apply"),
     re_path(_P + r"oneid/start$", api.oneid_start, name="market.api.oneid.start"),
