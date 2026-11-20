@@ -130,7 +130,7 @@
 - **Журнал денег** `market_ledger` — двойная запись: группа строк с суммой
   ноль (`orders.post`, триггер `market_ledger_balanced` в конце транзакции),
   только дописывается (у роли приложения нет `update`/`delete`/`truncate`,
-  триггеры запрещают их всем, и владельцу). Счета: `buyer_receivable` (покупатель заплатит при
+  `update` и `delete` триггер запрещает и владельцу; `truncate` у владельца оставлен для очистки баз проверок). Счета: `buyer_receivable` (покупатель заплатит при
   получении), `gateway_clearing` (деньги у Uzum), `cash_collected` (наличные
   в ПВЗ, этап кассы), `seller_payable` (должны продавцу, с `seller_id`),
   `commission_revenue` (комиссия), `refund_payable` (вернуть покупателю),

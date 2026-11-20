@@ -23,6 +23,7 @@ from typing import Any
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
+from savdex.audit import client_ip
 from savdex.market import banners as market_banners
 from savdex.market import cart, catalog, oneid, orders, products, sellers
 from savdex.market.common import t
@@ -113,6 +114,30 @@ def _limited(ctx: Context, name: str, per_minute: int) -> JsonResponse | None:
     return None
 
 
+def _visitor_net(request: HttpRequest) -> str | None:
+    """
+    Гость для счётчика просмотров: IPv4 — адрес, IPv6 — сеть /64. У одного
+    абонента IPv6 — целая /64, и по адресу каждый запрос был бы «новым
+    гостем»: накрутка и бесконечные пометки в кэше.
+    """
+    import ipaddress
+
+    raw = client_ip(request)
+
+    if not raw:
+        return None
+
+    try:
+        address = ipaddress.ip_address(raw)
+    except ValueError:
+        return raw
+
+    if address.version == 6:
+        return str(ipaddress.ip_network(f"{address}/64", strict=False))
+
+    return str(address)
+
+
 def _id(value: Any) -> int | None:  # noqa: ANN401
     try:
         number = int(str(value))
@@ -180,7 +205,9 @@ def product(request: HttpRequest, slug: str) -> HttpResponse:
     if found is None:
         return _message(ctx, "not_found", 404)
 
-    catalog.seen(found["id"])
+    # HEAD — не просмотр: так ходят проверки ссылок и роботы
+    if request.method == "GET":
+        catalog.seen(found["id"], f"user:{user['id']}" if user else _visitor_net(request))
 
     return _json({"product": found})
 
@@ -727,8 +754,8 @@ def my_product_submit(request: HttpRequest, product_id: str) -> HttpResponse:
         if gaps == ["not_found"]:
             return _message(ctx, "not_found", 404)
 
-        if gaps == ["product.not_draft"]:
-            return _message(ctx, "product.not_draft", 422)
+        if gaps in (["product.not_draft"], ["product.locked"]):
+            return _message(ctx, gaps[0], 422)
 
         fields = ", ".join(t(f"product.field.{gap}", ctx.locale) for gap in gaps)
 
