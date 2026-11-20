@@ -333,7 +333,7 @@ def favorites(request: HttpRequest) -> HttpResponse:
 
 def _order_refused(ctx: Context, refused: orders.OrderRefused, user_id: int) -> JsonResponse:
     """Отказ оформления или отмены: 422 — с полем, 409 — со свежей корзиной."""
-    message = t(refused.key, ctx.locale)
+    message = t(refused.key, ctx.locale, **refused.replace)
     body: dict[str, Any] = {"message": message}
 
     if refused.field:

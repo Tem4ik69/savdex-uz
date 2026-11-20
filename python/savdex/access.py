@@ -174,6 +174,9 @@ _MATRIX: dict[str, dict[str, str]] = {
         "market": "m", "market_catalog": "r",
     },
     "finance": {
+        # TODO: заказы маркетплейса (market_orders) финансам пока не выданы —
+        # решение владельца; вернуться к нему с оплатой картой и сверкой
+        # журнала денег (этап 2)
         "audit": "r", "companies": "r",
         "payments": "w", "subscriptions": "w", "refunds": "w",
         "plans": "r", "promocodes": "w", "creditpacks": "w", "finreports": "r",

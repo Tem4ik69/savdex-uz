@@ -13,7 +13,13 @@ docs/marketplace-security.md, разделы 1, 3 и 5.
 - журнал денег: каждая группа сходится в ноль, записи не меняются и не
   удаляются (у роли приложения нет update и delete);
 - после отгрузки со склада покупатель заказ не отменит; оплаченный картой —
-  в «ожидает возврата».
+  в «ожидает возврата»;
+- незавершённых заказов у покупателя не больше пяти; не собранный за 48
+  часов заказ с оплатой при получении отменяется сам;
+- продавец не видит неоплаченный картой заказ — ни ждущий, ни отменённый;
+- куплено меньше, чем лежало в корзине, — остаток строки остаётся;
+- сводка остатка товара пересчитывается при оформлении и снятии резерва;
+- пользователя с заказами админка навсегда не удаляет — понятный отказ.
 
 Нужен PostgreSQL (SAVDEX_PARITY_PG_URL).
 """
@@ -30,9 +36,20 @@ from typing import Any
 import pytest
 
 from savdex.market import orders
+from savdex.market.common import MAX_PRICE_SOM, tiyin
 
-from .pg_admin import PYTHON, ОКРУЖЕНИЕ, sql, нужна_база, свежая_база
-from .test_market import _get, _get_as, _json, _post, _компания, _продавец, _товар, _человек
+from .pg_admin import PYTHON, ОКРУЖЕНИЕ, django, sql, нужна_база, свежая_база
+from .test_market import (
+    _get,
+    _get_as,
+    _json,
+    _post,
+    _компания,
+    _продавец,
+    _сотрудник,
+    _товар,
+    _человек,
+)
 from .web_site import адрес
 
 # ── Без базы ────────────────────────────────────────────────────────
@@ -72,11 +89,106 @@ def test_комиссия_и_переходы():
         orders.transition(1, orders.ISSUED, orders.CANCELLED, actor="buyer")
 
 
+def test_сумма_заказа_не_режется_пределом_цены():
+    """expectedTotal большой корзины больше цены одной штуки — сравнивается честно."""
+    большая = MAX_PRICE_SOM * 3
+    assert tiyin(большая) is None
+    assert orders.total_tiyin(большая) == большая * 100
+    assert orders.total_tiyin(orders.MAX_TOTAL_SOM) == orders.MAX_TOTAL_SOM * 100
+    assert orders.total_tiyin("125 000,50") == 12_500_050
+    assert orders.total_tiyin(0) == 0
+
+    for плохая in (
+        orders.MAX_TOTAL_SOM + 1,
+        -1,
+        "1.001",
+        "Infinity",
+        "NaN",
+        "1e999999",
+        "abc",
+        True,
+        None,
+    ):
+        assert orders.total_tiyin(плохая) is None, плохая
+
+
+def test_доставка_в_журнале_сходится():
+    """С доставкой группа начисления и обратная ей — в ноль; доставка — свой счёт."""
+    заказ = {"id": 7, "total": 1_150_000, "delivery_total": 150_000}
+    части = [
+        {"id": 1, "seller_id": 3, "subtotal": 600_000, "commission": 60_000},
+        {"id": 2, "seller_id": 4, "subtotal": 400_000, "commission": 0},
+    ]
+    начисление = orders.accrual_entries(заказ, части, "buyer_receivable", "заказ")
+    обратно = orders.reversal_entries(начисление, "buyer_receivable", "refund_payable", "отмена")
+
+    for группа in (начисление, обратно):
+        assert sum(entry.amount for entry in группа) == 0
+        assert {entry.account for entry in группа} <= set(orders.ACCOUNTS)
+
+    assert [e.amount for e in начисление if e.account == "delivery_revenue"] == [-150_000]
+    assert [e.amount for e in обратно if e.account == "delivery_revenue"] == [150_000]
+    # Без доставки строки доставки нет (сумму 0 журнал не принимает)
+    без = orders.accrual_entries(
+        {"id": 7, "total": 1_000_000, "delivery_total": 0}, части, "gateway_clearing", "заказ"
+    )
+    assert "delivery_revenue" not in {entry.account for entry in без}
+    assert sum(entry.amount for entry in без) == 0
+
+
+def test_счета_журнала_совпадают_с_миграцией():
+    """Ограничение market_ledger_account_check — тот же список, что ACCOUNTS."""
+    миграция = (
+        PYTHON / "savdex/bootstrap/migrations/2026_11_21_100000_create_market_orders.sql"
+    ).read_text(encoding="utf-8")
+    найдено = re.search(
+        r"market_ledger_account_check check \(account in \((.*?)\)\)", миграция, re.S
+    )
+    assert найдено is not None
+    assert set(re.findall(r"'(\w+)'", найдено.group(1))) == set(orders.ACCOUNTS)
+
+
+def test_поддержка_не_сортирует_по_сумме(monkeypatch):
+    """Роль без подробностей: порядок по деньгам выкинут, столбца суммы для сортировки нет."""
+    from savdex.adminsite import site
+    from savdex.market.models import Order
+
+    раздел = site._registry[Order]
+    запрос: Any = object()
+    monkeypatch.setattr(раздел, "ordering", ("-total", "-created_at"))
+    monkeypatch.setattr(раздел, "sees_details", lambda request: False)
+
+    assert раздел.get_ordering(запрос) == ("-created_at",)
+    assert "total_text" not in раздел.get_sortable_by(запрос)
+    monkeypatch.setattr(раздел, "ordering", ("total",))
+    assert раздел.get_ordering(запрос) == ("-created_at", "-id")
+
+    monkeypatch.setattr(раздел, "sees_details", lambda request: True)
+    assert раздел.get_ordering(запрос) == ("total",)
+    assert "total_text" in раздел.get_sortable_by(запрос)
+
+    # Обычный порядок раздела — не по сумме
+    assert all("total" not in field for field in type(раздел).ordering)
+
+
 # ── Данные ──────────────────────────────────────────────────────────
 
 
 @pytest.fixture(scope="module")
-def сайт() -> Iterator[str]:
+def _роль_django() -> None:
+    """
+    Роль savdex_django, как на сервере (так же, как в tests/test_schema.py):
+    миграции выдают ей права, их проверяет
+    test_у_роли_приложения_журнал_только_дописывается. В чистой базе CI её нет.
+    """
+    sql(
+        "do $$ begin if not exists (select from pg_roles where rolname = 'savdex_django') "
+        "then create role savdex_django; end if; end $$"
+    )
+
+
+@pytest.fixture(scope="module")
+def сайт(_роль_django) -> Iterator[str]:
     свежая_база()
 
     with адрес() as root:
@@ -347,7 +459,7 @@ def test_истечение_неоплаченной_карты(сайт, маг
     )
     итог = _manage("market_expire_orders")
     assert итог.returncode == 0, итог.stderr[-3000:]
-    assert "Отменено неоплаченных заказов: 1." in итог.stdout
+    assert "Отменено незавершённых заказов: 1." in итог.stdout
     assert _статус(старый["number"]) == "cancelled" and _статус(свежий["number"]) == "created"
     assert _резерв(кубики) == до + 1
 
@@ -511,6 +623,11 @@ def test_журнал_денег_сходится_и_не_меняется(са�
         sql("delete from market_ledger where id = %s", [строка])
     with pytest.raises(psycopg.errors.InsufficientPrivilege):
         sql("delete from market_order_events where order_id = %s", [_id(number)])
+    # truncate построчные триггеры не ловят — свой триггер на оператор
+    for table in ("market_ledger", "market_order_events"):
+        with pytest.raises(psycopg.errors.InsufficientPrivilege):
+            sql(f"truncate {table}")
+    assert sql("select count(*) from market_ledger where order_id = %s", [_id(number)]) != [(0,)]
     with pytest.raises(psycopg.errors.CheckViolation):
         sql(
             "insert into market_ledger (entry_group, account, amount) "
@@ -520,18 +637,171 @@ def test_журнал_денег_сходится_и_не_меняется(са�
 
 @нужна_база
 def test_у_роли_приложения_журнал_только_дописывается(сайт):
-    if not sql("select 1 from pg_roles where rolname = 'savdex_django'"):
-        pytest.skip("нет роли savdex_django — права миграции проверить не на ком")
+    # Роль заводит фикстура _роль_django до миграций — проверка идёт и в CI
+    assert sql("select 1 from pg_roles where rolname = 'savdex_django'") == [(1,)]
 
     for table in ("market_ledger", "market_order_events"):
         assert sql(
             "select has_table_privilege('savdex_django', %s, 'insert'), "
             "has_table_privilege('savdex_django', %s, 'update'), "
-            "has_table_privilege('savdex_django', %s, 'delete')",
-            [table, table, table],
-        ) == [(True, False, False)], table
+            "has_table_privilege('savdex_django', %s, 'delete'), "
+            "has_table_privilege('savdex_django', %s, 'truncate')",
+            [table, table, table, table],
+        ) == [(True, False, False, False)], table
 
     assert sql(
         "select has_table_privilege('savdex_django', 'market_orders', 'update'), "
         "has_table_privilege('savdex_django', 'market_orders', 'delete')"
     ) == [(True, False)]
+
+
+# ── Резерв не копится, сводка, корзина, продавец ────────────────────
+
+
+def _сводка(product: int) -> int:
+    [(stock,)] = sql("select stock from market_products where id = %s", [product])
+
+    return int(stock)
+
+
+@нужна_база
+def test_незавершённых_не_больше_пяти_и_истечение_при_получении(сайт, магазин):
+    товар, вариант = _товар(
+        магазин["продавец"], "toys", "Мяч футбольный", "football", price=50_000, stock=50
+    )
+    покупатель = _покупатель()
+    номера = []
+
+    for _ in range(orders.MAX_OPEN_ORDERS):
+        _в_корзину(покупатель, вариант)
+        ответ = _оформить(сайт, покупатель, 50_000)
+        assert ответ["status"] == 201, ответ["body"]
+        номера.append(_json(ответ)["order"]["number"])
+
+    assert _резерв(вариант) == 5 and _сводка(товар) == 45
+
+    # Шестой — 409 с понятным текстом; заказа и резерва нет, корзина цела
+    _в_корзину(покупатель, вариант)
+    шестой = _оформить(сайт, покупатель, 50_000)
+    assert шестой["status"] == 409, шестой["body"]
+    assert "5 незавершённых заказов" in _json(шестой)["message"]
+    assert sql("select count(*) from market_orders where buyer_user_id = %s", [покупатель]) == [
+        (5,)
+    ]
+    assert _резерв(вариант) == 5
+    assert sql("select count(*) from market_cart_items where user_id = %s", [покупатель]) == [(1,)]
+
+    # Не собранный за 48 часов заказ при получении отменяется сам — тем же
+    # путём, что отмена: резерв снят один раз, начисление — назад
+    старый = номера[0]
+    sql(
+        "update market_orders set created_at = created_at - interval '49 hours' where number = %s",
+        [старый],
+    )
+    итог = _manage("market_expire_orders", "--minutes", "100000", "--hours", "48")
+    assert итог.returncode == 0, итог.stderr[-3000:]
+    assert "Отменено незавершённых заказов: 1." in итог.stdout
+    assert _статус(старый) == "cancelled"
+    assert all(_статус(number) == "cash_on_pickup" for number in номера[1:])
+    assert _резерв(вариант) == 4 and _сводка(товар) == 46
+    assert sql(
+        "select to_status, actor from market_order_events where order_id = %s "
+        "order by id desc limit 1",
+        [_id(старый)],
+    ) == [("cancelled", "system")]
+    assert sql(
+        "select count(*) from (select account from market_ledger where order_id = %s "
+        "group by account having sum(amount) <> 0) t",
+        [_id(старый)],
+    ) == [(0,)]
+    assert "заказов: 0." in _manage("market_expire_orders", "--minutes", "100000").stdout
+    assert _резерв(вариант) == 4
+
+    # Место освободилось — шестой оформляется
+    assert _оформить(сайт, покупатель, 50_000)["status"] == 201
+
+
+@нужна_база
+def test_частичная_покупка_оставляет_остаток_в_корзине(сайт, магазин):
+    товар, вариант = _товар(
+        магазин["продавец"], "toys", "Юла светящаяся", "spinning-top", price=20_000, stock=2
+    )
+    покупатель = _покупатель()
+    _в_корзину(покупатель, вариант, 5)
+
+    # Корзина считает «можно купить сейчас» две штуки — их и покупаем
+    ответ = _оформить(сайт, покупатель, 40_000)
+    assert ответ["status"] == 201, ответ["body"]
+    number = _json(ответ)["order"]["number"]
+    assert sql("select quantity from market_order_items where order_id = %s", [_id(number)]) == [
+        (2,)
+    ]
+    assert sql(
+        "select quantity from market_cart_items where user_id = %s and variant_id = %s",
+        [покупатель, вариант],
+    ) == [(3,)]
+    # Сводка товара — за вычетом резерва, в той же транзакции
+    assert _резерв(вариант) == 2 and _сводка(товар) == 0
+
+    отмена = _post(сайт, f"/market/api/orders/{number}/cancel", покупатель)
+    assert отмена["status"] == 200, отмена["body"]
+    assert _резерв(вариант) == 0 and _сводка(товар) == 2
+
+
+@нужна_база
+def test_продавец_не_видит_неоплаченную_карту(сайт, магазин):
+    продавец = _человек("seller-card@chorsu.uz", магазин["компания"])
+    покупатель = _покупатель()
+    _в_корзину(покупатель, магазин["вариант_телефона"])
+    ждёт = _json(_оформить(сайт, покупатель, 4_000_000, method="card"))["order"]["number"]
+    _в_корзину(покупатель, магазин["вариант_телефона"])
+    отменён = _json(_оформить(сайт, покупатель, 4_000_000, method="card"))["order"]["number"]
+    assert _post(сайт, f"/market/api/orders/{отменён}/cancel", покупатель)["status"] == 200
+    _в_корзину(покупатель, магазин["вариант_телефона"])
+    оплачен = _json(_оформить(сайт, покупатель, 4_000_000, method="card"))["order"]["number"]
+    pk = _id(оплачен)
+    assert _python(
+        f"from savdex.market import orders; print(orders.mark_paid({pk}, 400000000))"
+    ) == ("True")
+
+    видит = {o["number"] for o in _json(_get_as(сайт, "/market/api/me/orders", продавец))["orders"]}
+    assert оплачен in видит
+    assert ждёт not in видит and отменён not in видит
+
+
+@нужна_база
+def test_пользователя_с_заказами_не_удалить_навсегда(сайт, магазин):
+    покупатель = _покупатель("Удаляемый Покупатель")
+    _в_корзину(покупатель, магазин["кубики"])
+    assert _оформить(сайт, покупатель, 90_000)["status"] == 201
+    sql("update users set deleted_at = now() where id = %s", [покупатель])
+
+    список = "/py/admin/accounts/user/"
+    _, _, страница = django(
+        _сотрудник("superadmin"),
+        (
+            "post",
+            список,
+            {"action": "force_delete", "_selected_action": [str(покупатель)], "post": "yes"},
+        ),
+        ("get", список + "?state=disabled", None),
+    )
+
+    assert страница["status"] == 200
+    assert "У пользователя есть заказы маркетплейса — удалить нельзя" in страница["body"]
+    assert sql("select count(*) from users where id = %s", [покупатель]) == [(1,)]
+    assert sql("select count(*) from market_orders where buyer_user_id = %s", [покупатель]) == [
+        (1,)
+    ]
+
+
+@нужна_база
+def test_админка_заказов_имя_покупателя(сайт, магазин):
+    покупатель = _покупатель("Шахноза Рашидова")
+    _в_корзину(покупатель, магазин["кубики"])
+    number = _json(_оформить(сайт, покупатель, 90_000))["order"]["number"]
+
+    for role in ("admin", "support"):
+        _, страница = django(_сотрудник(role), ("get", "/py/admin/market/order/", None))
+        assert страница["status"] == 200, role
+        assert number in страница["body"] and "Шахноза Рашидова" in страница["body"], role

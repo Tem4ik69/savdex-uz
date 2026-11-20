@@ -41,6 +41,7 @@ from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 
 from savdex import audit
+from savdex.accounts.models import User
 from savdex.adminsite import SavdexModelAdmin, _admin_of, register
 from savdex.crm.admin import _badge, when
 from savdex.market import orders, products, sellers
@@ -1174,9 +1175,40 @@ class OrderAdmin(SavdexModelAdmin):
     #: Что не видит роль без подробностей (Admin.sees_details)
     detail_fields = ("money",)
     detail_columns = ("total_text",)
+    #: Поля денег: по ним роль без подробностей и не сортирует — порядок
+    #: строк выдал бы скрытые суммы
+    money_fields = ("total", "items_total", "delivery_total", "commission_total")
 
     def sees_details(self, request: HttpRequest) -> bool:
         return _admin_of(request).sees_details(self.section)
+
+    def get_queryset(self, request: HttpRequest) -> QuerySet[Order]:
+        """Имя покупателя — подзапросом в том же запросе, а не запросом на строку."""
+        found: QuerySet[Order] = super().get_queryset(request)
+
+        return found.annotate(
+            buyer_name=Subquery(
+                User.objects.filter(pk=OuterRef("buyer_user_id")).values("name")[:1]
+            )
+        )
+
+    def get_ordering(self, request: HttpRequest) -> Any:  # noqa: ANN401
+        ordering = tuple(super().get_ordering(request) or ())
+
+        if self.sees_details(request):
+            return ordering
+
+        kept = tuple(field for field in ordering if str(field).lstrip("-") not in self.money_fields)
+
+        return kept or ("-created_at", "-id")
+
+    def get_sortable_by(self, request: HttpRequest) -> Any:  # noqa: ANN401
+        shown = self.get_list_display(request)
+
+        if self.sees_details(request):
+            return shown
+
+        return tuple(column for column in shown if column not in self.detail_columns)
 
     def get_fields(self, request: HttpRequest, obj: Any = None) -> Any:  # noqa: ANN401
         shown = super().get_fields(request, obj)
@@ -1205,11 +1237,9 @@ class OrderAdmin(SavdexModelAdmin):
 
     @admin.display(description="покупатель")
     def buyer(self, obj: Order) -> str:
-        with connection.cursor() as cursor:
-            cursor.execute("select name from users where id = %s", [obj.buyer_user_id])
-            row = cursor.fetchone()
+        name = getattr(obj, "buyer_name", None)
 
-        return format_html("{} <small>№{}</small>", row[0] if row else "—", obj.buyer_user_id)
+        return format_html("{} <small>№{}</small>", name or "—", obj.buyer_user_id)
 
     @admin.display(description="статус", ordering="status")
     def state(self, obj: Order) -> str:

@@ -508,11 +508,44 @@ class UserAdmin(SavdexModelAdmin):
             )
 
         done = 0
+        kept: list[str] = []
+        held: list[str] = []
 
         for user in targets:
-            if self._write("delete from users where id = %s and deleted_at is not null", [user.pk]):
+            # Заказы маркетплейса и их история держат покупателя (внешние
+            # ключи on delete restrict): удаление упало бы ошибкой базы —
+            # понятный отказ вместо 500
+            if _has_market_orders(user.pk):
+                kept.append(user.email)
+                continue
+
+            try:
+                deleted = self._write(
+                    "delete from users where id = %s and deleted_at is not null", [user.pk]
+                )
+            except IntegrityError:
+                # Заказ появился между проверкой и удалением — или строку
+                # держит другой внешний ключ
+                (kept if _has_market_orders(user.pk) else held).append(user.email)
+                continue
+
+            if deleted:
                 self.journal(request, "force_deleted", user)
                 done += 1
+
+        if kept:
+            self.message_user(
+                request,
+                "У пользователя есть заказы маркетплейса — удалить нельзя: " + ", ".join(kept),
+                messages.ERROR,
+            )
+
+        if held:
+            self.message_user(
+                request,
+                "Не удалено — на пользователя ссылаются другие записи: " + ", ".join(held),
+                messages.ERROR,
+            )
 
         self.message_user(request, f"Удалено навсегда: {done}.", messages.SUCCESS)
 
@@ -761,6 +794,19 @@ class UserAdmin(SavdexModelAdmin):
             cursor.execute(query, params)
 
             return bool(cursor.rowcount > 0)
+
+
+def _has_market_orders(user_id: int) -> bool:
+    """Есть ли у пользователя заказы маркетплейса или записи в их истории."""
+    with connections["default"].cursor() as cursor:
+        cursor.execute(
+            "select exists (select from market_orders where buyer_user_id = %s) "
+            "or exists (select from market_order_events where actor_user_id = %s)",
+            [user_id, user_id],
+        )
+        row = cursor.fetchone()
+
+    return bool(row and row[0])
 
 
 #: UserExporter::getColumns

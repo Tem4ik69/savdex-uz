@@ -26,7 +26,13 @@
 оплаченный картой заказ уходит в «ожидает возврата» (``refund_pending``),
 сам возврат — этап 2 (``mark_refunded``). Неоплаченный картой заказ старше
 N минут (настройка ``market_order_expire_minutes``, по умолчанию 30)
-отменяется сам — ``expire`` (manage.py market_expire_orders и расписание).
+отменяется сам — ``expire`` (manage.py market_expire_orders и расписание);
+так же — заказ с оплатой при получении, который за N часов (настройка
+``market_cash_order_expire_hours``, по умолчанию 48) не начали собирать.
+
+Резерв не копится: у покупателя не больше ``MAX_OPEN_ORDERS``
+незавершённых заказов (ждут оплаты картой или с оплатой при получении,
+ещё не собираются), следующее оформление — 409.
 """
 
 from __future__ import annotations
@@ -35,7 +41,7 @@ import json
 import logging
 import secrets
 import uuid
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
@@ -43,8 +49,10 @@ from typing import Any
 
 from django.db import transaction
 
+from savdex.market import products
+from savdex.market.cart import MAX_LINES, MAX_QUANTITY
 from savdex.market.catalog import VISIBLE
-from savdex.market.common import now, one, rows, som, t, tiyin, write
+from savdex.market.common import MAX_PRICE_SOM, TIYIN, now, one, rows, som, t, write
 from savdex.web.shared import public_url, settings_values
 
 log = logging.getLogger("savdex.market.orders")
@@ -95,8 +103,14 @@ TRANSITIONS: dict[str, frozenset[str]] = {
 #: Покупатель отменяет сам — только до отгрузки со склада (ТЗ, раздел 7)
 CANCELLABLE = frozenset({CREATED, PAID, CASH_ON_PICKUP, ASSEMBLING})
 
-#: Продавцу не показываем неоплаченный картой заказ: собирать его рано
-_SELLER_HIDDEN = (CREATED,)
+#: Незавершённые заказы покупателя (ждут оплаты картой или с оплатой при
+#: получении, ещё не собираются) — держат резерв; их не больше MAX_OPEN_ORDERS
+OPEN_STATUSES = (CREATED, CASH_ON_PICKUP)
+MAX_OPEN_ORDERS = 5
+
+# Продавцу не показываем неоплаченный картой заказ — ни ждущий оплаты, ни
+# отменённый по сроку или покупателем: собирать его было рано
+# (seller_orders, условие на paid_at)
 
 #: Способы оплаты: картой на сайте (Uzum, этап 2) или при получении
 METHODS = ("card", "cash")
@@ -121,6 +135,8 @@ ACCOUNTS: dict[str, str] = {
     "commission_revenue": "Комиссия площадки",
     # Должны вернуть покупателю (отмена оплаченного заказа)
     "refund_payable": "К возврату покупателю",
+    # Доставка (delivery_total заказа) — выручка площадки
+    "delivery_revenue": "Доставка",
 }
 
 # ── Настройки ───────────────────────────────────────────────────────
@@ -132,6 +148,14 @@ COMMISSION_DEFAULT = Decimal(10)
 #: Через сколько минут неоплаченный картой заказ отменяется и резерв снимается
 EXPIRE_KEY = "market_order_expire_minutes"
 EXPIRE_DEFAULT = 30
+
+#: Через сколько часов заказ с оплатой при получении, который не начали
+#: собирать, отменяется и резерв снимается
+CASH_EXPIRE_KEY = "market_cash_order_expire_hours"
+CASH_EXPIRE_DEFAULT = 48
+
+#: Сумма заказа сверху: строк в корзине × штук в строке × цена штуки
+MAX_TOTAL_SOM = MAX_LINES * MAX_QUANTITY * MAX_PRICE_SOM
 
 #: Номер заказа: 10 знаков без похожих (0/O, 1/I) — около 10¹⁵ вариантов
 _ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
@@ -145,17 +169,25 @@ class TransitionError(ValueError):
 class OrderRefused(Exception):  # noqa: N818 — отказ покупателю, а не сбой
     """
     Отказ с текстом для покупателя: ключ словаря (market.<key>), код ответа,
-    поле формы (для 422) и нужна ли в ответе свежая корзина (409).
+    поле формы (для 422), нужна ли в ответе свежая корзина (409) и что
+    подставить в текст (:max).
     """
 
     def __init__(
-        self, key: str, status: int, *, field: str | None = None, fresh_cart: bool = False
+        self,
+        key: str,
+        status: int,
+        *,
+        field: str | None = None,
+        fresh_cart: bool = False,
+        replace: Mapping[str, object] | None = None,
     ) -> None:
         super().__init__(key)
         self.key = key
         self.status = status
         self.field = field
         self.fresh_cart = fresh_cart
+        self.replace = dict(replace or {})
 
 
 def commission_percent() -> Decimal:
@@ -190,6 +222,49 @@ def expire_minutes() -> int:
         return EXPIRE_DEFAULT
 
     return number if number >= 5 else EXPIRE_DEFAULT
+
+
+def cash_expire_hours() -> int:
+    """
+    Сколько часов заказ с оплатой при получении ждёт сборки; не число или
+    меньше часа — по умолчанию.
+    """
+    value = settings_values().get(CASH_EXPIRE_KEY)
+
+    try:
+        number = int(str(value))
+    except (TypeError, ValueError):
+        return CASH_EXPIRE_DEFAULT
+
+    return number if number >= 1 else CASH_EXPIRE_DEFAULT
+
+
+def total_tiyin(value: Any) -> int | None:  # noqa: ANN401
+    """
+    Сумма заказа, которую видел покупатель (expectedTotal, сумы) → тийины.
+    Не tiyin() из common: тот режет по пределу цены одной штуки, а сумма
+    большой корзины его законно превышает. Не число, минус, бесконечность,
+    больше MAX_TOTAL_SOM, больше двух знаков после точки — None.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+
+    text = str(value).replace(" ", "").replace(" ", "").replace(",", ".")
+
+    try:
+        amount = Decimal(text)
+    except InvalidOperation:
+        return None
+
+    if not amount.is_finite() or amount < 0 or amount > MAX_TOTAL_SOM:
+        return None
+
+    cents = amount * TIYIN
+
+    if cents != cents.to_integral_value():
+        return None
+
+    return int(cents)
 
 
 def commission_of(line_total: int, percent: Decimal) -> int:
@@ -257,21 +332,20 @@ def post(group: str | None, entries: Sequence[Entry]) -> str:
     return number
 
 
-def _accrual(order_id: int, source: str, memo: str) -> list[Entry]:
+def accrual_entries(
+    order: Mapping[str, Any], parts: Sequence[Mapping[str, Any]], source: str, memo: str
+) -> list[Entry]:
     """
-    Начисление по заказу: source (кто должен деньги) — плюс сумма заказа;
-    каждому продавцу — минус его часть без комиссии, площадке — минус
-    комиссия.
+    Начисление по заказу (строка заказа: id, total, delivery_total; части:
+    id, seller_id, subtotal, commission): source (кто должен деньги) — плюс
+    сумма заказа; каждому продавцу — минус его часть без комиссии,
+    площадке — минус комиссия и минус доставка. Сумма заказа — товары плюс
+    доставка, поэтому группа сходится в ноль и с доставкой.
     """
-    order = one("select total from market_orders where id = %s", [order_id])
-    assert order is not None
+    order_id = int(order["id"])
     entries = [Entry(source, int(order["total"]), order_id=order_id, memo=memo)]
 
-    for part in rows(
-        "select id, seller_id, subtotal, commission from market_order_parts "
-        "where order_id = %s order by id",
-        [order_id],
-    ):
+    for part in parts:
         payable = int(part["subtotal"]) - int(part["commission"])
         refs = {"order_id": order_id, "part_id": part["id"], "seller_id": part["seller_id"]}
 
@@ -281,11 +355,16 @@ def _accrual(order_id: int, source: str, memo: str) -> list[Entry]:
         if part["commission"]:
             entries.append(Entry("commission_revenue", -int(part["commission"]), memo=memo, **refs))
 
+    if int(order.get("delivery_total") or 0):
+        entries.append(
+            Entry("delivery_revenue", -int(order["delivery_total"]), order_id=order_id, memo=memo)
+        )
+
     return entries
 
 
-def _reversal(order_id: int, source: str, target: str, memo: str) -> list[Entry]:
-    """Обратное начислению: продавцам и комиссии — назад, сумма заказа — на target."""
+def reversal_entries(entries: Sequence[Entry], source: str, target: str, memo: str) -> list[Entry]:
+    """Обратное начислению: продавцам, комиссии и доставке — назад, сумма заказа — на target."""
     return [
         Entry(
             target if entry.account == source else entry.account,
@@ -295,8 +374,26 @@ def _reversal(order_id: int, source: str, target: str, memo: str) -> list[Entry]
             seller_id=entry.seller_id,
             memo=memo,
         )
-        for entry in _accrual(order_id, source, memo)
+        for entry in entries
     ]
+
+
+def _accrual(order_id: int, source: str, memo: str) -> list[Entry]:
+    """Начисление по заказу из базы — accrual_entries."""
+    order = one("select id, total, delivery_total from market_orders where id = %s", [order_id])
+    assert order is not None
+    parts = rows(
+        "select id, seller_id, subtotal, commission from market_order_parts "
+        "where order_id = %s order by id",
+        [order_id],
+    )
+
+    return accrual_entries(order, parts, source, memo)
+
+
+def _reversal(order_id: int, source: str, target: str, memo: str) -> list[Entry]:
+    """Обратное начислению из базы — reversal_entries."""
+    return reversal_entries(_accrual(order_id, source, memo), source, target, memo)
 
 
 # ── Переходы статуса и резерв ───────────────────────────────────────
@@ -378,6 +475,8 @@ def release_reserve(order_id: int) -> bool:
     """
     Снять резерв остатка заказа — ровно один раз: отметка
     ``reserve_released_at`` ставится условно, второй вызов ничего не делает.
+    Сводка остатка товаров (market_products.stock) — заново, в той же
+    транзакции.
     """
     with transaction.atomic():
         changed = write(
@@ -389,11 +488,13 @@ def release_reserve(order_id: int) -> bool:
         if not changed:
             return False
 
-        for item in rows(
-            "select variant_id, quantity from market_order_items where order_id = %s "
+        items = rows(
+            "select variant_id, product_id, quantity from market_order_items where order_id = %s "
             "order by variant_id",
             [order_id],
-        ):
+        )
+
+        for item in items:
             released = write(
                 "update market_product_variants set reserved = reserved - %s "
                 "where id = %s and reserved >= %s",
@@ -408,7 +509,15 @@ def release_reserve(order_id: int) -> bool:
                     item["variant_id"],
                 )
 
+        _refresh_products(int(item["product_id"]) for item in items)
+
     return True
+
+
+def _refresh_products(product_ids: Iterable[int]) -> None:
+    """Сводка товаров (остаток за вычетом резерва) — по возрастанию номера."""
+    for product_id in sorted(set(product_ids)):
+        products.refresh(product_id)
 
 
 # ── Оформление ──────────────────────────────────────────────────────
@@ -470,7 +579,7 @@ def checkout(user_id: int, data: Mapping[str, Any]) -> str:
     if point is None:
         raise OrderRefused("order.pickup_point", 422, field="pickupPoint")
 
-    expected = tiyin(data.get("expectedTotal"))
+    expected = total_tiyin(data.get("expectedTotal"))
 
     if expected is None:
         raise OrderRefused("order.expected_total", 422, field="expectedTotal")
@@ -482,6 +591,16 @@ def checkout(user_id: int, data: Mapping[str, Any]) -> str:
 
         if not lines:
             raise OrderRefused("order.cart_empty", 422)
+
+        # После блокировки корзины: параллельное оформление того же
+        # покупателя уже закончилось, его заказ здесь виден
+        open_now = one(
+            "select count(*) as n from market_orders where buyer_user_id = %s and status = any(%s)",
+            [user_id, list(OPEN_STATUSES)],
+        )
+
+        if open_now is not None and int(open_now["n"]) >= MAX_OPEN_ORDERS:
+            raise OrderRefused("order.too_many_open", 409, replace={"max": MAX_OPEN_ORDERS})
 
         buyable: list[dict[str, Any]] = []
 
@@ -510,6 +629,9 @@ def checkout(user_id: int, data: Mapping[str, Any]) -> str:
 
             if reserved is None:
                 raise OrderRefused("cart.out_of_stock", 409, fresh_cart=True)
+
+        # Остаток в карточке и каталоге — за вычетом нового резерва
+        _refresh_products(int(line["product_id"]) for line in buyable)
 
         parts: dict[int, list[dict[str, Any]]] = {}
 
@@ -567,10 +689,23 @@ def checkout(user_id: int, data: Mapping[str, Any]) -> str:
             transition(order_id, CREATED, CASH_ON_PICKUP, actor="buyer", actor_user_id=user_id)
             post(None, _accrual(order_id, "buyer_receivable", f"заказ {number}: при получении"))
 
-        write(
-            "delete from market_cart_items where user_id = %s and variant_id = any(%s)",
-            [user_id, [int(line["variant_id"]) for line in buyable]],
-        )
+        # Куплено меньше, чем лежало в корзине (остаток кончился) —
+        # недостающее остаётся в корзине; купленное целиком — уходит
+        whole = [int(line["variant_id"]) for line in buyable if line["take"] >= line["quantity"]]
+
+        for line in buyable:
+            if line["take"] < line["quantity"]:
+                write(
+                    "update market_cart_items set quantity = quantity - %s, updated_at = %s "
+                    "where user_id = %s and variant_id = %s and quantity > %s",
+                    [line["take"], now(), user_id, line["variant_id"], line["take"]],
+                )
+
+        if whole:
+            write(
+                "delete from market_cart_items where user_id = %s and variant_id = any(%s)",
+                [user_id, whole],
+            )
 
     log.info("market.order.created id=%s method=%s parts=%s", order_id, method, len(parts))
 
@@ -620,6 +755,47 @@ def _insert_order(
 # ── Отмена и истечение ──────────────────────────────────────────────
 
 
+def _close(
+    order: Mapping[str, Any],
+    target: str,
+    *,
+    actor: str,
+    actor_user_id: int | None = None,
+    note: str,
+) -> bool:
+    """
+    Общий путь отмены (покупатель, истечение): условный переход в target,
+    резерв — снять ровно один раз, начисление — обратной группой
+    (оплаченный картой — в долг покупателю, при получении — снять долг
+    покупателя). Вызывать в транзакции. False — статус уже сменил кто-то
+    другой; ничего не записано.
+    """
+    order_id = int(order["id"])
+
+    if not transition(
+        order_id,
+        str(order["status"]),
+        target,
+        actor=actor,
+        actor_user_id=actor_user_id,
+        note=note,
+    ):
+        return False
+
+    release_reserve(order_id)
+    memo = f"заказ {order['number']}: отмена"
+
+    if order["paid_at"] is not None:
+        post(None, _reversal(order_id, "gateway_clearing", "refund_payable", memo))
+    elif order["payment_method"] == "cash":
+        post(None, _reversal(order_id, "buyer_receivable", "buyer_receivable", memo))
+
+    return True
+
+
+_CLOSE_FIELDS = "id, number, status, payment_method, paid_at"
+
+
 def cancel(user_id: int, number: str, reason: str | None = None) -> str:
     """
     Отмена покупателем — только своего заказа и только до отгрузки со
@@ -629,7 +805,7 @@ def cancel(user_id: int, number: str, reason: str | None = None) -> str:
     """
     with transaction.atomic():
         order = one(
-            "select id, number, status, payment_method, paid_at from market_orders "
+            f"select {_CLOSE_FIELDS} from market_orders "
             "where number = %s and buyer_user_id = %s for update",
             [normalize_number(number), user_id],
         )
@@ -637,59 +813,69 @@ def cancel(user_id: int, number: str, reason: str | None = None) -> str:
         if order is None:
             raise OrderRefused("order.not_found", 404)
 
-        status = str(order["status"])
-
-        if status not in CANCELLABLE:
+        if str(order["status"]) not in CANCELLABLE:
             raise OrderRefused("order.cannot_cancel", 409)
 
-        paid = order["paid_at"] is not None
-        target = REFUND_PENDING if paid else CANCELLED
+        target = REFUND_PENDING if order["paid_at"] is not None else CANCELLED
         note = (reason or "").strip()[:500] or "отменён покупателем"
 
-        if not transition(
-            int(order["id"]), status, target, actor="buyer", actor_user_id=user_id, note=note
-        ):
+        if not _close(order, target, actor="buyer", actor_user_id=user_id, note=note):
             raise OrderRefused("order.changed", 409)
-
-        release_reserve(int(order["id"]))
-        memo = f"заказ {order['number']}: отмена"
-
-        if paid:
-            post(None, _reversal(int(order["id"]), "gateway_clearing", "refund_payable", memo))
-        elif order["payment_method"] == "cash":
-            post(None, _reversal(int(order["id"]), "buyer_receivable", "buyer_receivable", memo))
 
     log.info("market.order.cancelled id=%s to=%s", order["id"], target)
 
     return target
 
 
-def expire(minutes: int | None = None, moment: datetime | None = None) -> int:
+def _cutoff(moment: datetime | None, wait: timedelta) -> str:
+    return ((moment or datetime.now(UTC)) - wait).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def expire(
+    minutes: int | None = None, moment: datetime | None = None, *, hours: int | None = None
+) -> int:
     """
-    Неоплаченные картой заказы старше N минут — отменить и снять резерв.
-    Каждый — своей транзакцией и условным переходом: оплата, пришедшая
-    одновременно, побеждает или проигрывает целиком. Возвращает, сколько
-    отменено.
+    Отменить и снять резерв:
+
+    - неоплаченные картой заказы старше N минут (``minutes``, по умолчанию
+      настройка market_order_expire_minutes);
+    - заказы с оплатой при получении, которые за N часов (``hours``, по
+      умолчанию настройка market_cash_order_expire_hours) не начали
+      собирать, — иначе покупатель держал бы резерв без конца.
+
+    Каждый — своей транзакцией, под блокировкой строки и условным
+    переходом (тот же путь, что отмена покупателем): оплата или сборка,
+    пришедшие одновременно, побеждают или проигрывают целиком. Возвращает,
+    сколько отменено.
     """
     wait = minutes if minutes is not None else expire_minutes()
-    cutoff = ((moment or datetime.now(UTC)) - timedelta(minutes=wait)).strftime("%Y-%m-%d %H:%M:%S")
+    cash_wait = hours if hours is not None else cash_expire_hours()
+    queues = (
+        (CREATED, "card", _cutoff(moment, timedelta(minutes=wait)), f"не оплачен за {wait} мин."),
+        (
+            CASH_ON_PICKUP,
+            "cash",
+            _cutoff(moment, timedelta(hours=cash_wait)),
+            f"не собран за {cash_wait} ч.",
+        ),
+    )
     done = 0
 
-    for order in rows(
-        "select id from market_orders where status = %s and payment_method = 'card' "
-        "and created_at < %s order by id limit 1000",
-        [CREATED, cutoff],
-    ):
-        with transaction.atomic():
-            if transition(
-                int(order["id"]),
-                CREATED,
-                CANCELLED,
-                actor="system",
-                note=f"не оплачен за {wait} мин.",
-            ):
-                release_reserve(int(order["id"]))
-                done += 1
+    for status, method, cutoff, note in queues:
+        for found in rows(
+            "select id from market_orders where status = %s and payment_method = %s "
+            "and created_at < %s order by id limit 1000",
+            [status, method, cutoff],
+        ):
+            with transaction.atomic():
+                order = one(
+                    f"select {_CLOSE_FIELDS} from market_orders "
+                    "where id = %s and status = %s for update",
+                    [found["id"], status],
+                )
+
+                if order is not None and _close(order, CANCELLED, actor="system", note=note):
+                    done += 1
 
     if done:
         log.info("market.order.expired count=%s", done)
@@ -901,9 +1087,11 @@ def seller_orders(seller_id: int, locale: str) -> list[dict[str, Any]]:
         "from market_order_parts mp "
         "join market_orders o on o.id = mp.order_id "
         "join users u on u.id = o.buyer_user_id "
-        "where mp.seller_id = %s and mp.status <> all(%s) "
+        # Картой и не оплачен (ждёт оплаты, отменён по сроку или
+        # покупателем до оплаты) — продавцу не показываем
+        "where mp.seller_id = %s and (o.payment_method <> 'card' or o.paid_at is not null) "
         "order by mp.created_at desc, mp.id desc limit 200",
-        [seller_id, list(_SELLER_HIDDEN)],
+        [seller_id],
     )
 
     if not found:
