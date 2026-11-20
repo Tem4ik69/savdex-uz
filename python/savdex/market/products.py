@@ -597,9 +597,29 @@ def save(
     return product_id, errors
 
 
+#: Сколько дней после отказа или снятия товары продавца снова проверяет модератор
+RECENT_REFUSAL_DAYS = 30
+
+
 def needs_review(seller: dict[str, Any]) -> bool:
-    """Продавец ещё «новый»: его товары и их правки проверяет модератор."""
-    return moderated_count(seller["id"]) < premoderated_count()
+    """
+    Товары и правки продавца проверяет модератор: продавец ещё «новый» —
+    или недавно получил отказ или снятие (у товара осталась причина). Иначе
+    отклонённый товар выходил бы в продажу копией — новым товаром с тем же
+    содержимым, который проверенному продавцу публиковать можно сразу.
+    """
+    if moderated_count(seller["id"]) < premoderated_count():
+        return True
+
+    return (
+        one(
+            "select 1 as x from market_products where seller_id = %s "
+            "and reject_reason is not null and moderated_at > "
+            "(now() at time zone 'utc') - make_interval(days => %s) limit 1",
+            [seller["id"], RECENT_REFUSAL_DAYS],
+        )
+        is not None
+    )
 
 
 def _to_draft(product_id: int) -> None:

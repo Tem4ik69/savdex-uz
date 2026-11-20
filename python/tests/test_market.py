@@ -996,6 +996,59 @@ def test_отклонённый_и_снятый_товар_только_чере
 
 
 @нужна_база
+def test_после_отказа_копия_товара_тоже_через_модератора(сайт, витрина):
+    """Проверенному продавцу отказали — новые товары месяц идут через модератора."""
+    _премодерация(0)
+    компания = _компания("Nusxa Savdo", "nusxa-savdo")
+    владелец = _человек("owner@nusxa.uz", компания)
+    продавец = _продавец(компания)
+    форма = {
+        "title": "Миндаль отборный",
+        "description": "Как у известного бренда",
+        "category": "dried-fruits-nuts",
+        "ikpu": "12345678901234567",
+        "variants": [{"price": "150000"}],
+    }
+
+    def новый_в_продажу() -> str:
+        создал = _post(сайт, "/market/api/me/products/create", владелец, форма)
+        assert создал["status"] == 201, создал["body"]
+        товар = _json(создал)["product"]["id"]
+        sql(
+            "insert into market_product_images (product_id, path) values (%s, %s)",
+            [товар, f"market/products/n{товар}.webp"],
+        )
+        ответ = _post(сайт, f"/market/api/me/products/{товар}/submit", владелец)
+        assert ответ["status"] == 200, ответ["body"]
+
+        return str(_json(ответ)["status"])
+
+    assert новый_в_продажу() == "active", "проверенный продавец — сразу"
+
+    отклонённый, _ = _товар(
+        продавец,
+        "dried-fruits-nuts",
+        "Миндаль-подделка",
+        "fake-almond",
+        status="rejected",
+        price=150_000,
+    )
+    sql(
+        "update market_products set reject_reason = 'Подделка известного бренда', "
+        "moderated_at = (now() at time zone 'utc') - interval '2 days' where id = %s",
+        [отклонённый],
+    )
+    assert новый_в_продажу() == "pending", "копия отклонённого — через модератора"
+
+    sql(
+        "update market_products set moderated_at = (now() at time zone 'utc') - "
+        "interval '40 days' where id = %s",
+        [отклонённый],
+    )
+    assert новый_в_продажу() == "active", "отказ давний — снова сразу"
+
+
+@нужна_база
 def test_правка_вариантов_у_нового_продавца_возвращает_в_черновик(сайт, витрина):
     """Название варианта и артикул — тоже содержание; цена — нет."""
     _премодерация(100)
