@@ -155,6 +155,102 @@
 refunded` и закрытие долга покупателю. Код выдачи (`pickup_code_hash`) — с
 этапом ПВЗ.
 
+## Оплата — этап 2
+
+Код — `python/savdex/market/payments/` (`base.py` — общий слой, `uzum.py`,
+`payme.py`, `click.py`, `reconcile.py`), схема —
+`2026_11_21_110000_create_market_payments.sql`, проверки —
+`python/tests/test_market_payments.py`. Правила —
+`docs/marketplace-security.md`, раздел 3.
+
+- **Счёт**: `POST orders/<номер>/pay {provider: uzum | payme | click}` →
+  `{provider, redirect}` — адрес страницы оплаты провайдера. Только свой заказ
+  (чужой — 404), только `card` и только `created`; оплачен — 409, оплата уже
+  идёт у провайдера — 409, провайдер выключен или неизвестен — 422. Повтор —
+  тот же счёт; смена провайдера гасит прежний не начатый счёт.
+- **Одна живая оплата на заказ** (`market_payments`: `created` — счёт открыт,
+  `pending` — провайдер завёл транзакцию, `paid`, `cancelled`, `refunded`) —
+  держит и база: уникальный индекс по `order_id` среди `created/pending/paid`;
+  повтор транзакции — уникальность `(provider, provider_transaction_id)`.
+- **Сумма — только из заказа**, колбэк сверяет присланную. Проведение —
+  `orders.mark_paid` под замком заказа (порядок замков везде: заказ, затем
+  оплата). Заказ уже не ждёт оплаты (отменён, истёк) — ошибка провайдеру на
+  любом шаге, включая проведение (Payme Perform → -31008, Click Complete →
+  -9, Uzum confirm → 10009): провайдер гасит платёж и возвращает деньги, у
+  нас ничего не начислено. Заказ, по которому провайдер завёл транзакцию
+  меньше 30 минут назад, `expire` не отменяет.
+- **Колбэки** — сервер серверу, вне CSRF (`csrf_exempt`; проверка CSRF
+  Django и так стоит только на `/py/`), под подписью или паролем
+  (`hmac.compare_digest`), каждый — одной транзакцией. Работают **только там,
+  где маркетплейс открыт** (`market_open()`; на боевом — пока выключены) и
+  только у провайдера с ключами — иначе 404. Белый список адресов —
+  `MARKET_<ПРОВАЙДЕР>_CALLBACK_IPS` (через запятую); у Uzum на боевом
+  обязателен, без него Uzum выключен.
+
+**Адреса для кабинетов провайдеров** (без языкового префикса):
+
+| Провайдер | Адрес |
+|---|---|
+| Uzum (Merchant API) | `https://<домен>/market/api/payments/uzum/{check,create,confirm,reverse,status}` |
+| Payme (Merchant API, JSON-RPC) | `https://<домен>/market/api/payments/payme` |
+| Click (SHOP API) | Prepare — `https://<домен>/market/api/payments/click/prepare`, Complete — `…/click/complete` |
+
+**Переменные окружения** (только секреты GitHub / окружение машины, в код не
+писать):
+
+| Переменная | Что |
+|---|---|
+| `MARKET_UZUM_SERVICE_ID` | serviceId маркетплейса — **не тот**, что у тарифов (`PAYMENTS_UZUM_*`) |
+| `MARKET_UZUM_CALLBACK_LOGIN`, `MARKET_UZUM_CALLBACK_PASSWORD` | Basic-авторизация колбэков |
+| `MARKET_UZUM_PAY_URL` | шаблон ссылки на оплату: `{service_id}`, `{order}`, `{amount}` (тийины), `{amount_som}`, `{return_url}`, `{lang}` |
+| `MARKET_UZUM_ACCOUNT_FIELD` | поле номера заказа в `params` (по умолчанию `order`) |
+| `MARKET_UZUM_CONFIRM_TIMEOUT` | минут от create до confirm (по умолчанию 30) |
+| `MARKET_UZUM_CALLBACK_IPS` | адреса Uzum; на боевом обязательно |
+| `MARKET_PAYME_MERCHANT_ID`, `MARKET_PAYME_KEY` | касса и ключ (Basic `Paycom:<KEY>`) |
+| `MARKET_PAYME_CHECKOUT_URL` | по умолчанию `https://checkout.paycom.uz` (песочница — `https://checkout.test.paycom.uz`) |
+| `MARKET_PAYME_ACCOUNT_FIELD` | поле `account` (по умолчанию `order`) |
+| `MARKET_PAYME_CALLBACK_IPS` | адреса Payme (необязательно) |
+| `MARKET_CLICK_SERVICE_ID`, `MARKET_CLICK_MERCHANT_ID`, `MARKET_CLICK_SECRET_KEY` | сервис, поставщик и ключ подписи |
+| `MARKET_CLICK_MERCHANT_USER_ID` | для возврата через Merchant API Click (необязательно) |
+| `MARKET_CLICK_PAY_URL`, `MARKET_CLICK_API_URL` | по умолчанию `https://my.click.uz/services/pay` и `https://api.click.uz/v2/merchant` |
+| `MARKET_CLICK_CALLBACK_IPS` | адреса Click (необязательно) |
+| `MARKET_PAYMENT_RETURN_URL` | куда вернуть покупателя, `{number}` — номер заказа; по умолчанию страница заказа |
+
+НДС в чеке Payme — настройка `market_vat_percent` (по умолчанию 12).
+
+**Возврат** (`base.refund_order(order_id)`, расписание `market_refunds` —
+каждый час): только заказ в `refund_pending`; запрос — ровно один раз
+(`refund_requested_at`), `paid → refunded` и `orders.mark_refunded` — одной
+транзакцией.
+
+- **Uzum**: продавец вернуть запросом не может — отмена транзакции в кабинете
+  Uzum, Uzum зовёт `reverse`; проведённую принимаем, только если заказ ждёт
+  возврата (иначе 10017).
+- **Payme**: так же — отмена в кабинете Payme Business, Payme зовёт
+  `CancelTransaction` (состояние -2); заказ не ждёт возврата — -31007.
+- **Click**: reversal через Merchant API, если задан
+  `MARKET_CLICK_MERCHANT_USER_ID`; иначе — вручную в кабинете Click.
+- Где API нет — в истории заказа пометка администратору (что сделать в
+  кабинете), заказ остаётся `refund_pending`, пока не придёт отмена от
+  провайдера.
+
+**Сверка** — `manage.py market_reconcile_payments [--day ГГГГ-ММ-ДД]` и
+расписание каждую ночь (02:40 UTC, за вчера): по каждому провайдеру деньги у
+провайдера по журналу (`gateway_clearing`) = сумма проведённых оплат, статусы
+заказа и оплаты согласованы; выписка провайдера — где есть API (сейчас ни у
+одного: у Payme реестр — наш же ответ `GetStatement`); группы журнала за день
+в ноль. Расхождение — ERROR в журнале приложения (только счётчики) и код
+выхода 1; номера заказов — только в вывод команды. Тревоги по такой строке в
+Grafana пока нет — заводить отдельно (метрика или сигнал Healthchecks).
+
+**Сверить с договорами и документацией** до включения на боевом: Uzum —
+имена полей, коды, разрешён ли `reverse` подтверждённой транзакции, формат
+ссылки на оплату; Payme — коды -31050…-31099, состав `detail` (`package_code`
+— у товара его пока нет, TODO; ИНН продавца для маркетплейса), формат ссылки
+checkout; Click — порядок полей подписи и формат `amount` в ней, ответ на
+повторный Complete (0 или -4), что передавать в reversal (`click_paydoc_id`
+или `click_trans_id`) и в какие сроки он возможен.
+
 ## Адреса для страниц — `/market/api/…`
 
 Ответ — JSON. Языковой префикс работает как у страниц:

@@ -447,6 +447,39 @@ def order_cancel(request: HttpRequest, number: str) -> HttpResponse:
     )
 
 
+@form()
+def order_pay(request: HttpRequest, number: str) -> HttpResponse:
+    """
+    POST {provider: uzum | payme | click}: открыть счёт у провайдера (или
+    вернуть уже открытый) — ответ {provider, redirect: адрес страницы
+    оплаты}. Только свой заказ (чужой — 404), только картой и только
+    ждущий оплаты (savdex/market/payments/base.py, open_invoice).
+    """
+    from savdex.market import domain
+    from savdex.market.payments import base as payments
+
+    ctx = action(request, auth=False, throttle=10, throttle_prefix="market-pay")
+    user = ctx.user
+
+    if user is None:
+        return _guest(ctx)
+
+    user_id = int(user["id"])
+    provider = str(input_of(request).get("provider") or "").strip().lower()
+    clean = orders.normalize_number(number)
+    back = payments.return_url(
+        clean,
+        domain.market_url(f"/orders/{clean}") or ctx.url(f"/market/orders/{clean}"),
+    )
+
+    try:
+        _, url = payments.open_invoice(user_id, clean, provider, locale=ctx.locale, back=back)
+    except orders.OrderRefused as refused:
+        return _order_refused(ctx, refused, user_id)
+
+    return _json({"provider": provider, "redirect": url})
+
+
 # ── «Стать продавцом» ───────────────────────────────────────────────
 
 
