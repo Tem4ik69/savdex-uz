@@ -389,6 +389,18 @@ class VariantInline(admin.TabularInline):  # type: ignore[type-arg]
     def has_add_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
         return False
 
+    # Вариант не регистрируется в админке отдельно (своего раздела нет),
+    # и проверка Django «market.change_variant» не находила раздела —
+    # таблица вариантов не показывалась никому. Права — раздела «market»
+    def has_view_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
+        return _admin_of(request).can("market.view")
+
+    def has_change_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
+        return _admin_of(request).can("market.edit")
+
+    def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
+        return False
+
     @admin.display(description="вариант")
     def title(self, obj: Variant) -> str:
         return str(obj)
