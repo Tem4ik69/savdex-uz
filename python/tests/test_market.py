@@ -796,7 +796,9 @@ def test_фото_не_больше_предела(сайт, витрина):
 
     компания = _компания("Foto Limit", "foto-limit")
     владелец = _человек("owner@foto-limit.uz", компания)
-    товар, _ = _товар(_продавец(компания), "textile", "Ковёр", "kovyor", status="draft")
+    товар, _ = _товар(
+        _продавец(компания), "textile", "Ковёр", "kovyor", status="draft", price=500_000
+    )
     for номер in range(MAX_IMAGES):
         sql(
             "insert into market_product_images (product_id, path, thumb_path, sort) "
