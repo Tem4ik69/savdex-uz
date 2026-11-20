@@ -572,6 +572,12 @@ class ProductAdmin(DecisionsMixin, SavdexModelAdmin):
     decide_url_name = "market_product_decide"
     changed_message = "Товар изменился — обновите страницу."
 
+    def version_of(self, obj: Any) -> str:  # noqa: ANN401
+        """Версия товара — время правки и отпечаток содержимого (products.VERSION_SQL)."""
+        row = one(products.VERSION_SQL, [obj.pk])
+
+        return str(row["v"]) if row is not None else ""
+
     list_display = ("name", "seller_name", "category", "state", "price_text", "stock", "changed")
     list_filter = (ProductStatus, "category")
     list_select_related = ("category",)

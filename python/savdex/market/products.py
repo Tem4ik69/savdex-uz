@@ -598,6 +598,24 @@ def save(
     return product_id, errors
 
 
+#: Версия товара для решения модератора: время правки и отпечаток того, что
+#: модератор видит в карточке (текст, категория, ИКПУ, характеристики,
+#: варианты без остатка, фото). Время — до секунды: правка в ту же секунду
+#: меняет отпечаток. Один запрос для админки и проверок (tests)
+VERSION_SQL = (
+    "select coalesce(to_char(p.updated_at, 'YYYY-MM-DD HH24:MI:SS'), '') || '|' || "
+    "md5(concat_ws(chr(31), p.title, p.description, p.category_id::text, p.ikpu, p.barcode, "
+    "(select string_agg(row_to_json(pv)::text, chr(30) order by pv.attribute_id) "
+    "from market_product_values pv where pv.product_id = p.id), "
+    "(select string_agg(concat_ws(':', v.id::text, v.options::text, v.sku, v.price::text, "
+    "v.old_price::text, v.is_active::text), chr(30) order by v.id) "
+    "from market_product_variants v where v.product_id = p.id), "
+    "(select string_agg(concat_ws(':', i.id::text, i.path, i.variant_id::text), chr(30) "
+    "order by i.id) from market_product_images i where i.product_id = p.id))) as v "
+    "from market_products p where p.id = %s"
+)
+
+
 #: Сколько дней после отказа или снятия товары продавца снова проверяет модератор
 RECENT_REFUSAL_DAYS = 30
 
