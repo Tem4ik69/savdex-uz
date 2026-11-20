@@ -212,6 +212,15 @@ CADDY
 www.savdex.uz {
 	redir https://savdex.uz{uri} permanent
 }
+
+# Маркетплейс (ТЗ 18.11) — свой адрес. Пока он не запущен на боевом
+# (страницы /market отвечают 404), адрес ведёт на главную: иначе по нему
+# открылась бы копия сайта, а поисковики увидели бы дубль. Сертификат
+# Caddy получает уже сейчас. Запуск — здесь reverse_proxy на сайт, как у
+# savdex.uz, адрес — в DJANGO_ALLOWED_HOSTS и MARKET_DOMAIN
+market.savdex.uz {
+	redir https://savdex.uz{uri} temporary
+}
 CADDY
     fi
     chmod 644 "$ENV_DIR/Caddyfile" "$ENV_DIR/auth.caddy"
