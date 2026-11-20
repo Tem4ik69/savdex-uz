@@ -818,10 +818,21 @@ def _company_slug(name: str) -> str:
     return slug
 
 
+#: Где можно заводить демо-данные
+DEMO_ENVS = frozenset({"local", "testing", "staging"})
+
+
 def refused() -> str | None:
     """Почему демо-данные сюда нельзя, или None."""
-    if os.environ.get("APP_ENV", "local") == "production":
+    env = os.environ.get("APP_ENV", "local").strip().lower()
+
+    # Разрешено явно, а не «всё, кроме production»: «prod» или «Production»
+    # на боевой машине не должны пропустить демо в настоящую базу
+    if env == "production":
         return "Боевой сайт (APP_ENV=production): демо-данные только для тестового."
+
+    if env not in DEMO_ENVS:
+        return f"Окружение APP_ENV={env or '(пусто)'}: демо-данные только для тестового."
 
     return None
 

@@ -224,6 +224,31 @@ def test_вход_и_json_работают_как_есть(сайт):
 
 
 @нужна_база
+def test_админка_только_на_основном_адресе(сайт):
+    """Админка и вход в неё — на основном адресе; статика и проверка — на обоих."""
+    for path in (
+        "/py/admin/",
+        "/py/admin/market/product/?status=pending",
+        "/py/login",
+        "/py/logout",
+    ):
+        ответ = _на_рынке(сайт, path)
+
+        assert ответ["status"] == 302, path
+        assert ответ["headers"]["location"] == f"{сайт}{path}"
+
+    вход = _на_рынке(
+        сайт,
+        "/py/login",
+        method="POST",
+        body="token=x",
+        content_type="application/x-www-form-urlencoded",
+    )
+    assert вход["status"] == 404
+    assert _на_рынке(сайт, "/py/up")["status"] == 200
+
+
+@нужна_база
 def test_основной_адрес_ведёт_на_маркетплейс(сайт):
     ответ = открыть(сайт, "/uz/market/catalog?q=a", env=_env(сайт))
 

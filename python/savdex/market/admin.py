@@ -34,6 +34,7 @@ from django.contrib import admin, messages
 from django.core.exceptions import PermissionDenied
 from django.db import connection
 from django.db.models import Count, OuterRef, QuerySet, Subquery
+from django.forms.models import BaseInlineFormSet
 from django.http import HttpRequest, HttpResponse, HttpResponseRedirect
 from django.urls import path, reverse
 from django.utils import timezone
@@ -43,7 +44,7 @@ from savdex import audit
 from savdex.adminsite import SavdexModelAdmin, _admin_of, register
 from savdex.crm.admin import _badge, when
 from savdex.market import orders, products, sellers
-from savdex.market.common import som, t
+from savdex.market.common import now, one, som, t, write
 from savdex.market.models import (
     Attribute,
     Category,
@@ -92,6 +93,20 @@ def _journal(
     )
 
 
+def _version(moment: Any) -> str:  # noqa: ANN401
+    """
+    Версия записи для формы решения — время её правки (UTC, до секунды),
+    тем же видом, каким его пишет площадка (common.now()).
+    """
+    if moment is None:
+        return ""
+
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(UTC)
+
+    return str(moment.strftime("%Y-%m-%d %H:%M:%S"))
+
+
 def _company(company_id: int) -> dict[str, Any] | None:
     with connection.cursor() as cursor:
         cursor.execute(
@@ -123,17 +138,39 @@ def _notify(
 
 
 class DecisionsMixin:
-    """Кнопки решений под карточкой — общая панель модерации."""
+    """
+    Кнопки решений под карточкой — общая панель модерации.
+
+    Модератор решает про ту версию, которую видел: в форме — время правки
+    записи (скрытое поле version), и решение пишется, только если запись
+    с тех пор не менялась. Иначе продавец мог бы между открытием карточки и
+    нажатием «Одобрить» подменить товар, и в продажу ушёл бы непроверенный.
+    """
 
     change_form_template: Any = "admin/market/change_form.html"
     #: Право на решения
     decide_ability: ClassVar[str] = "market.moderate"
     decide_url_name: ClassVar[str] = ""
+    #: Запись изменилась после открытия карточки — решение не принято
+    changed_message: ClassVar[str] = "Запись изменилась — обновите страницу."
+    #: Решения, которые пропускают запись, — только по увиденной версии
+    permissive: ClassVar[frozenset[str]] = frozenset({"approve", "unblock"})
+
+    def version_of(self, obj: Any) -> str:  # noqa: ANN401
+        """Версия записи для формы решения: время её правки."""
+        return _version(obj.updated_at)
 
     def decisions(self, obj: Any) -> list[tuple[str, str, bool]]:  # noqa: ANN401
         raise NotImplementedError
 
-    def decide(self, request: HttpRequest, obj: Any, decision: str, note: str) -> str:  # noqa: ANN401
+    def decide(
+        self,
+        request: HttpRequest,
+        obj: Any,  # noqa: ANN401
+        decision: str,
+        note: str,
+        version: str | None,
+    ) -> str:
         raise NotImplementedError
 
     def get_urls(self) -> list[Any]:
@@ -176,7 +213,26 @@ class DecisionsMixin:
 
             return HttpResponseRedirect(page)
 
-        self.message_user(request, self.decide(request, obj, decision, note), messages.SUCCESS)  # type: ignore[attr-defined]
+        # Пропустить (одобрить, разблокировать) можно только ту версию, которую
+        # модератор видел: та же, что сейчас в базе, — и ещё раз её проверит
+        # сам UPDATE (decide), если правка придёт между ними. Запретить
+        # (отклонить, заблокировать) можно всегда: правка продавца, пока
+        # карточка открыта, не должна мешать снять товар
+        seen: str | None = None
+
+        if decision in self.permissive:
+            version = request.POST.get("version") or ""
+
+            if not version or version != self.version_of(obj):
+                self.message_user(request, self.changed_message, messages.WARNING)  # type: ignore[attr-defined]
+
+                return HttpResponseRedirect(page)
+
+            seen = _version(obj.updated_at)
+
+        self.message_user(  # type: ignore[attr-defined]
+            request, self.decide(request, obj, decision, note, seen), messages.SUCCESS
+        )
 
         return HttpResponseRedirect(page)
 
@@ -194,6 +250,7 @@ class DecisionsMixin:
             extra["decisions"] = self.decisions(obj)
             extra["min_note"] = MIN_NOTE
             extra["decide_url"] = reverse(f"savdex_admin:{self.decide_url_name}", args=[obj.pk])
+            extra["decision_version"] = self.version_of(obj)
 
         return super().change_view(request, object_id, form_url, extra)  # type: ignore[misc, no-any-return]
 
@@ -224,6 +281,21 @@ class SellerAdmin(DecisionsMixin, SavdexModelAdmin):
     title_list = "Продавцы маркетплейса"
     title_change = "Заявка продавца"
     decide_url_name = "market_seller_decide"
+    changed_message = "Заявка изменилась — обновите страницу."
+
+    def version_of(self, obj: Any) -> str:  # noqa: ANN401
+        """
+        Версия заявки — и её документов: компания могла заменить документ,
+        пока модератор смотрел карточку, а сама заявка при этом не меняется.
+        """
+        row = one(
+            "select count(*) as n, max(greatest(created_at, coalesce(updated_at, created_at))) "
+            "as last from company_documents where company_id = %s and type = any(%s)",
+            [obj.company_id, list(sellers.VERIFICATION_TYPES)],
+        )
+        docs = f"{row['n']}:{_version(row['last'])}" if row is not None else "0:"
+
+        return f"{_version(obj.updated_at)}|{docs}"
 
     list_display = ("company", "state", "documents", "applied")
     list_filter = (SellerStatus,)
@@ -326,30 +398,32 @@ class SellerAdmin(DecisionsMixin, SavdexModelAdmin):
             "blocked": [("unblock", "Вернуть продажи", False)],
         }.get(obj.status, [])
 
-    def decide(self, request: HttpRequest, obj: Seller, decision: str, note: str) -> str:
+    def decide(
+        self, request: HttpRequest, obj: Seller, decision: str, note: str, version: str | None
+    ) -> str:
         staff = _admin_of(request).id
         label = (_company(obj.company_id) or {}).get("name") or str(obj)
         actions: dict[str, tuple[Callable[[], bool], str, str, str | None]] = {
             "approve": (
-                lambda: sellers.approve(obj.pk, staff),
+                lambda: sellers.approve(obj.pk, staff, seen=version),
                 "approved",
                 "seller_approved",
                 "success",
             ),
             "reject": (
-                lambda: sellers.reject(obj.pk, staff, note),
+                lambda: sellers.reject(obj.pk, staff, note, seen=version),
                 "rejected",
                 "seller_rejected",
                 "danger",
             ),
             "block": (
-                lambda: sellers.block(obj.pk, staff, note),
+                lambda: sellers.block(obj.pk, staff, note, seen=version),
                 "blocked",
                 "seller_blocked",
                 "danger",
             ),
             "unblock": (
-                lambda: sellers.unblock(obj.pk, staff),
+                lambda: sellers.unblock(obj.pk, staff, seen=version),
                 "unblocked",
                 "seller_approved",
                 "success",
@@ -358,7 +432,7 @@ class SellerAdmin(DecisionsMixin, SavdexModelAdmin):
         run, action, key, tone = actions[decision]
 
         if not run():
-            return "Статус уже изменился — обновите страницу."
+            return self.changed_message
 
         _journal(request, action, "market", "Seller", obj.pk, label, note)
         _notify(request, obj.company_id, key, tone or "info", note or None)
@@ -385,18 +459,38 @@ class ProductStatus(admin.SimpleListFilter):
         return queryset.filter(status=self.value()) if self.value() else queryset
 
 
+#: Остаток варианта. Сводка товара (market_products.stock, integer) — сумма
+#: по вариантам (до 100): предел с запасом, чтобы она не переполнилась
+MAX_STOCK = 1_000_000
+
+
 class VariantForm(forms.ModelForm):  # type: ignore[type-arg]
+    """Остаток варианта: не меньше нуля и не меньше резерва под заказы."""
+
     class Meta:
         model = Variant
         fields = ("stock",)
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+
+        if "stock" in self.fields:
+            self.fields["stock"].widget.attrs.update({"min": 0, "max": MAX_STOCK})
+
     def clean_stock(self) -> int:
-        """
-        Остаток меньше резерва под оформленные заказы — понятная ошибка, а
-        не 500 от ограничения базы (docs/marketplace-security.md, раздел 1).
-        Резерв — свежий из базы: заказ мог появиться, пока форма была открыта.
-        """
-        stock = int(self.cleaned_data.get("stock") or 0)
+        stock = self.cleaned_data.get("stock")
+
+        if stock is None:
+            raise forms.ValidationError("Укажите остаток.")
+
+        if stock < 0:
+            raise forms.ValidationError("Остаток не может быть меньше нуля.")
+
+        if stock > MAX_STOCK:
+            raise forms.ValidationError(f"Остаток — не больше {MAX_STOCK:,}.".replace(",", " "))
+
+        # Резерв — свежий из базы: заказ мог появиться, пока форма была
+        # открыта (окончательно его сторожит условие UPDATE в save_formset)
         reserved = (
             Variant.objects.filter(pk=self.instance.pk).values_list("reserved", flat=True).first()
             if self.instance.pk
@@ -405,16 +499,18 @@ class VariantForm(forms.ModelForm):  # type: ignore[type-arg]
 
         if stock < reserved:
             raise forms.ValidationError(
-                f"Под оформленные заказы отложено {reserved} шт. — остаток не может быть меньше."
+                f"Остаток не меньше резерва: {reserved} шт. уже отложено под заказы."
             )
 
-        return stock
+        return int(stock)
 
 
 class VariantInline(admin.TabularInline):  # type: ignore[type-arg]
     """
     Варианты: цена — только смотреть (её задаёт продавец), остаток — до
     появления склада BTS ставит сотрудник; не меньше резерва под заказы.
+    Записывается только остаток (ProductAdmin.save_formset), а не вся
+    строка варианта.
     """
 
     model = Variant
@@ -428,6 +524,18 @@ class VariantInline(admin.TabularInline):  # type: ignore[type-arg]
         return super().get_queryset(request).exclude(options__has_key="_removed")
 
     def has_add_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
+        return False
+
+    # Вариант не регистрируется в админке отдельно (своего раздела нет),
+    # и проверка Django «market.change_variant» не находила раздела —
+    # таблица вариантов не показывалась никому. Права — раздела «market»
+    def has_view_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
+        return _admin_of(request).can("market.view")
+
+    def has_change_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
+        return _admin_of(request).can("market.edit")
+
+    def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
         return False
 
     @admin.display(description="вариант")
@@ -449,6 +557,7 @@ class ProductAdmin(DecisionsMixin, SavdexModelAdmin):
     title_list = "Товары маркетплейса"
     title_change = "Товар"
     decide_url_name = "market_product_decide"
+    changed_message = "Товар изменился — обновите страницу."
 
     list_display = ("name", "seller_name", "category", "state", "price_text", "stock", "changed")
     list_filter = (ProductStatus, "category")
@@ -480,6 +589,67 @@ class ProductAdmin(DecisionsMixin, SavdexModelAdmin):
 
     def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
         return False
+
+    def save_model(
+        self,
+        request: HttpRequest,
+        obj: Product,
+        form: Any,  # noqa: ANN401
+        change: bool,
+    ) -> None:
+        """
+        Строку товара карточка не пишет: все её поля только для чтения, а
+        Product.save() переписал бы её целиком тем, что было при открытии, —
+        поверх правки продавца или решения другого модератора.
+        """
+        return None
+
+    def save_formset(
+        self,
+        request: HttpRequest,
+        form: Any,  # noqa: ANN401
+        formset: Any,  # noqa: ANN401
+        change: bool,
+    ) -> None:
+        """
+        Остаток варианта — точечным UPDATE только остатка и времени правки,
+        при условии, что вариант этого товара и резерв не больше нового
+        остатка. Variant.save() переписал бы всю строку: цену, резерв,
+        включённость и выбор, которые тем временем мог поменять продавец.
+        """
+        # Django берёт отсюда «что изменилось» для своего журнала (он не
+        # ведётся, но списки должны быть)
+        formset.new_objects, formset.changed_objects, formset.deleted_objects = [], [], []
+
+        if formset.model is not Variant or not _admin_of(request).can("market.edit"):
+            return
+
+        skipped: list[str] = []
+
+        for variant_form in formset.initial_forms:
+            if not variant_form.has_changed() or "stock" not in variant_form.changed_data:
+                continue
+
+            variant = variant_form.instance
+            stock = variant_form.cleaned_data["stock"]
+            written = write(
+                "update market_product_variants set stock = %s, updated_at = %s "
+                "where id = %s and product_id = %s and reserved <= %s",
+                [stock, now(), variant.pk, form.instance.pk, stock],
+            )
+
+            if written:
+                formset.changed_objects.append((variant, ["stock"]))
+            else:
+                skipped.append(str(variant))
+
+        if skipped:
+            self.message_user(
+                request,
+                "Остаток не сохранён — резерв успел вырасти, обновите страницу: "
+                + "; ".join(skipped),
+                messages.WARNING,
+            )
 
     def save_related(
         self,
@@ -636,33 +806,40 @@ class ProductAdmin(DecisionsMixin, SavdexModelAdmin):
 
         return found
 
-    def decide(self, request: HttpRequest, obj: Product, decision: str, note: str) -> str:
+    def decide(
+        self, request: HttpRequest, obj: Product, decision: str, note: str, version: str | None
+    ) -> str:
         staff = _admin_of(request).id
         actions: dict[str, tuple[Callable[[], bool], str, str | None, str]] = {
             "approve": (
-                lambda: products.approve(obj.pk, staff),
+                lambda: products.approve(obj.pk, staff, seen=version),
                 "approved",
                 "product_approved",
                 "success",
             ),
             "reject": (
-                lambda: products.reject(obj.pk, staff, note),
+                lambda: products.reject(obj.pk, staff, note, seen=version),
                 "rejected",
                 "product_rejected",
                 "danger",
             ),
             "block": (
-                lambda: products.block(obj.pk, staff, note),
+                lambda: products.block(obj.pk, staff, note, seen=version),
                 "blocked",
                 "product_blocked",
                 "danger",
             ),
-            "unblock": (lambda: products.unblock(obj.pk, staff), "unblocked", None, "info"),
+            "unblock": (
+                lambda: products.unblock(obj.pk, staff, seen=version),
+                "unblocked",
+                None,
+                "info",
+            ),
         }
         run, action, key, tone = actions[decision]
 
         if not run():
-            return "Статус уже изменился — обновите страницу."
+            return self.changed_message
 
         _journal(request, action, "market", "Product", obj.pk, obj.title, note)
 
@@ -786,11 +963,65 @@ class AttributeForm(forms.ModelForm):  # type: ignore[type-arg]
         return data
 
 
+class AttributeFormSet(BaseInlineFormSet):  # type: ignore[type-arg]
+    """
+    Удалить характеристику, у которой уже есть значения в товарах, нельзя:
+    база удалила бы их вместе с ней (каскад), и товары молча потеряли бы
+    характеристики, по которым их находят в фильтрах.
+    """
+
+    def clean(self) -> None:
+        super().clean()
+        doomed = [
+            f.instance.pk
+            for f in self.forms
+            if f.instance.pk is not None
+            and self.can_delete
+            and getattr(f, "cleaned_data", {}).get("DELETE")
+        ]
+
+        if not doomed:
+            return
+
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "select distinct a.name from market_product_values v "
+                "join market_attributes a on a.id = v.attribute_id "
+                "where v.attribute_id = any(%s) order by a.name",
+                [doomed],
+            )
+            used = [str(row[0]) for row in cursor.fetchall()]
+
+        if used:
+            raise forms.ValidationError(
+                "Нельзя удалить характеристику, которая уже заполнена у товаров: "
+                + ", ".join(used)
+                + ". Удаление стёрло бы её значения у всех товаров."
+            )
+
+
 class AttributeInline(admin.TabularInline):  # type: ignore[type-arg]
     model = Attribute
     form = AttributeForm
+    formset = AttributeFormSet
     extra = 0
     fields = ("key", "name", "kind", "unit", "options", "is_filter", "is_required", "sort")
+
+    # Характеристика не регистрируется в админке отдельно (своего раздела
+    # нет), и проверка Django «market.view_attribute» не находила раздела —
+    # таблица характеристик не показывалась никому. Права — раздела
+    # «market_catalog», как у самой категории
+    def has_view_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
+        return _admin_of(request).can("market_catalog.view")
+
+    def has_add_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
+        return _admin_of(request).can("market_catalog.create")
+
+    def has_change_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
+        return _admin_of(request).can("market_catalog.edit")
+
+    def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
+        return _admin_of(request).can("market_catalog.delete")
 
 
 @register(Category, section="market_catalog")
@@ -836,6 +1067,28 @@ class CategoryAdmin(SavdexModelAdmin):
                 .values("n")[:1]
             )
         )
+
+    def snapshot(self, obj: Any) -> dict[str, Any]:  # noqa: ANN401
+        """
+        Характеристики — часть категории: добавить, изменить или удалить
+        характеристику — строка журнала с тем, что было и что стало.
+        """
+        values = self.attributes(obj)
+        values["attributes"] = (
+            [
+                {
+                    "key": a.key,
+                    "kind": a.kind,
+                    "options": a.options,
+                    "is_required": a.is_required,
+                }
+                for a in Attribute.objects.filter(category_id=obj.pk).order_by("id")
+            ]
+            if obj.pk is not None
+            else []
+        )
+
+        return values
 
     def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
         """Удалить — только пустую: без подразделов и товаров."""

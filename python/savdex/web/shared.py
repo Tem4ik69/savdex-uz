@@ -633,9 +633,15 @@ def maintenance(values: dict[str, Any], now: datetime | None = None) -> dict[str
     return None
 
 
+#: Окружения, где маркетплейс уже открыт (демо и проверки). Список, а не
+#: «всё, кроме production»: опечатка или пустой APP_ENV на боевой машине
+#: не должны открывать то, что там закрыто
+MARKET_ENVS = frozenset({"local", "testing", "staging"})
+
+
 def market_open() -> bool:
-    """Открыт ли маркетплейс на этом сервере: везде, кроме боевого, пока идёт демо."""
-    return os.environ.get("APP_ENV", "local") != "production"
+    """Открыт ли маркетплейс на этом сервере: только в окружениях MARKET_ENVS."""
+    return os.environ.get("APP_ENV", "local").strip().lower() in MARKET_ENVS
 
 
 def shared(ctx: Context) -> dict[str, Any]:
