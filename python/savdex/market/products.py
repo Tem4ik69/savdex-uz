@@ -516,13 +516,14 @@ def save(
 
             return None, errors
 
-        # Товару в продаже или на проверке нужна цена, в продаже — и ИКПУ:
-        # иначе запись упёрлась бы в market_products_active_check — 500
+        # Товару в продаже или на проверке нужны цена и ИКПУ: в продаже без них
+        # запись упёрлась бы в market_products_active_check — 500, а товар на
+        # проверке модератор не смог бы одобрить
         if row["status"] in ("active", "pending") and not any(v["is_active"] for v in variants):
             errors.add("variants", "product.active_variant_required")
 
-        if row["status"] == "active" and not fields["ikpu"]:
-            errors.add("ikpu", "product.ikpu_format")
+        if row["status"] in ("active", "pending") and not fields["ikpu"]:
+            errors.add("ikpu", "product.ikpu_required")
 
         if errors:
             return None, errors

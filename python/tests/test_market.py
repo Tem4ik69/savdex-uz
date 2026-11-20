@@ -1160,3 +1160,33 @@ def test_ошибки_формы_товара_422_а_не_500(сайт, витр
     assert sql("select status, price from market_products where id = %s", [живой]) == [
         ("active", 15_000_000)
     ]
+
+    # Товар на проверке: без ИКПУ модератор не смог бы его одобрить — тоже ошибка
+    sql("update market_products set status = 'pending' where id = %s", [живой])
+    на_проверке = _post(
+        сайт,
+        f"/market/api/me/products/{живой}",
+        владелец,
+        {**форма, "ikpu": "", "variants": [{"id": вариант, "price": 150000}]},
+    )
+    assert на_проверке["status"] == 422 and "ikpu" in _json(на_проверке)["errors"]
+    assert sql("select ikpu from market_products where id = %s", [живой]) == [
+        ("12345678901234567",)
+    ]
+
+
+@pytest.mark.parametrize(
+    ("адрес", "гость"),
+    [
+        ("203.0.113.7", "203.0.113.7"),
+        ("2001:db8:1:2:aaaa::1", "2001:db8:1:2::/64"),
+        ("2001:db8:1:2:bbbb::9", "2001:db8:1:2::/64"),
+        ("не адрес", "не адрес"),
+    ],
+)
+def test_гость_для_просмотров_ipv6_по_сети(monkeypatch, адрес, гость):
+    from savdex.market import api
+
+    monkeypatch.setattr(api, "client_ip", lambda request: адрес)
+
+    assert api._visitor_net(None) == гость  # type: ignore[arg-type]

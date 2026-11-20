@@ -84,6 +84,30 @@ def _get(view: Callable[..., HttpResponse]) -> Callable[..., HttpResponse]:
     return wrapped
 
 
+def _visitor_net(request: HttpRequest) -> str | None:
+    """
+    Гость для счётчика просмотров: IPv4 — адрес, IPv6 — сеть /64. У одного
+    абонента IPv6 — целая /64, и по адресу каждый запрос был бы «новым
+    гостем»: накрутка и бесконечные пометки в кэше.
+    """
+    import ipaddress
+
+    raw = client_ip(request)
+
+    if not raw:
+        return None
+
+    try:
+        address = ipaddress.ip_address(raw)
+    except ValueError:
+        return raw
+
+    if address.version == 6:
+        return str(ipaddress.ip_network(f"{address}/64", strict=False))
+
+    return str(address)
+
+
 def _id(value: Any) -> int | None:  # noqa: ANN401
     try:
         number = int(str(value))
@@ -144,7 +168,7 @@ def product(request: HttpRequest, slug: str) -> HttpResponse:
 
     # HEAD — не просмотр: так ходят проверки ссылок и роботы
     if request.method == "GET":
-        catalog.seen(found["id"], f"user:{user['id']}" if user else client_ip(request))
+        catalog.seen(found["id"], f"user:{user['id']}" if user else _visitor_net(request))
 
     return _json({"product": found})
 
