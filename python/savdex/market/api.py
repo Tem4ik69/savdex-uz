@@ -23,10 +23,11 @@ from typing import Any
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
+from savdex.audit import client_ip
 from savdex.market import banners as market_banners
 from savdex.market import cart, catalog, oneid, products, sellers
 from savdex.market.common import t
-from savdex.web import session
+from savdex.web import session, throttle
 from savdex.web.actions import form
 from savdex.web.cabinet import _authenticate, company_of
 from savdex.web.forms import action, input_of
@@ -84,6 +85,59 @@ def _get(view: Callable[..., HttpResponse]) -> Callable[..., HttpResponse]:
     return wrapped
 
 
+def _limited(ctx: Context, name: str, per_minute: int) -> JsonResponse | None:
+    """
+    Ограничение частоты витрины: счётчик на посетителя (номер или IP) и
+    адрес — поиск и каталог дорогие, без предела их можно заваливать.
+    """
+    from savdex import laravel_cache
+
+    if not laravel_cache.is_file_store():
+        return None
+
+    import time
+
+    key = f"market-{name}|{throttle.signature(ctx)}"
+    # Гость считается по адресу, а у мобильных операторов один адрес — на
+    # многих абонентов (CGNAT): гостю предел втрое выше, чем вошедшему
+    limit = per_minute if ctx.visitor.user_id is not None else per_minute * 3
+
+    if throttle.too_many(key, limit):
+        response = _json({"message": "Too many requests"}, 429)
+        until = laravel_cache._to_int(laravel_cache.get(f"{key}:timer") or 0)
+        response["Retry-After"] = str(max(1, until - int(time.time())))
+
+        return response
+
+    throttle.hit(key)
+
+    return None
+
+
+def _visitor_net(request: HttpRequest) -> str | None:
+    """
+    Гость для счётчика просмотров: IPv4 — адрес, IPv6 — сеть /64. У одного
+    абонента IPv6 — целая /64, и по адресу каждый запрос был бы «новым
+    гостем»: накрутка и бесконечные пометки в кэше.
+    """
+    import ipaddress
+
+    raw = client_ip(request)
+
+    if not raw:
+        return None
+
+    try:
+        address = ipaddress.ip_address(raw)
+    except ValueError:
+        return raw
+
+    if address.version == 6:
+        return str(ipaddress.ip_network(f"{address}/64", strict=False))
+
+    return str(address)
+
+
 def _id(value: Any) -> int | None:  # noqa: ANN401
     try:
         number = int(str(value))
@@ -113,6 +167,9 @@ def listing(request: HttpRequest) -> HttpResponse:
     if isinstance(ctx, HttpResponse):
         return ctx
 
+    if (refused := _limited(ctx, "listing", 120)) is not None:
+        return refused
+
     user = ctx.user
     query = catalog.Query.parse(request.GET)
 
@@ -126,6 +183,9 @@ def suggest(request: HttpRequest) -> HttpResponse:
     if isinstance(ctx, HttpResponse):
         return ctx
 
+    if (refused := _limited(ctx, "suggest", 120)) is not None:
+        return refused
+
     return _json(catalog.suggest(str(request.GET.get("q", ""))[:100], ctx.locale))
 
 
@@ -136,13 +196,18 @@ def product(request: HttpRequest, slug: str) -> HttpResponse:
     if isinstance(ctx, HttpResponse):
         return ctx
 
+    if (refused := _limited(ctx, "product", 120)) is not None:
+        return refused
+
     user = ctx.user
     found = catalog.product(slug, ctx.locale, user["id"] if user else None)
 
     if found is None:
         return _message(ctx, "not_found", 404)
 
-    catalog.seen(found["id"])
+    # HEAD — не просмотр: так ходят проверки ссылок и роботы
+    if request.method == "GET":
+        catalog.seen(found["id"], f"user:{user['id']}" if user else _visitor_net(request))
 
     return _json({"product": found})
 
@@ -153,6 +218,9 @@ def seller_page(request: HttpRequest, slug: str) -> HttpResponse:
 
     if isinstance(ctx, HttpResponse):
         return ctx
+
+    if (refused := _limited(ctx, "seller_page", 120)) is not None:
+        return refused
 
     user = ctx.user
     found = catalog.seller(
@@ -513,8 +581,8 @@ def my_product_submit(request: HttpRequest, product_id: str) -> HttpResponse:
         if gaps == ["not_found"]:
             return _message(ctx, "not_found", 404)
 
-        if gaps == ["product.not_draft"]:
-            return _message(ctx, "product.not_draft", 422)
+        if gaps in (["product.not_draft"], ["product.locked"]):
+            return _message(ctx, gaps[0], 422)
 
         fields = ", ".join(t(f"product.field.{gap}", ctx.locale) for gap in gaps)
 

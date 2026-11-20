@@ -35,6 +35,8 @@ def test_заголовки_на_https():
 
     assert response["Strict-Transport-Security"] == "max-age=31536000"
     assert response["X-Frame-Options"] == "SAMEORIGIN"
-    assert response["Content-Security-Policy"] == "frame-ancestors 'self'"
+    assert response["Content-Security-Policy"] == (
+        "frame-ancestors 'self'; object-src 'none'; base-uri 'self'"
+    )
     assert response["X-Content-Type-Options"] == "nosniff"
     assert "camera=()" in response["Permissions-Policy"]

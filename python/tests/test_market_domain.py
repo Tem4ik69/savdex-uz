@@ -224,6 +224,31 @@ def test_вход_и_json_работают_как_есть(сайт):
 
 
 @нужна_база
+def test_админка_только_на_основном_адресе(сайт):
+    """Админка и вход в неё — на основном адресе; статика и проверка — на обоих."""
+    for path in (
+        "/py/admin/",
+        "/py/admin/market/product/?status=pending",
+        "/py/login",
+        "/py/logout",
+    ):
+        ответ = _на_рынке(сайт, path)
+
+        assert ответ["status"] == 302, path
+        assert ответ["headers"]["location"] == f"{сайт}{path}"
+
+    вход = _на_рынке(
+        сайт,
+        "/py/login",
+        method="POST",
+        body="token=x",
+        content_type="application/x-www-form-urlencoded",
+    )
+    assert вход["status"] == 404
+    assert _на_рынке(сайт, "/py/up")["status"] == 200
+
+
+@нужна_база
 def test_основной_адрес_ведёт_на_маркетплейс(сайт):
     ответ = открыть(сайт, "/uz/market/catalog?q=a", env=_env(сайт))
 
@@ -232,6 +257,26 @@ def test_основной_адрес_ведёт_на_маркетплейс(са
 
     # JSON на основном адресе — как есть
     assert открыть(сайт, "/market/api/categories", env=_env(сайт))["status"] == 200
+
+
+@нужна_база
+def test_ссылки_inertia_между_адресами(сайт):
+    # Ссылка Inertia — фоновый запрос: на чужой домен браузер его не пустит,
+    # поэтому вместо 302 — 409 и X-Inertia-Location (Inertia сам откроет адрес)
+    inertia = {"X-Inertia": "true", "X-Requested-With": "XMLHttpRequest"}
+
+    туда = открыть(сайт, "/uz/market/catalog?q=a", headers=inertia, env=_env(сайт))
+    assert туда["status"] == 409
+    assert туда["headers"]["x-inertia-location"] == f"http://{РЫНОК}/uz/catalog?q=a"
+
+    рынок = {"Host": РЫНОК, **inertia}
+    обратно = открыть(сайт, "/companies?page=2", headers=рынок, env=_env(сайт))
+    assert обратно["status"] == 409
+    assert обратно["headers"]["x-inertia-location"] == f"{сайт}/companies?page=2"
+
+    # Внутри одного адреса — обычный 302: его Inertia проходит сам
+    свой = открыть(сайт, "/market/catalog", headers=рынок, env=_env(сайт))
+    assert свой["status"] == 302 and свой["headers"]["location"] == "/catalog"
 
 
 @нужна_база
