@@ -10,7 +10,9 @@
 # следующем перезапуске — сайта нет. Поэтому здесь:
 #
 # 1. все три Caddyfile собираются так же, как при выкладке, и проверяются
-#    самим Caddy (caddy validate);
+#    самим Caddy (caddy validate); боевой — и с блоками www и маркетплейса
+#    (их prod-app.sh дописывает только для savdex.uz), тестовый — с
+#    адресом маркетплейса (MARKET_DOMAIN);
 # 2. боевой поднимается перед заглушкой приложения: обычная страница
 #    открывается, тело в 100 МиБ (самая большая честная загрузка) доходит,
 #    131 МиБ — 413, и с Content-Length, и «кусками» (Т4, request_body).
@@ -39,21 +41,32 @@ heredoc() {
     awk -v start="$2" 'index($0, start) { on = 1; next } on && /^CADDY$/ { exit } on' "$1"
 }
 
-mkdir -p "$WORK/prod" "$WORK/preview" "$WORK/staging/sites"
+mkdir -p "$WORK/prod" "$WORK/prod-savdex" "$WORK/preview" "$WORK/staging/sites"
 heredoc "$SRC/deploy/server/prod-app.sh" 'cat > "$ENV_DIR/Caddyfile" <<CADDY' \
     | sed -e "s/\$SITE_DOMAIN/:$PORT/g" -e 's/\$ADMIN_IP/app/g' > "$WORK/prod/Caddyfile"
+# Боевой на savdex.uz — ещё и блоки www и маркетплейса, которые prod-app.sh
+# дописывает только для savdex.uz: только caddy validate, без запуска
+# (с настоящими доменами Caddy пошёл бы за сертификатами)
+{
+    cat "$WORK/prod/Caddyfile"
+    heredoc "$SRC/deploy/server/prod-app.sh" "cat >> \"\$ENV_DIR/Caddyfile\" <<'CADDY'"
+} > "$WORK/prod-savdex/Caddyfile"
+if ! grep -q '^market\.savdex\.uz {' "$WORK/prod-savdex/Caddyfile"; then
+    echo "ОШИБКА: в Caddyfile боевого нет блока маркетплейса — изменился prod-app.sh?" >&2
+    exit 1
+fi
 heredoc "$SRC/deploy/server/preview.sh" 'cat > "$SITES/preview.caddy" <<CADDY' \
     | sed -e 's/\$DOMAIN/:8082/g' -e 's/\$tag/check/g' > "$WORK/preview/Caddyfile"
 cp "$SRC/deploy/staging/Caddyfile" "$WORK/staging/Caddyfile"
 
-for site in prod preview staging; do
+for site in prod prod-savdex preview staging; do
     if [ ! -s "$WORK/$site/Caddyfile" ]; then
         echo "ОШИБКА: Caddyfile ($site) не собран — изменился скрипт выкладки?" >&2
         exit 1
     fi
     : > "$WORK/$site/auth.caddy"
     echo "── caddy validate: $site"
-    if ! out=$(docker run --rm -e SITE_DOMAIN=:8081 \
+    if ! out=$(docker run --rm -e SITE_DOMAIN=:8081 -e MARKET_DOMAIN=:8083 \
         -v "$WORK/$site/Caddyfile:/etc/caddy/Caddyfile:ro" \
         -v "$WORK/$site/auth.caddy:/etc/caddy/auth.caddy:ro" \
         -v "$WORK/staging/sites:/etc/caddy/sites:ro" \
