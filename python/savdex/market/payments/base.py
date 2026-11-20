@@ -126,6 +126,14 @@ AUTH_FAILS_KEY = "MARKET_CALLBACK_AUTH_FAILS"
 AUTH_FAILS_DEFAULT = 10
 AUTH_FAILS_WINDOW = 600
 
+#: Сколько неудачных проверок подписи у одного провайдера (со всех адресов)
+#: за окно AUTH_FAILS_WINDOW — уже не опечатка, а подбор или сбитые ключи
+PROVIDER_FAILS_ALERT = 10
+
+#: Отметка «проверено» (acknowledge): право и самая короткая заметка
+ACK_ABILITY = "market_cash.moderate"
+ACK_NOTE_MIN = 10
+
 #: Предел для чисел, которые пишутся в bigint
 BIGINT_MAX = 2**63 - 1
 
@@ -616,7 +624,9 @@ def reject(found: dict[str, Any], *, reason: int | None = None, note: str) -> bo
     провайдера могли уже списать — ставим ``rejected_at``: сверка покажет
     «проверить возврат у провайдера», пока сотрудник не отметит проверку
     (``acknowledge``). Ждущая транзакция заодно гасится; у уже погашенной
-    отметка ставится один раз. True — что-то записано.
+    (cancelled) отметка ставится один раз. Возвращённую (refunded) не
+    отмечаем: деньги ушли покупателю нашим же путём, проверять нечего.
+    True — что-то записано.
     """
     moment = now()
 
@@ -630,12 +640,12 @@ def reject(found: dict[str, Any], *, reason: int | None = None, note: str) -> bo
             reason=reason,
             note=note[:500],
         )
-    elif found["status"] in (CANCELLED, REFUNDED):
+    elif found["status"] == CANCELLED:
         done = bool(
             write(
                 "update market_payments set rejected_at = %s, updated_at = %s "
-                "where id = %s and status = any(%s) and rejected_at is null",
-                [moment, moment, found["id"], [CANCELLED, REFUNDED]],
+                "where id = %s and status = %s and rejected_at is null",
+                [moment, moment, found["id"], CANCELLED],
             )
         )
     else:
@@ -654,10 +664,29 @@ def acknowledge(payment_id: int, admin_user_id: int, note: str) -> bool:
     Сотрудник проверил у провайдера отказ на проведении (``rejected_at``) или
     зависший возврат (оплата заказа в refund_pending): деньги вернулись или
     разобраны вручную. Сверка такую оплату больше не считает расхождением.
-    Ровно один раз: повтор — False. Кнопка в админке — у кассы (этап 3),
-    там же — ``audit.record``; в истории заказа — пометка.
+    Ровно один раз: повтор — False.
+
+    Отметить может только сотрудник с правом ``market_cash.moderate``
+    (касса, этап 3) или суперадмин — иначе PermissionError; заметка — не
+    короче ACK_NOTE_MIN знаков, иначе ValueError. В той же транзакции —
+    ``audit.record`` (payment_checked, раздел market_cash) и пометка в
+    истории заказа от имени сотрудника. Кнопку в админке добавит касса;
+    до неё — ``manage.py market_ack_payment``.
     """
-    text = (note or "").strip()[:500] or "проверено"
+    from django.db import connection
+
+    from savdex import audit
+    from savdex.bridge import load_admin
+
+    text = (note or "").strip()[:500]
+
+    if len(text) < ACK_NOTE_MIN:
+        raise ValueError(f"заметка — не короче {ACK_NOTE_MIN} знаков")
+
+    admin = load_admin(connection, admin_user_id)
+
+    if admin is None or not admin.can(ACK_ABILITY):
+        raise PermissionError(f"нужно право {ACK_ABILITY}")
 
     with transaction.atomic():
         found = payment(payment_id)
@@ -673,14 +702,30 @@ def acknowledge(payment_id: int, admin_user_id: int, note: str) -> bool:
             "check_note = %s, updated_at = %s where id = %s and rejection_checked_at is null "
             "and (rejected_at is not null or (status = %s and exists (select 1 from "
             "market_orders o where o.id = market_payments.order_id and o.status = %s)))",
-            [now(), admin_user_id, text, now(), payment_id, PAID, orders.REFUND_PENDING],
+            [now(), admin.id, text, now(), payment_id, PAID, orders.REFUND_PENDING],
         )
 
         if not done:
             return False
 
         if order is not None:
-            orders.note(int(order["id"]), f"оплата {payment_id}: проверено — {text}")
+            orders.note(
+                int(order["id"]),
+                f"оплата {payment_id}: проверено — {text}",
+                actor="staff",
+                actor_user_id=admin.id,
+            )
+
+        audit.record(
+            connection,
+            action="payment_checked",
+            section="market_cash",
+            actor=admin,
+            subject_type="market_payment",
+            subject_id=payment_id,
+            subject_label=f"оплата {payment_id} ({found['provider']})",
+            note=text,
+        )
 
     log.info("market.payment.acknowledged payment=%s", payment_id)
 
@@ -998,13 +1043,40 @@ _store_warned = False
 
 
 def _warn_store() -> None:
-    """Лимиты включены, а кэш не файловый — считать негде: предупредить один раз."""
+    """
+    Лимиты включены, а кэш не файловый — считать негде: предупредить один
+    раз. Только на боевом: на тестовом и в проверках это обычное дело.
+    """
     global _store_warned
 
-    if not _store_warned:
+    if production() and not _store_warned:
         _store_warned = True
         log.warning(
             "market.payment.throttle_disabled: CACHE_STORE не file — лимиты колбэков не считаются"
+        )
+
+
+def _count_provider_fails(provider: str) -> None:
+    """
+    Общий счётчик неудачных проверок подписи у провайдера — со всех адресов,
+    за окно AUTH_FAILS_WINDOW (файловый кэш). На PROVIDER_FAILS_ALERT-й —
+    ERROR один раз за окно: подбор ключа с разных адресов или сбитые ключи
+    у самого провайдера (тогда стоят оплаты).
+    """
+    from savdex import laravel_cache
+    from savdex.web import throttle
+
+    if not laravel_cache.is_file_store():
+        return
+
+    if throttle.hit(f"market-pay-fails:{provider}", AUTH_FAILS_WINDOW) == PROVIDER_FAILS_ALERT:
+        log.error(
+            "market.payment.auth_fails_many provider=%s: много неудачных проверок колбэка %s "
+            "(%s за %s мин)",
+            provider,
+            provider,
+            PROVIDER_FAILS_ALERT,
+            AUTH_FAILS_WINDOW // 60,
         )
 
 
@@ -1019,6 +1091,7 @@ def auth_failed(request: HttpRequest, provider: str) -> None:
     from savdex.web import throttle
 
     log.warning("market.payment.bad_auth provider=%s", provider)
+    _count_provider_fails(provider)
 
     if callback_ips(provider):
         return

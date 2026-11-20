@@ -538,15 +538,18 @@ def _refresh_products(product_ids: Iterable[int]) -> None:
         products.refresh(product_id)
 
 
-def note(order_id: int, text: str, *, actor: str = "system") -> None:
+def note(
+    order_id: int, text: str, *, actor: str = "system", actor_user_id: int | None = None
+) -> None:
     """
     Пометка в истории заказа без смены статуса — например, администратору
-    «вернуть деньги в кабинете провайдера» (savdex/market/payments).
+    «вернуть деньги в кабинете провайдера» или «сотрудник проверил отказ»
+    (savdex/market/payments); actor_user_id — кто (у сотрудника).
     """
     order = one("select status from market_orders where id = %s", [order_id])
 
     if order is not None:
-        _event(order_id, str(order["status"]), str(order["status"]), actor, None, text)
+        _event(order_id, str(order["status"]), str(order["status"]), actor, actor_user_id, text)
 
 
 # ── Оформление ──────────────────────────────────────────────────────

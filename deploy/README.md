@@ -254,6 +254,9 @@ Settings → Rules → Rulesets → New ruleset → New branch ruleset:
                           у админки — владелец (для migrate) и роль Django,
                           у сайта — только роль Django (web-db.env);
                           app.env — настройки, перенесённые с Render;
+                          signals.env — адреса сигналов Healthchecks
+                          приложения (MARKET_HC_PING_PAYMENTS, пишет prod.yml
+                          на машине админки; у сайта — пустой);
                           role.env, compose.env, Caddyfile — пишет prod-app.sh
 /opt/savdex/pg            файлы базы (только машина базы)
 /srv/savdex/storage       общая папка: public, private, cache (только машина базы)

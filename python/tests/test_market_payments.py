@@ -35,8 +35,8 @@ import pytest
 
 from savdex.market.payments import base, click, payme
 
-from .pg_admin import PYTHON, КОРЕНЬ, ОКРУЖЕНИЕ, sql, нужна_база, свежая_база
-from .test_market import _json, _post, _компания, _продавец, _товар
+from .pg_admin import PYTHON, КОРЕНЬ, ОКРУЖЕНИЕ, django, sql, журнал, нужна_база, свежая_база
+from .test_market import _json, _post, _компания, _продавец, _сотрудник, _товар
 from .test_market_orders import (
     _id,
     _manage,
@@ -178,6 +178,16 @@ def test_лимиты_без_файлового_кэша_предупрежда�
 
     monkeypatch.setenv("CACHE_STORE", "array")
     monkeypatch.setattr(base, "_store_warned", False)
+
+    # Не боевой (тестовый, проверки) — тишина: там кэш в памяти — обычное дело
+    monkeypatch.setenv("APP_ENV", "local")
+
+    with caplog.at_level(logging.WARNING, logger="savdex.market.payments"):
+        assert base._throttled(RequestFactory().post("/")) is False
+
+    assert not any("throttle_disabled" in r.getMessage() for r in caplog.records)
+
+    monkeypatch.setenv("APP_ENV", "production")
 
     with caplog.at_level(logging.WARNING, logger="savdex.market.payments"):
         for _ in range(3):
@@ -792,6 +802,12 @@ def test_uzum_оплата_повтор_и_возврат(сайт, магази
     assert _статус(number) == "refunded"
     assert _uzum(сайт, "reverse", {"transId": "uz-1"})[1]["errorCode"] == 10018
     assert _uzum(сайт, "status", {"transId": "uz-1"})[1]["status"] == "REVERSED"
+    # confirm по возвращённой — отказ, но без отметки «отклонена»: деньги
+    # покупателю ушли нашим же путём, проверять у провайдера нечего
+    assert _uzum(сайт, "confirm", {"transId": "uz-1"})[1]["errorCode"] == 10018
+    assert sql(
+        "select rejected_at from market_payments where provider_transaction_id = 'uz-1'"
+    ) == [(None,)]
     assert all(total == 0 for total in _журнал(pk).values()), _журнал(pk)
 
 
@@ -1190,16 +1206,38 @@ def test_сверка_оплат(сайт, магазин):
         [(возврат,)] = sql(
             "select id from market_payments where order_id = %s and status = 'paid'", [ждёт_pk]
         )
+        кассир = _сотрудник("superadmin")
+        заметка = "деньги вернулись, сверено в кабинете"
+
+        # Не сотрудник кассы и короткая заметка — отказ команды
+        for лишний in (
+            ["--admin", str(покупатель), "--note", заметка],
+            ["--admin", str(кассир), "--note", "ок"],
+        ):
+            отказ = _manage("market_ack_payment", str(отклонена), *лишний)
+            assert отказ.returncode == 2, отказ.stdout + отказ.stderr
+
         for pk_ in (отклонена, возврат):
-            код = (
-                "from savdex.market.payments import base; "
-                f"print(base.acknowledge({pk_}, {покупатель}, 'деньги вернулись'))"
+            итог = _manage(
+                "market_ack_payment", str(pk_), "--admin", str(кассир), "--note", заметка
             )
-            assert _python_env(код) == "True"
-            assert _python_env(код) == "False"
+            assert итог.returncode == 0, итог.stdout + итог.stderr
+            повтор = _manage(
+                "market_ack_payment", str(pk_), "--admin", str(кассир), "--note", заметка
+            )
+            assert повтор.returncode == 1
         assert sql(
             "select checked_by, check_note from market_payments where id = %s", [отклонена]
-        ) == [(покупатель, "деньги вернулись")]
+        ) == [(кассир, заметка)]
+
+        # Журнал действий админки и история заказа — от имени сотрудника
+        запись = журнал("payment_checked")
+        assert запись["section"] == "market_cash" and запись["subject_type"] == "market_payment"
+        assert sql(
+            "select actor, actor_user_id from market_order_events where order_id = %s "
+            "and note like %s",
+            [ждёт_pk, f"оплата {возврат}: проверено%"],
+        ) == [("staff", кассир)]
         проверено = _manage("market_reconcile_payments", "--day", ДЕНЬ)
         assert f"оплата {отклонена} отклонена" not in проверено.stdout
         assert f"{ждёт} ждёт возврата" not in проверено.stdout
@@ -1212,3 +1250,81 @@ def test_сверка_оплат(сайт, магазин):
             "update market_orders set cancelled_at = now() at time zone 'utc' where id = %s",
             [ждёт_pk],
         )
+
+
+@нужна_база
+def test_проверенный_отказ_другой_оплаты_не_глушит_зависший_возврат(сайт, магазин):
+    """У заказа проверенный отказ Click и зависший возврат Payme — возврат всё равно виден."""
+    покупатель, number, pk = _заказ(сайт, магазин)
+    click_поля = {"click_trans_id": "9961", "merchant_trans_id": number, "amount": "90000.00"}
+    готов = _click(сайт, "prepare", click_поля)
+    # Попытка Click брошена — Payme её гасит и проводит оплату
+    sql(
+        "update market_payments set created_at = created_at - interval '2 hours' "
+        "where provider_transaction_id = '9961'"
+    )
+    счёт = {"order": number}
+    _payme(
+        сайт, "CreateTransaction", {"id": "pm-mix", "time": _ms(), "amount": ЦЕНА, "account": счёт}
+    )
+    _payme(сайт, "PerformTransaction", {"id": "pm-mix"})
+    # Click всё же пришёл провести брошенную — отказ с отметкой
+    итог = {**click_поля, "merchant_prepare_id": str(готов["merchant_prepare_id"])}
+    assert _click(сайт, "complete", итог)["error"] == -9
+    [(отказ,)] = sql(
+        "select id from market_payments where provider_transaction_id = '9961' "
+        "and rejected_at is not null"
+    )
+    кассир = _сотрудник("superadmin")
+    отмечено = _manage(
+        "market_ack_payment", str(отказ), "--admin", str(кассир), "--note", "Click вернул деньги"
+    )
+    assert отмечено.returncode == 0, отмечено.stdout + отмечено.stderr
+
+    _отменить(сайт, покупатель, number)
+    assert _статус(number) == "refund_pending"
+    sql(
+        "update market_orders set cancelled_at = cancelled_at - interval '48 hours' where id = %s",
+        [pk],
+    )
+
+    try:
+        сверка = _manage("market_reconcile_payments", "--day", ДЕНЬ)
+        assert f"{number} ждёт возврата дольше 24 ч" in сверка.stdout, сверка.stdout
+        assert сверка.returncode == 1
+    finally:
+        sql(
+            "update market_orders set cancelled_at = now() at time zone 'utc' where id = %s",
+            [pk],
+        )
+
+
+@нужна_база
+def test_сотрудника_с_отметкой_проверки_не_удалить_навсегда(сайт, магазин):
+    """market_payments.checked_by держит сотрудника: удаление — понятный отказ, не 500."""
+    [(проверяющий,)] = sql(
+        "insert into users (name, email, password, is_admin, admin_role, status, deleted_at, "
+        "created_at, updated_at) values ('Бывший кассир', 'old-cashier@savdex.uz', 'x', true, "
+        "'finance', 'active', now(), now(), now()) returning id"
+    )
+    _, _, pk = _заказ(сайт, магазин)
+    sql(
+        "insert into market_payments (order_id, provider, amount, status, checked_by, "
+        "rejection_checked_at) values (%s, 'click', %s, 'cancelled', %s, now())",
+        [pk, ЦЕНА, проверяющий],
+    )
+
+    список = "/py/admin/accounts/user/"
+    _, _, страница = django(
+        _сотрудник("superadmin"),
+        (
+            "post",
+            список,
+            {"action": "force_delete", "_selected_action": [str(проверяющий)], "post": "yes"},
+        ),
+        ("get", список + "?state=disabled", None),
+    )
+
+    assert страница["status"] == 200
+    assert "удалить нельзя" in страница["body"]
+    assert sql("select count(*) from users where id = %s", [проверяющий]) == [(1,)]
