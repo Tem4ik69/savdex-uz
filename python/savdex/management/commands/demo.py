@@ -2,7 +2,8 @@
 Демо-наполнение тестового сервера (savdex/demo.py).
 
   manage.py demo    придуманные компании, владельцы, объявления и отзывы,
-                    продавцы и товары маркетплейса (savdex/market/demo.py);
+                    продавцы, товары и пункты выдачи маркетплейса
+                    (savdex/market/demo.py);
                     уже заведены — ничего. Маркетплейс добавляется и к
                     базе, где демо SavdEx уже есть. На боевом
                     (APP_ENV=production) отказывается.
@@ -43,3 +44,6 @@ class Command(BaseCommand):
             )
         else:
             self.stdout.write("Демо маркетплейса уже есть — ничего нового")
+
+        if market["pickup_points"]:
+            self.stdout.write(f"Пункты выдачи: {market['pickup_points']}")
