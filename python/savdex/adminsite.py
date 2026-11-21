@@ -183,6 +183,11 @@ ICONS = {
     "market.Category": "squares-2x2",
     "market.Order": "shopping-bag",
     "market.PickupPoint": "home",
+    "market.SellerBalance": "banknotes",
+    "market.Payout": "paper-airplane",
+    "market.SellerRequisites": "identification",
+    "market.RefundOrder": "arrow-uturn-left",
+    "market.CashOrder": "check-circle",
 }
 DEFAULT_ICON = "rectangle-stack"
 
@@ -417,6 +422,18 @@ MENU_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "market.category",
             "market.order",
             "market.pickuppoint",
+        ),
+    ),
+    # Касса маркетплейса (savdex/market/cash_admin.py): роль «Касса маркетплейса»
+    (
+        "market_cash",
+        "Касса маркетплейса",
+        (
+            "market.sellerbalance",
+            "market.payout",
+            "market.cashorder",
+            "market.sellerrequisites",
+            "market.refundorder",
         ),
     ),
     (

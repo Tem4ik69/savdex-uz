@@ -138,6 +138,9 @@ ACCOUNTS: dict[str, str] = {
     "refund_payable": "К возврату покупателю",
     # Доставка (delivery_total заказа) — выручка площадки
     "delivery_revenue": "Доставка",
+    # Выплачено продавцам с нашего счёта (savdex/market/cash.py, mark_paid):
+    # минус — деньги ушли в банк по платёжке; сверка — с выпиской банка
+    "payout_clearing": "Выплаты продавцам (банк)",
 }
 
 # ── Настройки ───────────────────────────────────────────────────────
@@ -624,6 +627,15 @@ def checkout(user_id: int, data: Mapping[str, Any]) -> str:
         if not lines:
             raise OrderRefused("order.cart_empty", 422)
 
+        # У своей компании не покупают: сотрудник продавца накрутил бы
+        # продажи и вывел деньги выплатой (docs/marketplace-security.md, раздел 3)
+        if one(
+            "select 1 as x from users u join market_sellers s on s.company_id = u.company_id "
+            "where u.id = %s and s.id = any(%s) limit 1",
+            [user_id, sorted({int(line["seller_id"]) for line in lines})],
+        ):
+            raise OrderRefused("order.own_company", 422)
+
         # После блокировки корзины: параллельное оформление того же
         # покупателя уже закончилось, его заказ здесь виден. В лимите — и
         # отменённые самим покупателем за последние сутки: цикл «оформить —
@@ -1069,8 +1081,33 @@ def advance(order_id: int, before: str, *, actor_user_id: int, note: str | None 
 
         if after == ISSUED:
             _write_off(order_id)
+            # Один раз: переход в «выдан» условный, повтор сюда не дойдёт
+            _collect_cash(order_id)
 
     return True
+
+
+def _collect_cash(order_id: int) -> None:
+    """
+    Заказ с оплатой при получении выдан — пункт принял деньги: долг
+    покупателя (buyer_receivable) закрыт наличными (cash_collected). Сверка
+    с отчётом BTS — по счёту cash_collected. Картой оплаченный — ничего.
+    """
+    order = one(
+        "select id, number, total, payment_method from market_orders where id = %s", [order_id]
+    )
+
+    if order is None or order["payment_method"] != "cash":
+        return
+
+    memo = f"заказ {order['number']}: принято при получении"
+    post(
+        None,
+        [
+            Entry("cash_collected", int(order["total"]), order_id=order_id, memo=memo),
+            Entry("buyer_receivable", -int(order["total"]), order_id=order_id, memo=memo),
+        ],
+    )
 
 
 def staff_cancel(order_id: int, before: str, *, actor_user_id: int, note: str) -> str | None:

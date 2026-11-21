@@ -900,9 +900,11 @@ def refund_order(order_id: int) -> str:
 
         return "disabled"
 
+    # refund_mode = api — до сетевого вызова: пока запрос в полёте, касса
+    # возврат вручную не отметит (savdex/market/cash.py, mark_refunded)
     claimed = write(
-        "update market_payments set refund_requested_at = %s, updated_at = %s "
-        "where id = %s and status = %s and refund_requested_at is null",
+        "update market_payments set refund_requested_at = %s, refund_mode = 'api', "
+        "updated_at = %s where id = %s and status = %s and refund_requested_at is null",
         [now(), now(), found["id"], PAID],
     )
 
@@ -915,6 +917,11 @@ def refund_order(order_id: int) -> str:
         log.exception(
             "market.payment.refund_failed provider=%s payment=%s", found["provider"], found["id"]
         )
+        write(
+            "update market_payments set refund_mode = 'error', updated_at = %s "
+            "where id = %s and status = %s and refund_mode = 'api'",
+            [now(), found["id"], PAID],
+        )
 
         return "error"
 
@@ -926,7 +933,8 @@ def refund_order(order_id: int) -> str:
             order_by_id(order_id, lock=True)
             payment(int(found["id"]), lock=True)
             write(
-                "update market_payments set note = %s, updated_at = %s where id = %s",
+                "update market_payments set note = %s, refund_mode = 'manual', updated_at = %s "
+                "where id = %s",
                 [note[:500], now(), found["id"]],
             )
             orders.note(order_id, note)
@@ -939,8 +947,8 @@ def refund_order(order_id: int) -> str:
 
     if result is False:
         write(
-            "update market_payments set refund_requested_at = null, updated_at = %s "
-            "where id = %s and status = %s",
+            "update market_payments set refund_requested_at = null, refund_mode = null, "
+            "updated_at = %s where id = %s and status = %s",
             [now(), found["id"], PAID],
         )
         log.error(

@@ -36,10 +36,11 @@ ROLES: dict[str, str] = {
     "finance": "Финансы",
     "support": "Поддержка",
     "content_manager": "Контент-менеджер",
-    # TODO(маркетплейс, этап 3): роли «Склад» (warehouse, раздел market_stock)
-    # и «Касса» (cashier, раздел market_cash) — docs/marketplace-security.md,
-    # раздел 4. Заводятся вместе со своими разделами: роль без раздела ничего
-    # не открывает, а новая роль меняет счёт прав в tests/test_access_parity.py
+    # Маркетплейс, этап 3 (docs/marketplace-security.md, раздел 4): склад —
+    # сборка, отгрузка и выдача заказов без денег; касса — начисления,
+    # выплаты продавцам и ручные возвраты, без правки заказов и остатков
+    "warehouse": "Склад маркетплейса",
+    "cashier": "Касса маркетплейса",
 }
 
 #: Роли, которые предлагает панель: мегаадмина назначают только на сервере
@@ -88,6 +89,12 @@ SECTIONS: dict[str, str] = {
     # Заказы маркетплейса и пункты выдачи (savdex/market/orders.py): в
     # админке пока только смотреть; суммы поддержке не видны (_DETAILS_HIDDEN)
     "market_orders": "Маркетплейс — заказы",
+    # Склад маркетплейса: шаги заказа «в сборку → отгружен → в пункте →
+    # выдан» (OrderAdmin, orders.advance); поставки и приёмка BTS — потом
+    "market_stock": "Маркетплейс — склад и выдача",
+    # Касса маркетплейса (savdex/market/cash.py): балансы продавцов,
+    # выплаты в два шага, реквизиты, ручная отметка возврата
+    "market_cash": "Маркетплейс — касса и выплаты",
     "support": "Обращения в поддержку",
     "payments": "Счета и оплаты",
     "subscriptions": "Подписки",
@@ -196,6 +203,16 @@ _MATRIX: dict[str, dict[str, str]] = {
         # Дерево категорий и характеристики витрины
         "market_catalog": "w",
     },
+    "warehouse": {
+        # Заказы — смотреть состав и статус, без сумм (_DETAILS_HIDDEN);
+        # шаги заказа — правом market_stock.moderate (OrderAdmin)
+        "market_orders": "r",
+        "market_stock": "m",
+    },
+    "cashier": {
+        # Только касса: ни правки заказов и остатков, ни модерации
+        "market_cash": "m",
+    },
 }  # fmt: skip
 
 #: AdminAccess::EXTRAS — выгрузка и загрузка поимённо
@@ -249,6 +266,8 @@ _DETAILS_HIDDEN: dict[str, frozenset[str]] = {
     # Поддержке заказы маркетплейса — состав и статус, без сумм
     # (docs/marketplace-security.md, раздел 4)
     "support": frozenset({"market_orders"}),
+    # Складу — тоже без сумм: ему нужны состав, пункт выдачи и статус
+    "warehouse": frozenset({"market_orders"}),
 }
 
 

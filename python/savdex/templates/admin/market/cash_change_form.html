@@ -1,0 +1,31 @@
+{% extends "admin/change_form.html" %}
+{# Касса маркетплейса (savdex/market/cash_admin.py): карточка и действия кассира — POST с CSRF #}
+{% block content %}
+  {{ block.super }}
+  {% if original %}
+    {% for form in cash_forms %}
+      <form method="post" action="{{ form.url }}" class="module aligned" id="cash-{{ form.code }}">
+        {% csrf_token %}
+        <h2>{{ form.title }}</h2>
+        {% if form.help %}<div class="help">{{ form.help }}</div>{% endif %}
+        {% for field in form.fields %}
+          <div class="form-row">
+            {% if field.type == "checkbox" %}
+              <label><input type="checkbox" name="{{ field.name }}" value="1"> {{ field.label }}</label>
+            {% else %}
+              <label for="cash-{{ form.code }}-{{ field.name }}">{{ field.label }}:</label>
+              {% if field.type == "textarea" %}
+                <textarea name="{{ field.name }}" id="cash-{{ form.code }}-{{ field.name }}" rows="2" cols="80"></textarea>
+              {% else %}
+                <input type="text" name="{{ field.name }}" id="cash-{{ form.code }}-{{ field.name }}" maxlength="64">
+              {% endif %}
+            {% endif %}
+          </div>
+        {% endfor %}
+        <div class="submit-row">
+          <button type="submit" name="do" value="{{ form.code }}" class="button default">{{ form.button }}</button>
+        </div>
+      </form>
+    {% endfor %}
+  {% endif %}
+{% endblock %}
