@@ -5,7 +5,8 @@
 страницы маркетплейса, переведённые с demo.ts на настоящие адреса
 /market/api/…, показывают на тестовом то же, что показывали на
 демо-данных. ТЗ 18.11, раздел 11.3: «Демо-данные на тестовом: категории,
-товары, ПВЗ» (категории заводит миграция каталога, ПВЗ — с заказами).
+товары, ПВЗ» (категории заводит миграция каталога; пункты выдачи — здесь,
+те же 8, что в демо оформления заказа, resources/js/market/orders.ts).
 
 Правила — как у savdex/demo.py:
 - на боевом (APP_ENV=production) не работает;
@@ -347,12 +348,44 @@ def _split(total: int, parts: int) -> list[int]:
     return [base + (1 if n < extra else 0) for n in range(parts)]
 
 
+#: Пункты выдачи BTS — как POINTS в resources/js/market/orders.ts: код (с «demo-»,
+#: чтобы не спутать с настоящими кодами BTS), название, район и адрес. Часов работы
+#: и координат в таблице пока нет — они ждут ответов BTS (ТЗ, вопросы 4–5).
+PICKUP_POINTS: list[tuple[str, str, str]] = [
+    ("demo-chilanzar", "BTS Чиланзар", "Чиланзарский район, ул. Бунёдкор, 12"),
+    ("demo-yunusabad", "BTS Юнусабад", "Юнусабадский район, ул. Амира Темура, 107"),
+    ("demo-ulugbek", "BTS Буюк Ипак Йули", "Мирзо-Улугбекский район, ул. Буюк Ипак Йули, 45"),
+    ("demo-sergeli", "BTS Сергели", "Сергелийский район, ул. Янги Сергели, 8"),
+    ("demo-yakkasaray", "BTS Яккасарай", "Яккасарайский район, ул. Шота Руставели, 22"),
+    ("demo-chorsu", "BTS Чорсу", "Шайхантахурский район, ул. Навои, 48"),
+    ("demo-mirabad", "BTS Мирабад", "Мирабадский район, ул. Нукус, 31"),
+    ("demo-olmazor", "BTS Алмазар", "Алмазарский район, ул. Каракамыш, 3"),
+]
+
+
+def _pickup_points() -> int:
+    """Демо-пункты выдачи: какие уже есть (по коду) — не трогаются. Итог — сколько заведено."""
+    made = 0
+
+    for sort, (code, name, address) in enumerate(PICKUP_POINTS):
+        made += len(
+            demo._rows(
+                "insert into market_pickup_points (code, name, address, city, sort) "
+                "values (%s, %s, %s, 'Ташкент', %s) on conflict (code) do nothing returning id",
+                [code, name, address, sort],
+            )
+        )
+
+    return made
+
+
 def seed(*, now: datetime | None = None) -> dict[str, int]:
     """Завести демо маркетплейса; уже заведено — ничего. Итог — сколько чего заведено."""
     if (why := demo.refused()) is not None:
         raise demo.DemoRefusedError(why)
 
-    made = {"sellers": 0, "products": 0, "variants": 0}
+    # Пункты выдачи — отдельно от продавцов: доезжают и туда, где демо-товары уже есть
+    made = {"sellers": 0, "products": 0, "variants": 0, "pickup_points": _pickup_points()}
 
     if demo._rows("select 1 from companies where source_note = %s limit 1", [MARK]):
         return made

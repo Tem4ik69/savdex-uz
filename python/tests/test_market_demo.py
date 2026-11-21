@@ -59,9 +59,16 @@ def test_демо_маркетплейса(база):  # noqa: F811
     )
     assert выбор == {"Цвет": "Синий", "Память": "128 ГБ"}
 
+    # Пункты выдачи — те же 8, что в демо оформления заказа (resources/js/market/orders.ts)
+    assert f"Пункты выдачи: {len(market_demo.PICKUP_POINTS)}" in итог.stdout
+    пункты = sql("select code, city, is_active from market_pickup_points where code like 'demo-%%'")
+    assert len(пункты) == len(market_demo.PICKUP_POINTS)
+    assert all(город == "Ташкент" and работает for _, город, работает in пункты)
+
     # Повторный запуск ничего не дублирует
     ещё = manage("demo")
     assert ещё.returncode == 0 and "Демо маркетплейса уже есть" in ещё.stdout
+    assert "Пункты выдачи" not in ещё.stdout
     [(всего,)] = sql("select count(*) from market_products")
     assert всего == len(market_demo.PRODUCTS)
 
@@ -78,9 +85,11 @@ def test_к_уже_наполненной_базе(база):  # noqa: F811
     [(компаний,)] = sql("select count(*) from companies where source_note = %s", [demo.MARK])
     assert компаний == len(demo.COMPANIES)
 
+    sql("delete from market_pickup_points where code like 'demo-%%'")
     итог = manage("demo")
     assert итог.returncode == 0, итог.stderr[-3000:]
     assert "Демо-данные уже есть" in итог.stdout
+    assert f"Пункты выдачи: {len(market_demo.PICKUP_POINTS)}" in итог.stdout
     assert f"товаров {len(market_demo.PRODUCTS)}" in итог.stdout
 
 
