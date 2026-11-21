@@ -181,9 +181,10 @@ def test_страницы_с_корня(сайт, path, component):
 
 @нужна_база
 def test_каталог_с_корня_берёт_параметры(сайт):
-    page = страница(_на_рынке(сайт, "/catalog?q=%20казан%20&sort=cheap&utm=x")["body"])
+    page = страница(_на_рынке(сайт, "/catalog?q=kazan&sort=cheap&attr.color=red")["body"])
 
-    assert page["props"]["query"] == {"q": "казан", "sort": "cheap"}
+    # Строка отбора доходит до страницы как есть: её разбирает /market/api/catalog
+    assert page["props"]["search"] == "q=kazan&sort=cheap&attr.color=red"
 
 
 @нужна_база

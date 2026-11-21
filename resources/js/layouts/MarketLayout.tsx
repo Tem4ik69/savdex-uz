@@ -4,20 +4,25 @@ import { useEffect, useRef, useState, type FormEvent, type ReactNode } from 'rea
 import { FlashToast } from '@/components/FlashToast';
 import { SiteFooter } from '@/components/SiteFooter';
 import { Link } from '@/components/ui/Link';
-import { CATEGORIES, PRODUCTS } from '@/market/demo';
-import { sum } from '@/market/format';
-import { cartCount, useCart, useFavorites } from '@/market/store';
+import { cn } from '@/lib/cn';
 import { localize } from '@/lib/locale';
+import { api } from '@/market/api';
+import { cartCount, startSession, useCart, useCategories, useFavorites, useNotice } from '@/market/store';
+import type { MarketCategory } from '@/market/types';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
 
 /**
- * Раскладка маркетплейса: своя шапка с поиском и корзиной, на телефоне —
- * нижняя панель вместо значков в шапке.
+ * Раскладка маркетплейса: своя шапка с каталогом, поиском и корзиной, на
+ * телефоне — нижняя панель вместо значков в шапке.
  *
- * Тексты пока по-русски прямо в разметке: это демо оформления (ТЗ
- * 18.11), формулировки ещё меняются. Устоятся — переедут в словари
- * на пять языков, как у остальной площадки.
+ * Данные — с сервера (/market/api/…): категории, подсказки поиска,
+ * корзина и избранное вошедшего покупателя (market/store.ts).
+ *
+ * Тексты интерфейса пока по-русски прямо в разметке: формулировки ещё
+ * меняются. Устоятся — переедут в словари на пять языков, как у
+ * остальной площадки. Названия категорий и сообщения сервера уже
+ * приходят на языке страницы.
  */
 export function MarketLayout({
     title,
@@ -36,9 +41,13 @@ export function MarketLayout({
     // На своём адресе маркетплейса «/» — его главная: на основной сайт —
     // полным адресом и обычной ссылкой (другой домен, не переход Inertia)
     const site = marketLinks?.base === '' && marketLinks.site ? marketLinks.site : null;
+    const userId = auth.user?.id ?? null;
     const inCart = cartCount(useCart());
-    const liked = Object.keys(useFavorites()).length;
+    const liked = useFavorites().length;
+    const notice = useNotice();
     const account = auth.user ? routes.cabinet : routes.loginBack();
+
+    useEffect(() => startSession(userId), [userId]);
 
     return (
         <div className="mk">
@@ -51,7 +60,6 @@ export function MarketLayout({
                 <div className="mk-in">
                     <span>
                         <MapPin size={13} aria-hidden /> Ташкент · выдача в пунктах BTS
-                        <b className="mk-demo">· Демо: товары и цены для примера</b>
                     </span>
                     <nav aria-label="Служебное меню">
                         <Link href={routes.marketSell}>Стать продавцом</Link>
@@ -70,7 +78,7 @@ export function MarketLayout({
                         <i>Market</i>
                     </Link>
                     <CatalogMenu />
-                    <SearchBox initial={search} />
+                    <SearchBox key={search} initial={search} />
                     <nav className="mk-nav" aria-label="Покупателю">
                         <Link href={`${routes.marketCatalog}?only=fav`}>
                             <Heart size={20} aria-hidden />
@@ -99,6 +107,11 @@ export function MarketLayout({
             </main>
 
             <FlashToast />
+            {notice && (
+                <div key={notice.id} className={cn('mk-toast', notice.error && 'mk-toast--error')} role="status">
+                    {notice.text}
+                </div>
+            )}
             <SiteFooter />
 
             <nav className="mk-tab" aria-label="Разделы маркетплейса">
@@ -128,18 +141,47 @@ export function MarketLayout({
     );
 }
 
-/** Поиск с подсказками: с двух букв — до пяти товаров, Enter — в каталог. */
+interface Suggestions {
+    products: { slug: string; title: string }[];
+    categories: { slug: string; name: string }[];
+}
+
+/**
+ * Поиск с подсказками: с двух букв сервер отдаёт до восьми товаров и
+ * до четырёх категорий (опечатки он тоже понимает). Запрос уходит через
+ * четверть секунды после последней буквы — не на каждое нажатие.
+ * Enter — в каталог.
+ */
 function SearchBox({ initial }: { initial: string }) {
     const [text, setText] = useState(initial);
     const [open, setOpen] = useState(false);
-    const needle = text.trim().toLowerCase();
-    const found = needle.length >= 2 ? PRODUCTS.filter((p) => p.title.toLowerCase().includes(needle)).slice(0, 5) : [];
+    const [found, setFound] = useState<{ for: string; data: Suggestions } | null>(null);
+    const needle = text.trim();
+
+    useEffect(() => {
+        if (needle.length < 2) return;
+
+        const controller = new AbortController();
+        const timer = window.setTimeout(() => {
+            api<Suggestions>(`suggest?q=${encodeURIComponent(needle)}`, { signal: controller.signal })
+                .then((data) => setFound({ for: needle, data }))
+                .catch(() => undefined);
+        }, 250);
+
+        return () => {
+            window.clearTimeout(timer);
+            controller.abort();
+        };
+    }, [needle]);
 
     function submit(event: FormEvent) {
         event.preventDefault();
         setOpen(false);
-        router.get(routes.marketCatalog, needle ? { q: text.trim() } : {});
+        router.get(routes.marketCatalog, needle ? { q: needle } : {});
     }
+
+    const data = found && found.for === needle ? found.data : null;
+    const empty = data !== null && data.products.length === 0 && data.categories.length === 0;
 
     return (
         <div
@@ -159,25 +201,32 @@ function SearchBox({ initial }: { initial: string }) {
                         setOpen(true);
                     }}
                     onFocus={() => setOpen(true)}
-                    placeholder="Искать товары и продавцов"
+                    placeholder="Искать товары и категории"
                     aria-label="Поиск по маркетплейсу"
                     autoComplete="off"
                 />
                 <button type="submit">Найти</button>
             </form>
-            {open && needle.length >= 2 && (
+            {open && needle.length >= 2 && data !== null && (
                 <div className="mk-sug">
-                    {found.length === 0 ? (
-                        <p>Ничего не нашли по «{text.trim()}». Попробуйте короче или другое слово.</p>
-                    ) : (
-                        found.map((p) => (
-                            <Link key={p.id} href={routes.marketProduct(p.slug)}>
-                                <span aria-hidden>{p.emoji}</span>
-                                {p.title}
-                                <em>{sum(p.price)} сум</em>
-                            </Link>
-                        ))
-                    )}
+                    {empty && <p>Ничего не нашли по «{needle}». Попробуйте короче или другое слово.</p>}
+                    {data.categories.map((c) => (
+                        <Link key={c.slug} href={`${routes.marketCatalog}?category=${c.slug}`}>
+                            <span aria-hidden>
+                                <LayoutGrid size={18} />
+                            </span>
+                            {c.name}
+                            <em>категория</em>
+                        </Link>
+                    ))}
+                    {data.products.map((p) => (
+                        <Link key={p.slug} href={routes.marketProduct(p.slug)}>
+                            <span aria-hidden>
+                                <Search size={18} />
+                            </span>
+                            {p.title}
+                        </Link>
+                    ))}
                 </div>
             )}
         </div>
@@ -186,17 +235,20 @@ function SearchBox({ initial }: { initial: string }) {
 
 /**
  * Кнопка «Каталог»: значок-плитка (не «бургер» — тот читается как меню
- * сайта) и окно с деревом категорий. Слева — разделы, справа —
- * подразделы колонками с группами товаров под каждым — для раздела,
- * на который навели или перешли с клавиатуры.
- * Закрывается по Escape, нажатию мимо и после перехода.
+ * сайта) и окно с деревом категорий с сервера. Слева — разделы, справа —
+ * подразделы того, на который навели или перешли с клавиатуры: колонками
+ * с группами под каждым, если в дереве есть третий уровень, иначе —
+ * списком в несколько колонок. Закрывается по Escape, нажатию мимо и
+ * после перехода.
  */
 function CatalogMenu() {
+    const categories = useCategories();
     const [open, setOpen] = useState(false);
-    const [active, setActive] = useState(CATEGORIES[0].slug);
+    const [active, setActive] = useState<string | null>(null);
     const box = useRef<HTMLDivElement>(null);
-    const current = CATEGORIES.find((c) => c.slug === active) ?? CATEGORIES[0];
+    const current: MarketCategory | undefined = categories?.find((c) => c.slug === active) ?? categories?.[0];
     const href = (slug: string) => `${routes.marketCatalog}?category=${slug}`;
+    const close = () => setOpen(false);
 
     useEffect(() => {
         if (!open) return;
@@ -215,6 +267,8 @@ function CatalogMenu() {
         };
     }, [open]);
 
+    const deep = current?.children.some((child) => child.children.length > 0) ?? false;
+
     return (
         <div className="mk-catmenu" ref={box}>
             <button type="button" className="mk-catbtn" aria-expanded={open} aria-controls="mk-catalog-panel" onClick={() => setOpen(!open)}>
@@ -222,51 +276,76 @@ function CatalogMenu() {
             </button>
             {open && (
                 <div className="mk-catpanel" id="mk-catalog-panel">
-                    <ul className="mk-catpanel__list">
-                        {CATEGORIES.map((c) => (
-                            <li key={c.slug}>
-                                <Link
-                                    href={href(c.slug)}
-                                    aria-current={c.slug === active}
-                                    onMouseEnter={() => setActive(c.slug)}
-                                    onFocus={() => setActive(c.slug)}
-                                    onClick={() => setOpen(false)}
-                                >
-                                    <span aria-hidden>{c.emoji}</span>
-                                    {c.name}
-                                    <ChevronRight size={16} aria-hidden />
-                                </Link>
-                            </li>
-                        ))}
-                    </ul>
-                    <div className="mk-catpanel__sub">
-                        <h3>
-                            <span aria-hidden>{current.emoji}</span> {current.name}
-                        </h3>
-                        <div className="mk-catpanel__cols">
-                            {current.children.map((group) => (
-                                <div key={group.name}>
-                                    <h4>
-                                        <Link href={href(current.slug)} onClick={() => setOpen(false)}>
-                                            {group.name}
+                    {categories === null && <p className="mk-catpanel__note">Загружаем категории…</p>}
+                    {categories !== null && categories.length === 0 && (
+                        <p className="mk-catpanel__note">
+                            Категории не загрузились.{' '}
+                            <Link href={routes.marketCatalog} onClick={close}>
+                                Открыть каталог целиком
+                            </Link>
+                        </p>
+                    )}
+                    {current && categories && (
+                        <>
+                            <ul className="mk-catpanel__list">
+                                {categories.map((c) => (
+                                    <li key={c.slug}>
+                                        <Link
+                                            href={href(c.slug)}
+                                            aria-current={c.slug === current.slug}
+                                            onMouseEnter={() => setActive(c.slug)}
+                                            onFocus={() => setActive(c.slug)}
+                                            onClick={close}
+                                        >
+                                            <span aria-hidden>{c.emoji}</span>
+                                            {c.name}
+                                            <ChevronRight size={16} aria-hidden />
                                         </Link>
-                                    </h4>
-                                    <ul>
-                                        {group.items.map((item) => (
-                                            <li key={item}>
-                                                <Link href={href(current.slug)} onClick={() => setOpen(false)}>
-                                                    {item}
+                                    </li>
+                                ))}
+                            </ul>
+                            <div className="mk-catpanel__sub">
+                                <h3>
+                                    <span aria-hidden>{current.emoji}</span> {current.name}
+                                </h3>
+                                {deep ? (
+                                    <div className="mk-catpanel__cols">
+                                        {current.children.map((group) => (
+                                            <div key={group.slug}>
+                                                <h4>
+                                                    <Link href={href(group.slug)} onClick={close}>
+                                                        {group.name}
+                                                    </Link>
+                                                </h4>
+                                                <ul>
+                                                    {group.children.map((item) => (
+                                                        <li key={item.slug}>
+                                                            <Link href={href(item.slug)} onClick={close}>
+                                                                {item.name}
+                                                            </Link>
+                                                        </li>
+                                                    ))}
+                                                </ul>
+                                            </div>
+                                        ))}
+                                    </div>
+                                ) : (
+                                    <ul className="mk-catpanel__cols mk-catpanel__cols--flat">
+                                        {current.children.map((item) => (
+                                            <li key={item.slug}>
+                                                <Link href={href(item.slug)} onClick={close}>
+                                                    {item.name}
                                                 </Link>
                                             </li>
                                         ))}
                                     </ul>
-                                </div>
-                            ))}
-                        </div>
-                        <Link href={href(current.slug)} className="mk-catpanel__all" onClick={() => setOpen(false)}>
-                            Все товары раздела →
-                        </Link>
-                    </div>
+                                )}
+                                <Link href={href(current.slug)} className="mk-catpanel__all" onClick={close}>
+                                    Все товары раздела →
+                                </Link>
+                            </div>
+                        </>
+                    )}
                 </div>
             )}
         </div>
