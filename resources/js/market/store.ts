@@ -1,105 +1,187 @@
 import { useSyncExternalStore } from 'react';
+import { api, ApiError } from '@/market/api';
+import type { CartSummary, MarketCategory, MarketProductPage } from '@/market/types';
 
 /**
- * Корзина и избранное маркетплейса — пока в браузере.
+ * Общее состояние маркетплейса в браузере: корзина и избранное
+ * вошедшего покупателя, дерево категорий и всплывающее сообщение.
  *
- * Серверной корзины ещё нет (ТЗ 18.11): количество по товарам лежит в
- * localStorage, чтобы демо можно было пройти от карточки до корзины.
- * С сервером этот файл заменится запросами, вызовы останутся теми же.
- *
- * На сервере (SSR) и до гидрации корзина пустая — иначе разметка
- * сервера и браузера разошлась бы.
+ * Корзина и избранное живут на сервере и только у вошедшего: гостю
+ * запрос отвечает «нужен вход», и api() уводит на страницу входа —
+ * сервер запоминает, откуда пришли, и возвращает к товару (ТЗ, раздел 4).
+ * Здесь — копия ответа сервера, чтобы значок в шапке и кнопки карточек
+ * обновлялись сразу на всех частях страницы.
  */
 
-type Quantities = Record<number, number>;
+interface State {
+    cart: CartSummary | null;
+    favorites: number[];
+    categories: MarketCategory[] | null;
+    notice: { text: string; error: boolean; id: number } | null;
+}
 
-const EMPTY: Quantities = {};
+let state: State = { cart: null, favorites: [], categories: null, notice: null };
+const EMPTY: State = state;
+const listeners = new Set<() => void>();
 
-function createStore(key: string) {
-    let state: Quantities = EMPTY;
-    let loaded = false;
-    const listeners = new Set<() => void>();
+function set(patch: Partial<State>): void {
+    state = { ...state, ...patch };
+    listeners.forEach((notify) => notify());
+}
 
-    function load(): void {
-        if (loaded || typeof window === 'undefined') return;
-        loaded = true;
+function subscribe(listener: () => void): () => void {
+    listeners.add(listener);
 
-        try {
-            const raw = window.localStorage.getItem(key);
-            const parsed: unknown = raw ? JSON.parse(raw) : null;
+    return () => listeners.delete(listener);
+}
 
-            if (parsed && typeof parsed === 'object') state = parsed as Quantities;
-        } catch {
-            // Закрытое хранилище (приватное окно) — корзина живёт до перезагрузки
-        }
+function useStore<T>(pick: (s: State) => T): T {
+    return useSyncExternalStore(
+        subscribe,
+        () => pick(state),
+        () => pick(EMPTY),
+    );
+}
+
+export const useCart = (): CartSummary | null => useStore((s) => s.cart);
+export const useFavorites = (): number[] => useStore((s) => s.favorites);
+export const useCategories = (): MarketCategory[] | null => useStore((s) => s.categories);
+export const useNotice = (): State['notice'] => useStore((s) => s.notice);
+
+let noticeTimer: number | undefined;
+
+export function notify(text: string, error = false): void {
+    window.clearTimeout(noticeTimer);
+    set({ notice: { text, error, id: Date.now() } });
+    noticeTimer = window.setTimeout(() => set({ notice: null }), 4000);
+}
+
+function failed(error: unknown): void {
+    // 401 — api() уже уводит на вход, сообщение не нужно
+    if (error instanceof ApiError && error.status !== 401) notify(error.message, true);
+}
+
+let sessionFor: number | null | undefined;
+let categoriesAsked = false;
+
+/**
+ * Загрузить то, что нужно всем страницам: категории — всегда, корзину и
+ * избранное — вошедшему. Зовёт раскладка; повторный вызов для того же
+ * пользователя ничего не делает.
+ */
+export function startSession(userId: number | null): void {
+    if (!categoriesAsked) {
+        categoriesAsked = true;
+        api<{ categories: MarketCategory[] }>('categories')
+            .then((data) => set({ categories: data.categories }))
+            .catch(() => {
+                // Без категорий страница работает: меню каталога покажет, что список не загрузился
+                categoriesAsked = false;
+                set({ categories: [] });
+            });
     }
 
-    function write(next: Quantities): void {
-        state = next;
+    if (sessionFor === userId) return;
+    sessionFor = userId;
 
-        try {
-            window.localStorage.setItem(key, JSON.stringify(next));
-        } catch {
-            // см. load()
-        }
+    if (userId === null) {
+        set({ cart: null, favorites: [] });
 
-        listeners.forEach((notify) => notify());
+        return;
     }
 
-    return {
-        subscribe(listener: () => void): () => void {
-            load();
-            listeners.add(listener);
-            // Первое чтение после гидрации: хранилище могло быть непустым
-            listener();
+    api<CartSummary>('cart', { loginRedirect: false })
+        .then((cart) => set({ cart }))
+        .catch(() => undefined);
+    api<{ ids: number[] }>('favorites', { loginRedirect: false })
+        .then((data) => set({ favorites: data.ids }))
+        .catch(() => undefined);
+}
 
-            return () => listeners.delete(listener);
-        },
-        get: (): Quantities => state,
-        set(id: number, quantity: number): void {
-            load();
+/** Положить вариант товара в корзину. true — получилось. */
+export async function addToCart(variantId: number, quantity = 1): Promise<boolean> {
+    try {
+        const data = await api<{ message: string; cart: CartSummary }>('cart/add', { body: { variantId, quantity } });
 
-            const next = { ...state };
+        set({ cart: data.cart });
+        notify(data.message);
 
-            if (quantity > 0) next[id] = quantity;
-            else delete next[id];
+        return true;
+    } catch (error) {
+        failed(error);
 
-            write(next);
-        },
-        clear: (): void => write(EMPTY),
+        return false;
+    }
+}
+
+/**
+ * «В корзину» с карточки в списке. В карточке нет вариантов, поэтому
+ * сначала спрашиваем товар: один вариант — кладём его, несколько
+ * (цвет, размер) — выбирать нужно на странице товара ('choose').
+ */
+export async function addProductToCart(slug: string): Promise<'added' | 'choose' | 'failed'> {
+    try {
+        const { product } = await api<{ product: MarketProductPage }>(`product/${slug}`);
+        const available = product.offers.filter((offer) => offer.stock > 0);
+
+        if (product.offers.length !== 1 || available.length !== 1) return 'choose';
+
+        return (await addToCart(available[0].id)) ? 'added' : 'failed';
+    } catch (error) {
+        failed(error);
+
+        return 'failed';
+    }
+}
+
+/** Сколько штук варианта в корзине; 0 — убрать. */
+export async function setCartQuantity(variantId: number, quantity: number): Promise<boolean> {
+    try {
+        const data = await api<{ cart: CartSummary }>(`cart/${variantId}`, { body: { quantity } });
+
+        set({ cart: data.cart });
+
+        return true;
+    } catch (error) {
+        failed(error);
+
+        return false;
+    }
+}
+
+export async function toggleFavorite(productId: number): Promise<void> {
+    try {
+        const data = await api<{ favorite: boolean }>(`favorites/${productId}`, { post: true });
+
+        set({
+            favorites: data.favorite ? [productId, ...state.favorites.filter((id) => id !== productId)] : state.favorites.filter((id) => id !== productId),
+        });
+    } catch (error) {
+        failed(error);
+    }
+}
+
+/** Сколько штук в корзине можно купить сейчас — для значка в шапке. */
+export const cartCount = (cart: CartSummary | null): number => cart?.count ?? 0;
+
+/** Все строки корзины подряд, без деления на продавцов. */
+export const cartLines = (cart: CartSummary | null) => (cart ? cart.parts.flatMap((part) => part.items) : []);
+
+/** Значок и название категории по её адресу — в том числе вложенной. */
+export function findCategory(tree: MarketCategory[] | null, slug: string): { node: MarketCategory; emoji: string } | null {
+    const walk = (nodes: MarketCategory[], inherited: string): { node: MarketCategory; emoji: string } | null => {
+        for (const node of nodes) {
+            const emoji = node.emoji || inherited;
+
+            if (node.slug === slug) return { node, emoji };
+
+            const deeper = walk(node.children, emoji);
+
+            if (deeper) return deeper;
+        }
+
+        return null;
     };
-}
 
-const cart = createStore('savdex.market.cart');
-const favorites = createStore('savdex.market.favorites');
-
-const serverSnapshot = (): Quantities => EMPTY;
-
-export function useCart(): Quantities {
-    return useSyncExternalStore(cart.subscribe, cart.get, serverSnapshot);
-}
-
-export function useFavorites(): Quantities {
-    return useSyncExternalStore(favorites.subscribe, favorites.get, serverSnapshot);
-}
-
-export function setCartQuantity(id: number, quantity: number): void {
-    cart.set(id, quantity);
-}
-
-export function addToCart(id: number, quantity = 1): void {
-    cart.set(id, (cart.get()[id] ?? 0) + quantity);
-}
-
-export function toggleFavorite(id: number): void {
-    favorites.set(id, favorites.get()[id] ? 0 : 1);
-}
-
-export function clearCart(): void {
-    cart.clear();
-}
-
-/** Сколько штук в корзине всего — для значка в шапке. */
-export function cartCount(items: Quantities): number {
-    return Object.values(items).reduce((sum, quantity) => sum + quantity, 0);
+    return tree ? walk(tree, '') : null;
 }

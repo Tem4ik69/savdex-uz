@@ -1,34 +1,48 @@
 import { BadgeCheck } from 'lucide-react';
-import { MarketCard } from '@/components/market/MarketCard';
+import { MarketCard, MarketGridSkeleton } from '@/components/market/MarketCard';
 import { Link } from '@/components/ui/Link';
 import { MarketLayout } from '@/layouts/MarketLayout';
-import { PRODUCTS, SELLERS } from '@/market/demo';
+import { useApi } from '@/market/api';
 import { plural, rating, sum } from '@/market/format';
+import type { MarketShop } from '@/market/types';
 import { routes } from '@/routes';
 
-/** Страница продавца — витрина компании: кто продаёт и все его товары. */
-export default function MarketShop({ slug }: { slug: string }) {
-    const seller = SELLERS.find((s) => s.slug === slug);
-    const products = PRODUCTS.filter((p) => p.seller === slug);
+/** Страница продавца — витрина компании: кто продаёт и все его товары (/market/api/seller/<адрес>). */
+export default function MarketShopPage({ slug }: { slug: string }) {
+    const { data, loading, error, status, reload } = useApi<MarketShop>(`seller/${slug}`);
 
-    if (!seller) {
+    if (!data) {
+        const missing = status === 404;
+
         return (
-            <MarketLayout title="Продавец не найден · SavdEx Market" tab="catalog">
-                <div className="mk-in" style={{ paddingTop: 24 }}>
-                    <div className="mk-empty">
-                        <span aria-hidden>🏬</span>
-                        <h2>Такого продавца нет</h2>
-                        <p>Возможно, магазин закрылся или ссылка устарела.</p>
-                        <Link href={routes.marketCatalog} className="mk-btn">
-                            Перейти в каталог
-                        </Link>
-                    </div>
+            <MarketLayout title={missing ? 'Продавец не найден · SavdEx Market' : 'SavdEx Market'} tab="catalog">
+                <div className="mk-in" style={{ paddingTop: 24 }} aria-busy={loading}>
+                    {loading ? (
+                        <div className="mk-grid">
+                            <MarketGridSkeleton />
+                        </div>
+                    ) : (
+                        <div className="mk-empty">
+                            <span aria-hidden>🏬</span>
+                            <h2>{missing ? 'Такого продавца нет' : 'Страница продавца не загрузилась'}</h2>
+                            <p>{missing ? 'Возможно, магазин закрылся или ссылка устарела.' : error}</p>
+                            {missing ? (
+                                <Link href={routes.marketCatalog} className="mk-btn">
+                                    Перейти в каталог
+                                </Link>
+                            ) : (
+                                <button type="button" className="mk-btn" onClick={reload}>
+                                    Повторить
+                                </button>
+                            )}
+                        </div>
+                    )}
                 </div>
             </MarketLayout>
         );
     }
 
-    const sold = products.reduce((s, p) => s + p.sold, 0);
+    const { seller, items, total } = data;
 
     return (
         <MarketLayout title={`${seller.name} · SavdEx Market`} tab="catalog">
@@ -38,40 +52,50 @@ export default function MarketShop({ slug }: { slug: string }) {
                 </nav>
 
                 <header className="mk-shop">
-                    <span className="mk-shop__logo" aria-hidden>
-                        {seller.name.slice(0, 2).toUpperCase()}
-                    </span>
+                    {seller.logo ? (
+                        <img className="mk-shop__logo" src={seller.logo} alt="" />
+                    ) : (
+                        <span className="mk-shop__logo" aria-hidden>
+                            {seller.name.slice(0, 2).toUpperCase()}
+                        </span>
+                    )}
                     <div>
                         <h1>{seller.name}</h1>
                         <p>
                             {seller.verified && <BadgeCheck size={16} aria-hidden />}
                             {seller.verified ? 'Проверенный продавец · компания на SavdEx' : 'Продавец на SavdEx'}
                         </p>
+                        {seller.description && <p className="mk-shop__about">{seller.description}</p>}
                     </div>
                     <dl>
-                        <div>
-                            <dt>Рейтинг</dt>
-                            <dd>★ {rating(seller.rating)}</dd>
-                        </div>
+                        {seller.rating > 0 && (
+                            <div>
+                                <dt>Рейтинг</dt>
+                                <dd>★ {rating(seller.rating)}</dd>
+                            </div>
+                        )}
                         <div>
                             <dt>Товаров</dt>
-                            <dd>{products.length}</dd>
+                            <dd>{sum(total)}</dd>
                         </div>
-                        <div>
-                            <dt>Продано</dt>
-                            <dd>{sum(sold)}+</dd>
-                        </div>
+                        {seller.since && (
+                            <div>
+                                <dt>На SavdEx с</dt>
+                                <dd>{seller.since}</dd>
+                            </div>
+                        )}
                     </dl>
                 </header>
 
                 <div className="mk-sh">
                     <h2>
-                        {products.length} {plural(products.length, ['товар', 'товара', 'товаров'])} продавца
+                        {sum(total)} {plural(total, ['товар', 'товара', 'товаров'])} продавца
                     </h2>
+                    <Link href={seller.company}>Карточка компании на SavdEx →</Link>
                 </div>
-                {products.length > 0 ? (
+                {items.length > 0 ? (
                     <div className="mk-grid">
-                        {products.map((p) => (
+                        {items.map((p) => (
                             <MarketCard key={p.id} product={p} />
                         ))}
                     </div>

@@ -1,13 +1,16 @@
 """
-Маркетплейс — страницы оформления на демо-данных (ТЗ 18.11, раздел 11.1).
+Маркетплейс — страницы (ТЗ 18.11, раздел 11.1).
 
-Бэкенда каталога, корзины и заказов ещё нет: сервер отдаёт только
-страницу и разобранный адрес, а товары, цены и продавцы лежат во
-фронтенде (resources/js/market/demo.ts) в том виде, в каком страницы
-будут получать их с сервера. Корзина и избранное — в браузере.
+Сервер отдаёт страницу и то, что нужно знать до загрузки данных: адрес
+товара или продавца, строку отбора каталога, вкладку кабинета. Сами
+данные страница берёт запросами к /market/api/… (savdex/market/api.py,
+docs/marketplace.md): каталог, товар, корзина, избранное, заявка
+продавца, «Мои товары». Заказов, склада и кассы на сервере ещё нет —
+оформление, «Мои заказы» и часть кабинета продавца пока показывают
+образцы.
 
-Пока это демо, страницы закрыты от поисковиков, а на боевом
-(APP_ENV=production) не открываются вовсе.
+Пока маркетплейс не запущен, страницы закрыты от поисковиков, а на
+боевом (APP_ENV=production) не открываются вовсе.
 """
 
 from __future__ import annotations
@@ -19,11 +22,11 @@ from savdex.web.request import context
 from savdex.web.seo import Seo
 from savdex.web.shared import Context, market_open
 
-#: Параметры каталога, которые понимает страница; остальное отбрасывается
-_CATALOG_KEYS = ("q", "category", "sort", "only", "max")
+#: Строка отбора каталога длиннее не бывает: адрес с фильтрами короче
+_SEARCH_LIMIT = 2000
 
-#: Вкладки кабинета продавца
-_SELLER_TABS = ("overview", "products", "supplies", "stock", "orders", "payouts")
+#: Вкладки кабинета продавца; первая — та, что открывается по умолчанию
+_SELLER_TABS = ("products", "stock", "supplies", "orders", "payouts")
 
 
 def _seo(ctx: Context, title: str) -> Seo:
@@ -36,8 +39,8 @@ def _seo(ctx: Context, title: str) -> Seo:
 def _page(
     request: HttpRequest, component: str, title: str, props: dict[str, object]
 ) -> HttpResponse:
-    # На боевом демо с выдуманными товарами не показывается: адреса
-    # отвечают «страница не найдена», пока маркетплейс не запущен
+    # На боевом маркетплейс не показывается, пока не запущен: адреса
+    # отвечают «страница не найдена»
     if not market_open():
         return fallback.page_not_found(request)
 
@@ -54,11 +57,12 @@ def home(request: HttpRequest) -> HttpResponse:
 
 
 def catalog(request: HttpRequest) -> HttpResponse:
-    query = {
-        key: request.GET.get(key, "").strip()[:80] for key in _CATALOG_KEYS if request.GET.get(key)
-    }
+    # Отбор (категория, поиск, цена, характеристики, сортировка, страница)
+    # страница передаёт серверу как есть — /market/api/catalog сам
+    # отбрасывает непонятное, разбирать адрес дважды незачем
+    search = request.META.get("QUERY_STRING", "")[:_SEARCH_LIMIT]
 
-    return _page(request, "market/Catalog", "Каталог · SavdEx Market", {"query": query})
+    return _page(request, "market/Catalog", "Каталог · SavdEx Market", {"search": search})
 
 
 def product(request: HttpRequest, slug: str) -> HttpResponse:
@@ -92,5 +96,5 @@ def seller(request: HttpRequest) -> HttpResponse:
         request,
         "market/Seller",
         "Кабинет продавца · SavdEx Market",
-        {"tab": tab if tab in _SELLER_TABS else "overview"},
+        {"tab": tab if tab in _SELLER_TABS else _SELLER_TABS[0]},
     )

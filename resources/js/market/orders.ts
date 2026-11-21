@@ -1,8 +1,11 @@
-import { PRODUCTS, type MarketProduct } from '@/market/demo';
 import { createLocal } from '@/market/local';
+import type { CartLine } from '@/market/types';
 
 /**
- * Заказы и пункты выдачи — демо.
+ * Заказы и пункты выдачи — пока демо: заказов на сервере ещё нет
+ * (docs/marketplace.md, «Дальше», пункт 3). Корзина уже настоящая,
+ * поэтому оформленный заказ собирается из её строк, но хранится в
+ * браузере. Появятся заказы на сервере — этот файл уходит.
  *
  * Статусы — из ТЗ: оформлен → оплачен (или оплата при получении) →
  * собирается на складе → в пути в пункт выдачи → можно забрать → выдан;
@@ -14,11 +17,11 @@ export type OrderStatus = 'placed' | 'paid' | 'packing' | 'shipping' | 'ready' |
 export interface OrderItem {
     productId: number;
     title: string;
-    emoji: string;
-    tint: string;
+    image: string | null;
+    /** Вариант словами: «Цвет: Чёрный» */
+    options: string;
     price: number;
     quantity: number;
-    seller: string;
 }
 
 export interface MarketOrder {
@@ -95,29 +98,31 @@ const NEXT: Partial<Record<OrderStatus, OrderStatus>> = {
 
 export const nextStatus = (status: OrderStatus): OrderStatus | undefined => NEXT[status];
 
-export function itemOf(product: MarketProduct, quantity: number): OrderItem {
+/** Строка корзины → позиция заказа: копия названия и цены на момент покупки. */
+export function itemOf(line: CartLine): OrderItem {
     return {
-        productId: product.id,
-        title: product.title,
-        emoji: product.emoji,
-        tint: product.tint,
-        price: product.price,
-        quantity,
-        seller: product.seller,
+        productId: line.productId,
+        title: line.title,
+        image: line.image,
+        options: Object.entries(line.options)
+            .map(([name, value]) => `${name}: ${value}`)
+            .join(' · '),
+        price: line.price,
+        quantity: Math.min(line.quantity, line.available),
     };
 }
 
-const sample = (id: string, created: string, status: OrderStatus, lines: [number, number][], point: string, payment: 'card' | 'cash', code: string): MarketOrder => {
-    const items = lines.map(([productId, quantity]) => itemOf(PRODUCTS.find((p) => p.id === productId) ?? PRODUCTS[0], quantity));
+const sample = (id: string, created: string, status: OrderStatus, lines: [number, string, number, number][], point: string, payment: 'card' | 'cash', code: string): MarketOrder => {
+    const items = lines.map(([productId, title, price, quantity]) => ({ productId, title, image: null, options: '', price, quantity }));
 
     return { id, created, status, items, total: items.reduce((s, i) => s + i.price * i.quantity, 0), point, payment, code };
 };
 
 /** Три заказа для примера — чтобы экран не был пустым до первой покупки. */
 export const SAMPLE_ORDERS: MarketOrder[] = [
-    sample('SM-104 218', '2026-11-17T10:24:00', 'ready', [[4, 1], [10, 1]], 'chilanzar', 'card', '4721'),
-    sample('SM-104 190', '2026-11-16T18:02:00', 'shipping', [[2, 1]], 'yunusabad', 'cash', '9053'),
-    sample('SM-103 877', '2026-11-09T12:40:00', 'done', [[7, 2], [8, 1]], 'chorsu', 'card', '1186'),
+    sample('SM-104 218', '2026-11-17T10:24:00', 'ready', [[4, 'Казан чугунный 12 л с крышкой', 415_000, 1], [10, 'Постельное бельё, хлопок, 2-спальное', 329_000, 1]], 'chilanzar', 'card', '4721'),
+    sample('SM-104 190', '2026-11-16T18:02:00', 'shipping', [[2, 'Беспроводные наушники Orbit Buds 2', 289_000, 1]], 'yunusabad', 'cash', '9053'),
+    sample('SM-103 877', '2026-11-09T12:40:00', 'done', [[7, 'Конструктор детский, 520 деталей', 159_000, 2], [8, 'Крем для лица увлажняющий, 50 мл', 78_000, 1]], 'chorsu', 'card', '1186'),
 ];
 
 /** Заказы, оформленные в этом браузере; примеры — отдельно, их не стирают. */

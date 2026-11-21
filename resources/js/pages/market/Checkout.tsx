@@ -3,10 +3,10 @@ import { Banknote, CreditCard } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
 import { Link } from '@/components/ui/Link';
 import { MarketLayout } from '@/layouts/MarketLayout';
-import { PRODUCTS } from '@/market/demo';
+import { MarketPhoto } from '@/components/market/MarketPhoto';
 import { sum } from '@/market/format';
 import { itemOf, placeOrder, pointOf, POINTS } from '@/market/orders';
-import { clearCart, useCart } from '@/market/store';
+import { cartLines, setCartQuantity, useCart } from '@/market/store';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
 
@@ -23,14 +23,15 @@ function mapSrc(lat: number, lng: number): string {
 
 /**
  * Оформление заказа: получатель, пункт выдачи (список и карта), способ
- * оплаты. Купить можно только с входом; гостю экран показывается лишь
- * по кнопке демо-режима — чтобы оформление можно было посмотреть, пока
- * нет сервера. Заказ сохраняется в браузере (market/orders.ts).
+ * оплаты. Купить можно только с входом. Товары и цены — из настоящей
+ * корзины на сервере; сам заказ пока демо: сервер заказов ещё не готов,
+ * поэтому он сохраняется в браузере (market/orders.ts), а оплата не
+ * списывается.
  */
 export default function MarketCheckout() {
     const { auth } = usePage<SharedProps>().props;
     const cart = useCart();
-    const [guestDemo, setGuestDemo] = useState(false);
+    const [sending, setSending] = useState(false);
     const [name, setName] = useState(auth.user?.name ?? '');
     const [phone, setPhone] = useState('');
     const [point, setPoint] = useState(POINTS[0].id);
@@ -40,24 +41,24 @@ export default function MarketCheckout() {
     const [payment, setPayment] = useState<'card' | 'cash'>('card');
     const [tried, setTried] = useState(false);
 
-    const lines = PRODUCTS.filter((p) => cart[p.id] && p.stock > 0).map((product) => ({ product, quantity: cart[product.id] }));
-    const total = lines.reduce((s, l) => s + l.product.price * l.quantity, 0);
+    const lines = cartLines(cart).filter((line) => line.buyable);
+    const total = cart?.total ?? 0;
     const chosen = pointOf(point);
     const phoneOk = phone.replace(/\D/g, '').length >= 9;
     const nameOk = name.trim().length > 1;
 
-    function submit(event: FormEvent) {
+    async function submit(event: FormEvent) {
         event.preventDefault();
         setTried(true);
 
-        if (!phoneOk || !nameOk) return;
+        if (!phoneOk || !nameOk || sending) return;
 
-        placeOrder(
-            lines.map((l) => itemOf(l.product, l.quantity)),
-            point,
-            payment,
-        );
-        clearCart();
+        setSending(true);
+        placeOrder(lines.map(itemOf), point, payment);
+
+        // Купленное уходит из корзины — как после настоящего заказа
+        for (const line of lines) await setCartQuantity(line.variantId, 0);
+
         router.get(`${routes.marketOrders}?new=1`);
     }
 
@@ -75,6 +76,22 @@ export default function MarketCheckout() {
         </MarketLayout>
     );
 
+    if (!auth.user) {
+        return shell(
+            <div className="mk-gate">
+                <h2>Войдите, чтобы оформить заказ</h2>
+                <p>Покупать на SavdEx Market можно только с входом — так мы сообщим, когда заказ приедет в пункт выдачи.</p>
+                <Link href={routes.loginBack(routes.marketCheckout)} className="mk-btn">
+                    Войти или зарегистрироваться
+                </Link>
+            </div>,
+        );
+    }
+
+    if (cart === null) {
+        return shell(<div className="mk-skel-block" style={{ height: 320 }} aria-busy />);
+    }
+
     if (lines.length === 0) {
         return shell(
             <div className="mk-empty">
@@ -84,21 +101,6 @@ export default function MarketCheckout() {
                 <Link href={routes.marketCatalog} className="mk-btn">
                     Перейти в каталог
                 </Link>
-            </div>,
-        );
-    }
-
-    if (!auth.user && !guestDemo) {
-        return shell(
-            <div className="mk-gate">
-                <h2>Войдите, чтобы оформить заказ</h2>
-                <p>Покупать на SavdEx Market можно только с входом — так мы сообщим, когда заказ приедет в пункт выдачи. Корзина сохранится.</p>
-                <Link href={routes.loginBack(routes.marketCheckout)} className="mk-btn">
-                    Войти или зарегистрироваться
-                </Link>
-                <button type="button" className="mk-demo-btn" onClick={() => setGuestDemo(true)}>
-                    Демо: посмотреть оформление без входа
-                </button>
             </div>,
         );
     }
@@ -206,13 +208,13 @@ export default function MarketCheckout() {
 
             <aside className="mk-sum" aria-label="Ваш заказ">
                 <h2>Ваш заказ</h2>
-                {lines.map(({ product, quantity }) => (
-                    <div key={product.id} className="mk-mini">
-                        <span style={{ background: product.tint }} aria-hidden>
-                            {product.emoji}
+                {lines.map((line) => (
+                    <div key={line.variantId} className="mk-mini">
+                        <span>
+                            <MarketPhoto image={line.image} id={line.productId} />
                         </span>
-                        {product.title} × {quantity}
-                        <b>{sum(product.price * quantity)}</b>
+                        {line.title} × {Math.min(line.quantity, line.available)}
+                        <b>{sum(line.total)}</b>
                     </div>
                 ))}
                 <dl>
@@ -225,12 +227,12 @@ export default function MarketCheckout() {
                         <dd>{sum(total)} сум</dd>
                     </div>
                 </dl>
-                <button type="submit" className="mk-btn mk-btn--block">
+                <button type="submit" className="mk-btn mk-btn--block" disabled={sending}>
                     {payment === 'card' ? 'Оплатить и оформить' : 'Оформить заказ'}
                 </button>
                 <p className="mk-note">
-                    Демо: оплата не списывается, заказ сохраняется только в этом браузере. Отменить заказ можно, пока он не уехал со
-                    склада.
+                    Раздел в разработке: оплата не списывается, заказ сохраняется только в этом браузере. Товары и цены — настоящие, из
+                    вашей корзины.
                 </p>
             </aside>
         </form>,

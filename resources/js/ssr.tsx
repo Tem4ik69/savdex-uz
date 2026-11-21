@@ -4,6 +4,7 @@ import { renderToString } from 'react-dom/server';
 import { resolvePage } from '@/lib/pages';
 import { setLocale } from '@/lib/locale';
 import { setTranslations } from '@/lib/i18n';
+import { setMarketBase } from '@/routes';
 
 const appName = 'SAVDEX';
 
@@ -20,9 +21,11 @@ createServer((page) =>
             const shared = (props.initialPage.props ?? {}) as {
                 locale?: string;
                 translations?: Record<string, unknown> | null;
+                marketLinks?: { base?: string };
             };
 
             if (typeof shared.locale === 'string') setLocale(shared.locale);
+            setMarketBase(shared.marketLinks?.base);
             if (shared.translations) setTranslations(shared.translations, shared.locale ?? 'ru');
 
             return <App {...props} />;

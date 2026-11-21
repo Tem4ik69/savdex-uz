@@ -5,6 +5,14 @@
  * с админскими. Здесь адреса типизированы, и опечатка ловится компилятором.
  * При изменении routes/web.php поправить и здесь.
  */
+/** С чего начинаются адреса страниц маркетплейса: «/market» на основном сайте, «» на его своём адресе. */
+let marketBase = '/market';
+
+/** Ставится из общего пропа marketLinks.base до отрисовки страницы (app.tsx, ssr.tsx). */
+export function setMarketBase(base: string | null | undefined): void {
+    marketBase = typeof base === 'string' ? base : '/market';
+}
+
 export const routes = {
     home: '/',
 
@@ -43,16 +51,30 @@ export const routes = {
     reviewsNew: '/reviews/new',
     contacts: '/contact',
 
-    // Маркетплейс (демо-данные, python/savdex/web/market.py)
-    market: '/market',
-    marketCatalog: '/market/catalog',
-    marketProduct: (slug: string) => `/market/product/${slug}`,
-    marketCart: '/market/cart',
-    marketCheckout: '/market/checkout',
-    marketOrders: '/market/orders',
-    marketShop: (slug: string) => `/market/shop/${slug}`,
-    marketSell: '/market/sell',
-    marketSeller: (tab?: string) => (tab ? `/market/seller?tab=${tab}` : '/market/seller'),
+    // Маркетплейс. Адреса страниц зависят от того, где мы: на своём адресе
+    // маркетплейса (market.savdex.uz) они идут с корня, на основном сайте —
+    // с /market (общий проп marketLinks.base, см. setMarketBase ниже)
+    get market() {
+        return marketBase || '/';
+    },
+    get marketCatalog() {
+        return `${marketBase}/catalog`;
+    },
+    marketProduct: (slug: string) => `${marketBase}/product/${slug}`,
+    get marketCart() {
+        return `${marketBase}/cart`;
+    },
+    get marketCheckout() {
+        return `${marketBase}/checkout`;
+    },
+    get marketOrders() {
+        return `${marketBase}/orders`;
+    },
+    marketShop: (slug: string) => `${marketBase}/shop/${slug}`,
+    get marketSell() {
+        return `${marketBase}/sell`;
+    },
+    marketSeller: (tab?: string) => (tab ? `${marketBase}/seller?tab=${tab}` : `${marketBase}/seller`),
 
     // Избранное
     favorites: '/favorites',
