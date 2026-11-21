@@ -16,6 +16,7 @@ from django.http import HttpRequest, HttpResponse
 from django.urls import URLPattern, re_path
 
 from savdex.market import api, oneid
+from savdex.market.payments import click, payme, uzum
 
 _P = r"^(?:(?:uz|en|zh|tr)/)?market/api/"
 _ID = r"[0-9]{1,18}"
@@ -45,7 +46,10 @@ urlpatterns = [
         api.order_cancel,
         name="market.api.order.cancel",
     ),
+    re_path(_P + rf"orders/(?P<number>{_NUMBER})/pay$", api.order_pay, name="market.api.order.pay"),
     re_path(_P + r"me/orders$", api.my_seller_orders, name="market.api.me.orders"),
+    re_path(_P + r"me/balance$", api.my_balance, name="market.api.me.balance"),
+    re_path(_P + r"me/requisites$", api.my_requisites, name="market.api.me.requisites"),
     re_path(_P + r"me/seller$", api.seller_state, name="market.api.me.seller"),
     re_path(_P + r"me/seller/apply$", api.seller_apply, name="market.api.me.seller.apply"),
     re_path(_P + r"oneid/start$", api.oneid_start, name="market.api.oneid.start"),
@@ -106,6 +110,34 @@ def _gated(route: URLPattern) -> URLPattern:
     return re_path(route.pattern.regex.pattern, _open_only(route.callback), name=route.name)
 
 
-# Каждый адрес — за проверкой «маркетплейс открыт»: и записанные выше, и
-# добавленные позже
+# Каждый адрес из списка выше — за проверкой «маркетплейс открыт».
+# Исключение одно — колбэки оплаты ниже: их список дописан после этой
+# строки (``+=``) намеренно, и _open_only их не оборачивает. Новый адрес
+# страниц — в список выше, не ниже
 urlpatterns = [_gated(route) for route in urlpatterns]
+
+# Колбэки провайдеров оплаты (savdex/market/payments): сервер — серверу,
+# без языкового префикса — адрес один, его заводят в кабинете провайдера.
+# Вне проверки «маркетплейс открыт»: по уже заведённым транзакциям
+# (confirm, perform, complete, reverse, cancel, status) провайдер должен
+# достучаться всегда, иначе деньги повиснут. Новые транзакции (check,
+# create, prepare, CheckPerform, CreateTransaction) колбэк сам пускает
+# только при открытом маркетплейсе (payments/base.py, market_closed)
+urlpatterns += [
+    re_path(
+        r"^market/api/payments/uzum/(?P<operation>check|create|confirm|reverse|status)$",
+        uzum.merchant,
+        name="market.api.payments.uzum",
+    ),
+    re_path(r"^market/api/payments/payme$", payme.endpoint, name="market.api.payments.payme"),
+    re_path(
+        r"^market/api/payments/click/prepare$",
+        click.prepare,
+        name="market.api.payments.click.prepare",
+    ),
+    re_path(
+        r"^market/api/payments/click/complete$",
+        click.complete,
+        name="market.api.payments.click.complete",
+    ),
+]

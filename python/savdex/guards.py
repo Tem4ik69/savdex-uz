@@ -242,6 +242,16 @@ OWNED_TABLES: frozenset[str] = frozenset(
         "market_order_items",
         "market_order_events",
         "market_ledger",
+        # Маркетплейс, оплата — этап 2 (миграция 2026_11_21_110000,
+        # savdex/market/payments): оплаты заказов у Uzum, Payme и Click;
+        # у роли приложения нет delete
+        "market_payments",
+        # Маркетплейс, касса — этап 3 (миграция 2026_11_21_120000,
+        # savdex/market/cash.py): реквизиты продавцов и выплаты — без delete;
+        # история реквизитов только дописывается
+        "market_seller_requisites",
+        "market_seller_requisites_log",
+        "market_payouts",
     }
 )
 

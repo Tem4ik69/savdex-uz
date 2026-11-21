@@ -267,6 +267,10 @@ class Order(models.Model):
     cancel_reason = models.CharField("причина отмены", max_length=500, null=True)
     issued_at = UTCDateTimeField("выдан", null=True)
     reserve_released_at = UTCDateTimeField("резерв снят", null=True)
+    #: Касса сверила наличные заказа с отчётом BTS (миграция 2026_11_21_120000)
+    cash_reconciled_at = UTCDateTimeField("наличные сверены", null=True)
+    cash_reconciled_by = models.BigIntegerField("сверил", null=True)
+    cash_reconciled_ref = models.CharField("отчёт BTS", max_length=100, null=True)
     stock_written_off_at = UTCDateTimeField("остаток списан", null=True)
     created_at = UTCDateTimeField("оформлен", auto_now_add=True)
     updated_at = UTCDateTimeField("изменён", auto_now=True)
@@ -280,3 +284,120 @@ class Order(models.Model):
 
     def __str__(self) -> str:
         return f"Заказ {self.number}"
+
+
+# ── Касса — этап 3 (миграция 2026_11_21_120000, savdex/market/cash.py) ──
+
+
+class SellerRequisites(models.Model):
+    """Реквизиты продавца для выплат: меняет только владелец компании из кабинета."""
+
+    seller = models.OneToOneField(
+        Seller, on_delete=models.DO_NOTHING, db_column="seller_id", verbose_name="продавец"
+    )
+    bank_account = models.CharField("расчётный счёт", max_length=20)
+    bank_mfo = models.CharField("МФО", max_length=5)
+    bank_name = models.CharField("банк", max_length=200)
+    recipient_name = models.CharField("получатель", max_length=200)
+    recipient_tin = models.CharField("ИНН / ПИНФЛ", max_length=14)
+    changed_at = UTCDateTimeField("сменены")
+    changed_by = models.BigIntegerField("сменил", null=True)
+    created_at = UTCDateTimeField(auto_now_add=True)
+    updated_at = UTCDateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "market_seller_requisites"
+        ordering = ("-changed_at",)
+        verbose_name = "реквизиты продавца"
+        verbose_name_plural = "реквизиты продавцов"
+
+    def __str__(self) -> str:
+        return f"Реквизиты продавца №{self.seller_id}"
+
+
+class RequisitesLog(models.Model):
+    """История реквизитов — только дописывается."""
+
+    seller = models.ForeignKey(
+        Seller, on_delete=models.DO_NOTHING, db_column="seller_id", verbose_name="продавец"
+    )
+    bank_account = models.CharField("расчётный счёт", max_length=20)
+    bank_mfo = models.CharField("МФО", max_length=5)
+    bank_name = models.CharField("банк", max_length=200)
+    recipient_name = models.CharField("получатель", max_length=200)
+    recipient_tin = models.CharField("ИНН / ПИНФЛ", max_length=14)
+    changed_by = models.BigIntegerField("сменил", null=True)
+    ip = models.CharField("IP", max_length=45, null=True)
+    created_at = UTCDateTimeField("когда", auto_now_add=True)
+
+    class Meta:
+        managed = False
+        db_table = "market_seller_requisites_log"
+        ordering = ("-id",)
+        verbose_name = "смена реквизитов"
+        verbose_name_plural = "история реквизитов"
+
+
+class Payout(models.Model):
+    """Выплата продавцу: создаёт один кассир, подтверждает другой."""
+
+    seller = models.ForeignKey(
+        Seller, on_delete=models.DO_NOTHING, db_column="seller_id", verbose_name="продавец"
+    )
+    amount = models.BigIntegerField("сумма, тийин")
+    status = models.CharField("статус", max_length=12, default="draft")
+    note = models.CharField("комментарий", max_length=500, null=True)
+    created_by = models.BigIntegerField("создал")
+    approved_by = models.BigIntegerField("подтвердил", null=True)
+    paid_by = models.BigIntegerField("отметил выплату", null=True)
+    cancelled_by = models.BigIntegerField("отменил", null=True)
+    requisites_log_id = models.BigIntegerField("реквизиты (история)", null=True)
+    fresh_requisites = models.BooleanField("на свежие реквизиты", default=False)
+    fresh_check_note = models.CharField("как сверили реквизиты", max_length=500, null=True)
+    bank_reference = models.CharField("платёжное поручение", max_length=64, null=True)
+    ledger_group = models.UUIDField("группа журнала денег", null=True)
+    cancel_reason = models.CharField("причина отмены", max_length=500, null=True)
+    cancel_not_sent = models.BooleanField("платёжка не отправлялась", default=False)
+    created_at = UTCDateTimeField("создана", auto_now_add=True)
+    updated_at = UTCDateTimeField(auto_now=True)
+    approved_at = UTCDateTimeField("подтверждена", null=True)
+    paid_at = UTCDateTimeField("выплачена", null=True)
+    cancelled_at = UTCDateTimeField("отменена", null=True)
+
+    class Meta:
+        managed = False
+        db_table = "market_payouts"
+        ordering = ("-id",)
+        verbose_name = "выплата продавцу"
+        verbose_name_plural = "выплаты продавцам"
+
+    def __str__(self) -> str:
+        return f"Выплата №{self.pk}" if self.pk else "новая выплата"
+
+
+class SellerBalance(Seller):
+    """Балансы продавцов в кассе — только смотреть (savdex/market/cash.py, balance)."""
+
+    class Meta:
+        proxy = True
+        verbose_name = "баланс продавца"
+        verbose_name_plural = "балансы продавцов"
+
+
+class RefundOrder(Order):
+    """Заказы, ждущие возврата денег, — ручная отметка возврата кассой."""
+
+    class Meta:
+        proxy = True
+        verbose_name = "возврат покупателю"
+        verbose_name_plural = "возвраты покупателям"
+
+
+class CashOrder(Order):
+    """Выданные заказы «при получении», ждущие сверки наличных с отчётом BTS."""
+
+    class Meta:
+        proxy = True
+        verbose_name = "наличные к сверке"
+        verbose_name_plural = "наличные к сверке"

@@ -26,6 +26,10 @@ services:
       - ${SAVDEX_HOME:-/opt/savdex}/env/db.env
       # Ключи, почта, оплата, Telegram — перенесены с Render (prod.yml)
       - ${SAVDEX_HOME:-/opt/savdex}/env/app.env
+      # Адреса сигналов Healthchecks приложения (MARKET_HC_PING_PAYMENTS —
+      # ночная сверка оплат) — prod.yml из секретов; файл есть всегда,
+      # пустой, если секрета нет (prod-app.sh)
+      - ${SAVDEX_HOME:-/opt/savdex}/env/signals.env
       # Роль машины, адрес сайта — prod-app.sh; последним: перекрывает
       - ${SAVDEX_HOME:-/opt/savdex}/env/role.env
     volumes:

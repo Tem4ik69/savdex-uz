@@ -25,8 +25,8 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 
 from savdex.audit import client_ip
 from savdex.market import banners as market_banners
-from savdex.market import cart, catalog, oneid, orders, products, sellers
-from savdex.market.common import t
+from savdex.market import cart, cash, catalog, oneid, orders, products, sellers
+from savdex.market.common import one, t
 from savdex.web import session, throttle
 from savdex.web.actions import form
 from savdex.web.cabinet import _authenticate, company_of
@@ -474,6 +474,39 @@ def order_cancel(request: HttpRequest, number: str) -> HttpResponse:
     )
 
 
+@form()
+def order_pay(request: HttpRequest, number: str) -> HttpResponse:
+    """
+    POST {provider: uzum | payme | click}: открыть счёт у провайдера (или
+    вернуть уже открытый) — ответ {provider, redirect: адрес страницы
+    оплаты}. Только свой заказ (чужой — 404), только картой и только
+    ждущий оплаты (savdex/market/payments/base.py, open_invoice).
+    """
+    from savdex.market import domain
+    from savdex.market.payments import base as payments
+
+    ctx = action(request, auth=False, throttle=10, throttle_prefix="market-pay")
+    user = ctx.user
+
+    if user is None:
+        return _guest(ctx)
+
+    user_id = int(user["id"])
+    provider = str(input_of(request).get("provider") or "").strip().lower()
+    clean = orders.normalize_number(number)
+    back = payments.return_url(
+        clean,
+        domain.market_url(f"/orders/{clean}") or ctx.url(f"/market/orders/{clean}"),
+    )
+
+    try:
+        _, url = payments.open_invoice(user_id, clean, provider, locale=ctx.locale, back=back)
+    except orders.OrderRefused as refused:
+        return _order_refused(ctx, refused, user_id)
+
+    return _json({"provider": provider, "redirect": url})
+
+
 # ── «Стать продавцом» ───────────────────────────────────────────────
 
 
@@ -626,6 +659,138 @@ def my_seller_orders(request: HttpRequest) -> HttpResponse:
     assert seller is not None
 
     return _json({"orders": orders.seller_orders(int(seller["id"]), ctx.locale)})
+
+
+# ── Касса продавца: баланс и реквизиты ─────────────────────────────
+
+
+@_get
+def my_balance(request: HttpRequest) -> HttpResponse:
+    """
+    Баланс продавца — только свой: начислено, держится (не выдан или срок
+    на возврат не прошёл), доступно к выплате, в работе, выплачено и
+    последние выплаты (savdex/market/cash.py).
+    """
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    seller, refused = _seller_ctx(ctx)
+
+    if refused is not None:
+        return refused
+
+    assert seller is not None
+
+    return _json({"balance": cash.seller_balance(int(seller["id"]), ctx.locale)})
+
+
+def _owner_seller(ctx: Context) -> tuple[dict[str, Any] | None, HttpResponse | None]:
+    """Продавец, от имени которого действует владелец компании: реквизиты — только ему."""
+    seller, refused = _seller_ctx(ctx)
+
+    if refused is not None:
+        return None, refused
+
+    assert ctx.user is not None
+
+    if ctx.user.get("company_role") != "owner":
+        return None, _message(ctx, "cash.owner_only", 403)
+
+    return seller, None
+
+
+def my_requisites(request: HttpRequest) -> HttpResponse:
+    """GET — реквизиты для выплат, POST — сохранить (только владелец компании)."""
+    if request.method == "POST":
+        return _my_requisites_save(request)
+
+    return _my_requisites_view(request)
+
+
+@_get
+def _my_requisites_view(request: HttpRequest) -> HttpResponse:
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    seller, refused = _owner_seller(ctx)
+
+    if refused is not None:
+        return refused
+
+    assert seller is not None
+
+    return _json({"requisites": cash.requisites_view(int(seller["id"]))})
+
+
+@form()
+def _my_requisites_save(request: HttpRequest) -> HttpResponse:
+    """
+    POST {bankAccount, bankMfo, bankName, recipientName, recipientTin,
+    password}. Пароль от входа — ещё раз (как при входе, guard.check):
+    чужая открытая сессия реквизиты не подменит. Каждая смена — строка
+    истории и уведомление владельцам; выплата на новые реквизиты — через
+    сутки или после отдельной сверки кассой.
+    """
+    from savdex.web import guard
+
+    ctx = action(
+        request, auth=False, throttle=10, throttle_minutes=60, throttle_prefix="market-requisites"
+    )
+    seller, refused = _owner_seller(ctx)
+
+    if refused is not None:
+        return refused
+
+    assert seller is not None and ctx.user is not None
+    data = input_of(request)
+    _, errors = cash.validate_requisites(data)
+
+    if errors:
+        texts = {field: [t(key, ctx.locale)] for field, key in errors.items()}
+
+        return _json({"message": next(iter(texts.values()))[0], "errors": texts}, 422)
+
+    seller_id = int(seller["id"])
+
+    # Пять неверных паролей подряд — смена закрыта на сутки (письмо владельцам)
+    if cash.requisites_locked(seller_id):
+        return _message(ctx, "cash.locked", 429)
+
+    hashed = (one("select password from users where id = %s", [ctx.user["id"]]) or {}).get(
+        "password"
+    )
+
+    # Пароля нет (вошёл без него) — подтвердить нечем: пусть задаст пароль.
+    # TODO(касса): запасной путь — код на почту (как savdex/web/verification.py)
+    if not hashed:
+        text = t("cash.password_missing", ctx.locale)
+
+        return _json({"message": text, "errors": {"password": [text]}}, 422)
+
+    if not guard.check(str(data.get("password") or ""), str(hashed)):
+        cash.password_failed(seller_id)
+        text = t("cash.password", ctx.locale)
+
+        return _json({"message": text, "errors": {"password": [text]}}, 422)
+
+    cash.password_ok(seller_id)
+    changed, _ = cash.save_requisites(
+        seller_id, int(ctx.user["id"]), data, ip=client_ip(ctx.request)
+    )
+
+    if changed:
+        cash.notify_requisites_changed(seller_id)
+
+    return _json(
+        {
+            "message": t("cash.saved", ctx.locale),
+            "requisites": cash.requisites_view(int(seller["id"])),
+        }
+    )
 
 
 @form()

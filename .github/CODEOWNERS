@@ -1,0 +1,12 @@
+# Владельцы файлов. PR, который их меняет, вливается в main только после
+# одобрения владельца — при включённой галочке «Require review from Code
+# Owners» в правиле main (Settings → Rules → Rulesets).
+#
+# Схема базы — Нозим (решение Тимура, 20.11.2026): миграции, снимок схемы,
+# права ролей, справочники и сам механизм миграций. Тимур — запасной:
+# автор не может одобрить свой PR, поэтому PR самого Нозима одобряет Тимур.
+/python/savdex/bootstrap/ @nsayfullaev2007-dev @Tem4ik69
+/python/savdex/schema.py @nsayfullaev2007-dev @Tem4ik69
+
+# Сам этот файл — чтобы правило нельзя было снять обычным PR.
+/.github/CODEOWNERS @Tem4ik69 @nsayfullaev2007-dev

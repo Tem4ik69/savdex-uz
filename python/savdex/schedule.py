@@ -360,6 +360,36 @@ def expire_market_orders(now: datetime, due: datetime) -> str:
     return f"Отменено незавершённых заказов: {orders.expire()}."
 
 
+def refund_market_orders(now: datetime, due: datetime) -> str:
+    """
+    Каждый час: заказы маркетплейса в «ожидает возврата» — вернуть деньги
+    через API провайдера, где он это умеет, иначе — пометка администратору
+    в истории заказа (savdex/market/payments/base.py, refund_order).
+    """
+    from savdex.market.payments import base
+
+    done = base.refund_all()
+    summary = ", ".join(f"{key} — {value}" for key, value in sorted(done.items()))
+
+    return f"Возвраты по заказам маркетплейса: {summary or 'нет'}."
+
+
+def reconcile_market_payments(now: datetime, due: datetime) -> str:
+    """
+    Каждую ночь: оплаты маркетплейса за вчерашние сутки (UTC) — против
+    журнала денег (savdex/market/payments/reconcile.py). Расхождение —
+    ERROR в журнале приложения, только счётчики, и сигнал «сбой» в
+    Healthchecks (MARKET_HC_PING_PAYMENTS) — тревога в Telegram.
+    """
+    from savdex.market.payments import reconcile
+
+    day = now.date() - timedelta(days=1)
+    reports = reconcile.run(day)
+    reconcile.signal(reports, day)
+
+    return reconcile.summary(reports, day) + "."
+
+
 JOBS: tuple[Job, ...] = (
     Job("ratings_recalculate", time(3, 0), recalculate_ratings),
     Job("audience_views_prune", time(4, 0), prune_audience_views),
@@ -378,6 +408,9 @@ JOBS: tuple[Job, ...] = (
     # Маркетплейс: резерв неоплаченных картой заказов не держим дольше часа с
     # лишним, не собранных с оплатой при получении — дольше 48 часов
     Job("market_expire_orders", time(0, 25), expire_market_orders, every=1),
+    # Маркетплейс: возвраты по отменённым оплаченным заказам и ночная сверка оплат
+    Job("market_refunds", time(0, 35), refund_market_orders, every=1),
+    Job("market_reconcile_payments", time(2, 40), reconcile_market_payments),
 )
 
 

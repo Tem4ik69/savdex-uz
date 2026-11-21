@@ -7,7 +7,7 @@
 | Что следит | За чем | Где настроено |
 |---|---|---|
 | **UptimeRobot** | сайт отвечает снаружи: раз в 5 минут `https://savdex.uz/up` | в UptimeRobot (ниже) |
-| **Healthchecks.io** | резервные копии снимаются: ночная копия базы и копия файлов каждый час; из ночной копии каждое утро поднимается база ([проверка восстановления](backups.md#проверка-восстановления--каждое-утро)) | сигналы — [deploy/server/backup.sh](../deploy/server/backup.sh), проверки — в Healthchecks |
+| **Healthchecks.io** | резервные копии снимаются: ночная копия базы и копия файлов каждый час; из ночной копии каждое утро поднимается база ([проверка восстановления](backups.md#проверка-восстановления--каждое-утро)); ночная сверка оплат маркетплейса прошла без расхождений | сигналы — [deploy/server/backup.sh](../deploy/server/backup.sh) и `savdex/market/payments/reconcile.py`, проверки — в Healthchecks |
 | **Grafana Cloud** | процессор, память, диск и сеть машин; память и падения контейнеров; база; запросы и ошибки сайта | агент — [deploy/monitoring](../deploy/monitoring), ставит релиз; графики — в Grafana Cloud; тревоги — [alerts.yaml](../deploy/monitoring/alerts.yaml), загружает Actions → alerts |
 
 ## Как это работает
@@ -51,6 +51,21 @@
      Secrets and variables → Actions, секретами **`HC_PING_DB`**,
      **`HC_PING_FILES`** и **`HC_PING_RESTORE`**. Адреса секретные: кто
      их знает, может слать сигналы вместо нас.
+   - проверка `savdex-market-reconcile` (ночная сверка оплат маркетплейса,
+     [docs/marketplace.md](marketplace.md#оплата--этап-2)): Period — 1 day,
+     Grace — 2 hours (сверка — в 02:40 UTC, 07:40 по Ташкенту). Её Ping URL
+     — секретом GitHub **`MARKET_HC_PING_PAYMENTS`**, так же как
+     `HC_PING_*`: релиз (prod.yml, шаг «Админка и схема базы») пишет его
+     через stdin в `/opt/savdex/env/signals.env` на машине админки, compose
+     передаёт контейнеру (`deploy/prod/app/compose.yml`). Секрета нет — файл
+     пустой, сигнала нет. Значение релиз сначала сверяет: только
+     `https://hc-ping.com/…` без пробелов и кавычек, иначе шаг падает с
+     понятной ошибкой (само значение не печатается). Сигнал шлёт само приложение из расписания на
+     **savdex-admin**, а не `backup.sh` на машине базы: у savdex-admin должен
+     быть выход наружу к `hc-ping.com` (порт 443) — тот же, что у агента
+     Grafana Alloy на этой машине. Проверить после релиза: на savdex-admin
+     `curl -fsS -o /dev/null https://hc-ping.com/` без ошибки. В теле сигнала
+     — только цифры расхождений по провайдерам.
 4. **Следующий релиз** (Actions → prod) кладёт адреса в
    `/opt/savdex/env/backup.env` на машине базы — с этой минуты копии
    шлют сигналы. До того Healthchecks будет ждать первого сигнала и

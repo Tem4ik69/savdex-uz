@@ -796,14 +796,36 @@ class UserAdmin(SavdexModelAdmin):
             return bool(cursor.rowcount > 0)
 
 
+#: Внешние ключи маркетплейса на users (on delete restrict) — одним списком:
+#: строка users с любой такой ссылкой навсегда не удаляется. Новая ссылка
+#: на users в миграции маркетплейса — сюда же
+MARKET_USER_REFERENCES: tuple[tuple[str, str], ...] = (
+    ("market_orders", "buyer_user_id"),
+    ("market_orders", "cash_reconciled_by"),
+    ("market_order_events", "actor_user_id"),
+    ("market_payments", "checked_by"),
+    ("market_payments", "refund_claimed_by"),
+    ("market_payouts", "created_by"),
+    ("market_payouts", "approved_by"),
+    ("market_payouts", "paid_by"),
+    ("market_payouts", "cancelled_by"),
+    ("market_seller_requisites", "changed_by"),
+    ("market_seller_requisites_log", "changed_by"),
+)
+
+
 def _has_market_orders(user_id: int) -> bool:
-    """Есть ли у пользователя заказы маркетплейса или записи в их истории."""
+    """
+    Держит ли маркетплейс строку users внешним ключом: заказы, их история,
+    отметки на оплатах, выплаты, реквизиты (MARKET_USER_REFERENCES).
+    """
+    query = " or ".join(
+        f"exists (select from {table} where {column} = %s)"
+        for table, column in MARKET_USER_REFERENCES
+    )
+
     with connections["default"].cursor() as cursor:
-        cursor.execute(
-            "select exists (select from market_orders where buyer_user_id = %s) "
-            "or exists (select from market_order_events where actor_user_id = %s)",
-            [user_id, user_id],
-        )
+        cursor.execute(f"select {query}", [user_id] * len(MARKET_USER_REFERENCES))
         row = cursor.fetchone()
 
     return bool(row and row[0])

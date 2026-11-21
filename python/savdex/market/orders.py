@@ -112,7 +112,8 @@ MAX_OPEN_ORDERS = 5
 # отменённый по сроку или покупателем: собирать его было рано
 # (seller_orders, условие на paid_at)
 
-#: Способы оплаты: картой на сайте (Uzum, этап 2) или при получении
+#: Способы оплаты: картой на сайте (Uzum, Payme, Click — savdex/market/payments)
+#: или при получении
 METHODS = ("card", "cash")
 
 #: Кто меняет статус (market_order_events.actor)
@@ -125,7 +126,7 @@ ACTORS = ("buyer", "seller", "staff", "system")
 ACCOUNTS: dict[str, str] = {
     # Покупатель должен заплатить при получении (наличные или карта в ПВЗ)
     "buyer_receivable": "Покупатель должен (оплата при получении)",
-    # Деньги картой — у Uzum, ещё не на нашем счёте (этап 2)
+    # Деньги картой — у Uzum, Payme или Click, ещё не на нашем счёте
     "gateway_clearing": "Деньги у платёжной системы",
     # Наличные, принятые пунктом выдачи (этап кассы)
     "cash_collected": "Принято при получении",
@@ -137,6 +138,9 @@ ACCOUNTS: dict[str, str] = {
     "refund_payable": "К возврату покупателю",
     # Доставка (delivery_total заказа) — выручка площадки
     "delivery_revenue": "Доставка",
+    # Выплачено продавцам с нашего счёта (savdex/market/cash.py, mark_paid):
+    # минус — деньги ушли в банк по платёжке; сверка — с выпиской банка
+    "payout_clearing": "Выплаты продавцам (банк)",
 }
 
 # ── Настройки ───────────────────────────────────────────────────────
@@ -537,6 +541,20 @@ def _refresh_products(product_ids: Iterable[int]) -> None:
         products.refresh(product_id)
 
 
+def note(
+    order_id: int, text: str, *, actor: str = "system", actor_user_id: int | None = None
+) -> None:
+    """
+    Пометка в истории заказа без смены статуса — например, администратору
+    «вернуть деньги в кабинете провайдера» или «сотрудник проверил отказ»
+    (savdex/market/payments); actor_user_id — кто (у сотрудника).
+    """
+    order = one("select status from market_orders where id = %s", [order_id])
+
+    if order is not None:
+        _event(order_id, str(order["status"]), str(order["status"]), actor, actor_user_id, text)
+
+
 # ── Оформление ──────────────────────────────────────────────────────
 
 
@@ -608,6 +626,15 @@ def checkout(user_id: int, data: Mapping[str, Any]) -> str:
 
         if not lines:
             raise OrderRefused("order.cart_empty", 422)
+
+        # У своей компании не покупают: сотрудник продавца накрутил бы
+        # продажи и вывел деньги выплатой (docs/marketplace-security.md, раздел 3)
+        if one(
+            "select 1 as x from users u join market_sellers s on s.company_id = u.company_id "
+            "where u.id = %s and s.id = any(%s) limit 1",
+            [user_id, sorted({int(line["seller_id"]) for line in lines})],
+        ):
+            raise OrderRefused("order.own_company", 422)
 
         # После блокировки корзины: параллельное оформление того же
         # покупателя уже закончилось, его заказ здесь виден. В лимите — и
@@ -863,6 +890,18 @@ def _cutoff(moment: datetime | None, wait: timedelta) -> str:
     return ((moment or datetime.now(UTC)) - wait).strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _paying(order_id: int, since: str) -> bool:
+    """По заказу идёт оплата: транзакция провайдера заведена не раньше since."""
+    return (
+        one(
+            "select 1 as found from market_payments where order_id = %s and status = 'pending' "
+            "and created_at >= %s limit 1",
+            [order_id, since],
+        )
+        is not None
+    )
+
+
 def expire(
     minutes: int | None = None, moment: datetime | None = None, *, hours: int | None = None
 ) -> int:
@@ -879,8 +918,20 @@ def expire(
     переходом (тот же путь, что отмена покупателем): оплата или сборка,
     пришедшие одновременно, побеждают или проигрывают целиком. Возвращает,
     сколько отменено.
+
+    Неоплаченный картой заказ, по которому провайдер уже завёл транзакцию
+    (market_payments, pending), ждёт ещё — отсрочка: максимум из срока
+    ожидания оплаты и срока pending у провайдеров
+    (payments/base.py, max_pending_minutes): покупатель как раз вводит код
+    из СМС, и отмена под ним вернула бы ему деньги вместо заказа. Условие
+    перепроверяется под блокировкой заказа: провайдер заводит транзакцию,
+    тоже взяв заказ «for update» (base.open_transaction), так что между
+    проверкой и отменой новой транзакции не появится.
     """
+    from savdex.market.payments.base import max_pending_minutes
+
     wait = minutes if minutes is not None else expire_minutes()
+    grace = _cutoff(moment, timedelta(minutes=max(wait, max_pending_minutes())))
     cash_wait = hours if hours is not None else cash_expire_hours()
     queues = (
         (CREATED, "card", _cutoff(moment, timedelta(minutes=wait)), f"не оплачен за {wait} мин."),
@@ -895,8 +946,8 @@ def expire(
 
     for status, method, cutoff, note in queues:
         for found in rows(
-            "select id from market_orders where status = %s and payment_method = %s "
-            "and created_at < %s order by id limit 1000",
+            "select o.id from market_orders o where o.status = %s and o.payment_method = %s "
+            "and o.created_at < %s order by o.id limit 1000",
             [status, method, cutoff],
         ):
             with transaction.atomic():
@@ -906,7 +957,10 @@ def expire(
                     [found["id"], status],
                 )
 
-                if order is not None and _close(order, CANCELLED, actor="system", note=note):
+                if order is None or _paying(int(order["id"]), grace):
+                    continue
+
+                if _close(order, CANCELLED, actor="system", note=note):
                     done += 1
 
     if done:
@@ -1027,8 +1081,33 @@ def advance(order_id: int, before: str, *, actor_user_id: int, note: str | None 
 
         if after == ISSUED:
             _write_off(order_id)
+            # Один раз: переход в «выдан» условный, повтор сюда не дойдёт
+            _collect_cash(order_id)
 
     return True
+
+
+def _collect_cash(order_id: int) -> None:
+    """
+    Заказ с оплатой при получении выдан — пункт принял деньги: долг
+    покупателя (buyer_receivable) закрыт наличными (cash_collected). Сверка
+    с отчётом BTS — по счёту cash_collected. Картой оплаченный — ничего.
+    """
+    order = one(
+        "select id, number, total, payment_method from market_orders where id = %s", [order_id]
+    )
+
+    if order is None or order["payment_method"] != "cash":
+        return
+
+    memo = f"заказ {order['number']}: принято при получении"
+    post(
+        None,
+        [
+            Entry("cash_collected", int(order["total"]), order_id=order_id, memo=memo),
+            Entry("buyer_receivable", -int(order["total"]), order_id=order_id, memo=memo),
+        ],
+    )
 
 
 def staff_cancel(order_id: int, before: str, *, actor_user_id: int, note: str) -> str | None:
@@ -1057,15 +1136,16 @@ def staff_cancel(order_id: int, before: str, *, actor_user_id: int, note: str) -
     return target
 
 
-# ── Деньги — для этапа 2 (Uzum) ─────────────────────────────────────
+# ── Деньги — зовёт оплата (savdex/market/payments) ──────────────────
 
 
 def mark_paid(order_id: int, amount: int, *, note: str | None = None) -> bool:
     """
-    Оплата картой пришла (колбэк Uzum, этап 2): created → paid и начисление
+    Оплата картой пришла (колбэк Uzum, Payme или Click —
+    savdex/market/payments/base.py, complete): created → paid и начисление
     продавцам и комиссии. Сумма сверяется с заказом — не совпала, заказ не
     картой, уже оплачен или отменён по сроку — False, ничего не записано
-    (опоздавшую оплату этап 2 возвращает).
+    (колбэк отвечает провайдеру ошибкой, и тот возвращает деньги).
     """
     with transaction.atomic():
         order = one(
@@ -1093,7 +1173,8 @@ def mark_paid(order_id: int, amount: int, *, note: str | None = None) -> bool:
 
 def mark_refunded(order_id: int, *, note: str | None = None) -> bool:
     """
-    Деньги вернули покупателю (ответ Uzum на возврат, этап 2):
+    Деньги вернули покупателю (savdex/market/payments/base.py,
+    refund_payment — возврат через API или отмена провайдером):
     refund_pending → refunded, долг покупателю закрыт деньгами платёжной
     системы. False — статус уже другой.
     """

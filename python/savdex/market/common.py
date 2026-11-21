@@ -48,6 +48,10 @@ TABLES = (
     "market_order_items",
     "market_order_events",
     "market_ledger",
+    "market_payments",
+    "market_seller_requisites",
+    "market_seller_requisites_log",
+    "market_payouts",
 )
 
 #: Настройка «сколько первых товаров нового продавца — через модерацию»
