@@ -1310,7 +1310,8 @@ def test_сотрудника_с_отметкой_проверки_не_удал
     _, _, pk = _заказ(сайт, магазин)
     sql(
         "insert into market_payments (order_id, provider, amount, status, checked_by, "
-        "rejection_checked_at) values (%s, 'click', %s, 'cancelled', %s, now())",
+        "rejection_checked_at, cancelled_at) "
+        "values (%s, 'click', %s, 'cancelled', %s, now(), now())",
         [pk, ЦЕНА, проверяющий],
     )
 

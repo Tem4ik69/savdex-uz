@@ -219,10 +219,14 @@ def _выдать(pk: int, дней_назад: int = 0, *, сверить: bool
         "print('ok')"
     )
     assert _python(код) == "ok"
+    # Сверка — как у кассы (cash.reconcile_cash): когда, кто и номер отчёта
+    # вместе (их держит проверка market_orders_cash_reconciled_check)
     sql(
         "update market_orders set issued_at = issued_at - make_interval(days => %s), "
-        "cash_reconciled_at = case when %s then now() at time zone 'utc' end where id = %s",
-        [дней_назад, сверить, pk],
+        "cash_reconciled_at = case when %s then now() at time zone 'utc' end, "
+        "cash_reconciled_by = case when %s then %s::bigint end, "
+        "cash_reconciled_ref = case when %s then 'BTS-test' end where id = %s",
+        [дней_назад, сверить, сверить, админ, сверить, pk],
     )
 
 

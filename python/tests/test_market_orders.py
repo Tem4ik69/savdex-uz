@@ -1094,3 +1094,78 @@ def test_сотрудник_отменяет_оплаченный_картой(�
         ]
 
     assert _резерв(вариант) == 0
+
+
+def _отказ(query: str, params: list[Any], constraint: str) -> None:
+    """Запрос в обход кода (владельцем базы) — база отказывает именно этой проверкой."""
+    with pytest.raises(Exception, match=constraint):
+        sql(query, params)
+
+
+def test_целостность_заказа_и_денег_держит_база(сайт, магазин):
+    # Миграция 2026_11_22_100000: что код соблюдает, база держит и сама
+    _, вариант = _товар(
+        магазин["продавец"], "toys", "Юла светящаяся", "glow-top", price=40_000, stock=10
+    )
+    покупатель = _покупатель()
+    _в_корзину(покупатель, вариант)
+    первый = _id(_json(_оформить(сайт, покупатель, 40_000))["order"]["number"])
+    # Второй заказ — другим товаром: иначе раньше сработает «позиция одна на вариант»
+    _, другой = _товар(
+        магазин["продавец"], "toys", "Юла деревянная", "wood-top", price=30_000, stock=10
+    )
+    _в_корзину(покупатель, другой)
+    второй = _id(_json(_оформить(сайт, покупатель, 30_000))["order"]["number"])
+
+    # 1. Вариант — не этого товара
+    _отказ(
+        "update market_order_items set product_id = %s where order_id = %s",
+        [магазин["телефон"], первый],
+        "market_order_items_variant_product_fkey",
+    )
+    # 2. Часть — не этого заказа
+    _отказ(
+        "update market_order_items set order_id = %s where order_id = %s",
+        [второй, первый],
+        "market_order_items_part_order_fkey",
+    )
+    # 3. Долг продавцу — без продавца
+    _отказ(
+        "insert into market_ledger (entry_group, account, order_id, amount) values "
+        "(gen_random_uuid(), 'buyer_receivable', %s, 100), "
+        "(gen_random_uuid(), 'seller_payable', %s, -100)",
+        [первый, первый],
+        "market_ledger_seller_check",
+    )
+    # 4. Сверка наличных — без номера отчёта; у заказа, оплаченного картой
+    _отказ(
+        "update market_orders set cash_reconciled_at = now() where id = %s",
+        [первый],
+        "market_orders_cash_reconciled_check",
+    )
+    [(сотрудник,)] = sql("select id from users order by id limit 1")
+    _отказ(
+        "update market_orders set payment_method = 'card', cash_reconciled_at = now(), "
+        "cash_reconciled_by = %s, cash_reconciled_ref = 'BTS-1' where id = %s",
+        [сотрудник, первый],
+        "market_orders_cash_reconciled_check",
+    )
+    # 5. Оплата «оплачена» — без времени проведения
+    _отказ(
+        "insert into market_payments (order_id, provider, provider_transaction_id, amount, status) "
+        "values (%s, 'uzum', 'integrity-1', 4000000, 'paid')",
+        [первый],
+        "market_payments_status_times_check",
+    )
+
+    # А правильные строки проходят: сверка целиком у заказа «при получении»
+    sql(
+        "update market_orders set cash_reconciled_at = now(), cash_reconciled_by = %s, "
+        "cash_reconciled_ref = 'BTS-1' where id = %s",
+        [сотрудник, первый],
+    )
+    sql(
+        "update market_orders set cash_reconciled_at = null, cash_reconciled_by = null, "
+        "cash_reconciled_ref = null where id = %s",
+        [первый],
+    )
