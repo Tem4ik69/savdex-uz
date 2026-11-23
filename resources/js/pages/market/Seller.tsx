@@ -9,30 +9,27 @@ import { MarketLayout } from '@/layouts/MarketLayout';
 import { api, ApiError, useApi } from '@/market/api';
 import { sum } from '@/market/format';
 import { when } from '@/market/orders';
+import { lang, marketLocale } from '@/market/lang';
 import { SAMPLE_SUPPLIES } from '@/market/seller';
 import { notify, useCategories } from '@/market/store';
+import { sellerText } from '@/market/text/seller';
 import type { MarketCategory, MyProduct, MyProductDetail, MyVariant, ProductStatus, SellerBalance, SellerOrder } from '@/market/types';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
 
-const TABS: [string, string][] = [
-    ['products', 'Мои товары'],
-    ['stock', 'Остатки'],
-    ['supplies', 'Поставки'],
-    ['orders', 'Заказы'],
-    ['payouts', 'Начисления'],
-];
+const TABS = ['products', 'stock', 'supplies', 'orders', 'payouts'] as const;
 
-const STATUS: Record<ProductStatus, [string, string]> = {
-    draft: ['Черновик', 'mk-pill--off'],
-    pending: ['На проверке', 'mk-pill--warn'],
-    active: ['В продаже', 'mk-pill--ok'],
-    rejected: ['Отклонён', 'mk-pill--warn'],
-    hidden: ['Снят с продажи', 'mk-pill--off'],
-    blocked: ['Снят модератором', 'mk-pill--warn'],
+// Подпись статуса — из text/seller.ts (status), здесь только цвет
+const STATUS: Record<ProductStatus, string> = {
+    draft: 'mk-pill--off',
+    pending: 'mk-pill--warn',
+    active: 'mk-pill--ok',
+    rejected: 'mk-pill--warn',
+    hidden: 'mk-pill--off',
+    blocked: 'mk-pill--warn',
 };
 
-const day = (iso: string) => new Date(`${iso}T12:00:00`).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long' });
+const day = (iso: string) => new Date(`${iso}T12:00:00`).toLocaleDateString(marketLocale() === 'uz' ? 'uz-Latn-UZ' : 'ru-RU', { day: 'numeric', month: 'long' });
 
 /**
  * Кабинет продавца. «Мои товары» и «Остатки» — с сервера
@@ -43,18 +40,19 @@ const day = (iso: string) => new Date(`${iso}T12:00:00`).toLocaleDateString('ru-
  * отвечает «нельзя», и страница ведёт к заявке.
  */
 export default function MarketSeller({ tab }: { tab: string }) {
+    const L = lang(sellerText);
     const { auth } = usePage<SharedProps>().props;
     const list = useApi<{ products: MyProduct[]; needsReview: boolean }>(auth.user ? 'me/products' : null);
 
     if (!auth.user || list.status === 403 || list.status === 401) {
         return (
-            <MarketLayout title="Кабинет продавца · SavdEx Market">
+            <MarketLayout title={L.pageTitle}>
                 <div className="mk-in" style={{ paddingTop: 24 }}>
                     <div className="mk-gate">
-                        <h2>Кабинет продавца пока закрыт</h2>
-                        <p>Он открывается после заявки и проверки документов компании.</p>
+                        <h2>{L.gate.title}</h2>
+                        <p>{L.gate.text}</p>
                         <Link href={auth.user ? routes.marketSell : routes.loginBack(routes.marketSeller())} className="mk-btn">
-                            {auth.user ? 'Стать продавцом' : 'Войти'}
+                            {auth.user ? L.gate.becomeSeller : L.gate.login}
                         </Link>
                     </div>
                 </div>
@@ -63,19 +61,19 @@ export default function MarketSeller({ tab }: { tab: string }) {
     }
 
     return (
-        <MarketLayout title="Кабинет продавца · SavdEx Market">
+        <MarketLayout title={L.pageTitle}>
             <div className="mk-in">
-                <nav className="mk-bc" aria-label="Путь">
-                    <Link href={routes.market}>Главная</Link>› Кабинет продавца
+                <nav className="mk-bc" aria-label={L.breadcrumbs}>
+                    <Link href={routes.market}>{L.home}</Link>› {L.cabinet}
                 </nav>
                 <div className="mk-title">
-                    <h1>{auth.company?.name ?? 'Кабинет продавца'}</h1>
-                    <span className="mk-pill mk-pill--ok">Продавец подтверждён</span>
+                    <h1>{auth.company?.name ?? L.cabinet}</h1>
+                    <span className="mk-pill mk-pill--ok">{L.verified}</span>
                 </div>
-                <nav className="mk-tabs" aria-label="Разделы кабинета">
-                    {TABS.map(([key, label]) => (
+                <nav className="mk-tabs" aria-label={L.tabsLabel}>
+                    {TABS.map((key) => (
                         <Link key={key} href={routes.marketSeller(key)} aria-current={tab === key ? 'page' : undefined} preserveScroll>
-                            {label}
+                            {L.tabs[key]}
                         </Link>
                     ))}
                 </nav>
@@ -83,10 +81,10 @@ export default function MarketSeller({ tab }: { tab: string }) {
                 {(tab === 'products' || tab === 'stock') && list.loading && <div className="mk-skel-block" style={{ height: 240 }} aria-busy />}
                 {(tab === 'products' || tab === 'stock') && list.error && (
                     <div className="mk-failed">
-                        <h2>Товары не загрузились</h2>
+                        <h2>{L.products.failed}</h2>
                         <p>{list.error}</p>
                         <button type="button" className="mk-btn" onClick={list.reload}>
-                            Повторить
+                            {L.retry}
                         </button>
                     </div>
                 )}
@@ -101,6 +99,7 @@ export default function MarketSeller({ tab }: { tab: string }) {
 }
 
 function Products({ products, needsReview, reload }: { products: MyProduct[]; needsReview: boolean; reload: () => void }) {
+    const L = lang(sellerText);
     // null — список; 'new' — новый товар; номер — правка
     const [editing, setEditing] = useState<number | 'new' | null>(null);
 
@@ -121,19 +120,19 @@ function Products({ products, needsReview, reload }: { products: MyProduct[]; ne
     return (
         <>
             <div className="mk-bar">
-                <h2>Мои товары</h2>
+                <h2>{L.products.title}</h2>
                 <button type="button" className="mk-btn" onClick={() => setEditing('new')}>
-                    <Plus size={18} aria-hidden /> Добавить товар
+                    <Plus size={18} aria-hidden /> {L.products.add}
                 </button>
             </div>
 
             {products.length === 0 ? (
                 <div className="mk-empty">
                     <span aria-hidden>📦</span>
-                    <h2>Товаров пока нет</h2>
-                    <p>Добавьте первый товар: название, фото, цену и категорию. В каталоге он появится после проверки и приёмки на складе.</p>
+                    <h2>{L.products.emptyTitle}</h2>
+                    <p>{L.products.emptyText}</p>
                     <button type="button" className="mk-btn" onClick={() => setEditing('new')}>
-                        Добавить товар
+                        {L.products.add}
                     </button>
                 </div>
             ) : (
@@ -141,11 +140,11 @@ function Products({ products, needsReview, reload }: { products: MyProduct[]; ne
                     <table className="mk-table">
                         <thead>
                             <tr>
-                                <th>Товар</th>
-                                <th className="is-num">Цена</th>
-                                <th className="is-num">На складе</th>
-                                <th className="is-num">Продано</th>
-                                <th>Статус</th>
+                                <th>{L.products.colProduct}</th>
+                                <th className="is-num">{L.products.colPrice}</th>
+                                <th className="is-num">{L.products.colStock}</th>
+                                <th className="is-num">{L.products.colSold}</th>
+                                <th>{L.products.colStatus}</th>
                                 <th />
                             </tr>
                         </thead>
@@ -159,17 +158,17 @@ function Products({ products, needsReview, reload }: { products: MyProduct[]; ne
                                             </span>
                                             {p.title}
                                         </div>
-                                        {p.rejectReason && (p.status === 'rejected' || p.status === 'blocked') && <div className="mk-line__warn">Причина: {p.rejectReason}</div>}
+                                        {p.rejectReason && (p.status === 'rejected' || p.status === 'blocked') && <div className="mk-line__warn">{L.products.reason(p.rejectReason)}</div>}
                                     </td>
-                                    <td className="is-num">{p.price ? `${sum(p.price)} сум` : '—'}</td>
+                                    <td className="is-num">{p.price ? L.money(sum(p.price)) : '—'}</td>
                                     <td className={cn('is-num', p.stock === 0 && 'mk-low')}>{p.stock}</td>
                                     <td className="is-num">{sum(p.sold)}</td>
                                     <td>
-                                        <span className={cn('mk-pill', STATUS[p.status][1])}>{STATUS[p.status][0]}</span>
+                                        <span className={cn('mk-pill', STATUS[p.status])}>{L.status[p.status]}</span>
                                     </td>
                                     <td>
                                         <button type="button" onClick={() => setEditing(p.id)}>
-                                            Изменить
+                                            {L.products.edit}
                                         </button>
                                     </td>
                                 </tr>
@@ -179,10 +178,8 @@ function Products({ products, needsReview, reload }: { products: MyProduct[]; ne
                 </div>
             )}
             <p className="mk-hint">
-                {needsReview
-                    ? 'Пока вы новый продавец, товары и правки их описания проверяет модератор. '
-                    : 'Ваши товары выходят в продажу без проверки. '}
-                Купить можно только то, что принято на складе: остаток ставит склад, а не продавец.
+                {needsReview ? L.products.hintReview : L.products.hintFree}
+                {L.products.hintStock}
             </p>
         </>
     );
@@ -232,6 +229,7 @@ const toRow = (variant: MyVariant, dimension: string): Row => ({
  * память), их состав здесь не меняется — правятся только цена и артикул.
  */
 function ProductForm({ id, needsReview, onClose }: { id: number | null; needsReview: boolean; onClose: () => void }) {
+    const L = lang(sellerText);
     const loaded = useApi<{ product: MyProductDetail }>(id === null ? null : `me/products/${id}`);
     const [saved, setSaved] = useState<MyProductDetail | null>(null);
     const product = saved ?? loaded.data?.product ?? null;
@@ -239,10 +237,10 @@ function ProductForm({ id, needsReview, onClose }: { id: number | null; needsRev
     if (id !== null && !product) {
         return loaded.error ? (
             <div className="mk-failed">
-                <h2>Товар не загрузился</h2>
+                <h2>{L.form.failed}</h2>
                 <p>{loaded.error}</p>
                 <button type="button" className="mk-btn" onClick={onClose}>
-                    К списку товаров
+                    {L.form.backToList}
                 </button>
             </div>
         ) : (
@@ -265,6 +263,7 @@ function ProductFields({
     onSaved: (product: MyProductDetail) => void;
     onClose: () => void;
 }) {
+    const L = lang(sellerText);
     const categories = useCategories();
     const keys = [...new Set((product?.variants ?? []).flatMap((v) => Object.keys(v.options)))];
     // Несколько характеристик выбора — состав вариантов здесь не трогаем
@@ -384,34 +383,34 @@ function ProductFields({
         <section className="mk-panel" style={{ marginTop: 0 }} aria-busy={busy}>
             <div className="mk-bar">
                 <h2>
-                    {product ? 'Товар' : 'Новый товар'} {product && <span className={cn('mk-pill', STATUS[status][1])}>{STATUS[status][0]}</span>}
+                    {product ? L.form.product : L.form.newProduct} {product && <span className={cn('mk-pill', STATUS[status])}>{L.status[status]}</span>}
                 </h2>
                 <button type="button" className="mk-btn mk-btn--ghost" onClick={onClose}>
-                    <X size={16} aria-hidden /> К списку
+                    <X size={16} aria-hidden /> {L.form.toList}
                 </button>
             </div>
             {/* Причина приходит и у товара на проверке — показываем только отклонённому и снятому */}
             {product?.rejectReason && (status === 'rejected' || status === 'blocked') && (
                 <p className="mk-sample">
-                    {status === 'blocked' ? 'Модератор снял товар' : 'Модератор отклонил товар'}: {product.rejectReason}
+                    {status === 'blocked' ? L.form.moderatorHid : L.form.moderatorRejected}: {product.rejectReason}
                 </p>
             )}
 
             <form className="mk-form mk-form--2" onSubmit={(event) => void save(event)} noValidate>
                 <label className="mk-field mk-field--wide">
-                    Название
-                    <input id="mk-p-title" name="title" defaultValue={product?.title} maxLength={200} placeholder="Например: Плед шерстяной 150×200" />
+                    {L.form.title}
+                    <input id="mk-p-title" name="title" defaultValue={product?.title} maxLength={200} placeholder={L.form.titlePlaceholder} />
                     {fail('title')}
                 </label>
                 <label className="mk-field mk-field--wide">
-                    Описание
-                    <textarea id="mk-p-description" name="description" rows={4} defaultValue={product?.description} placeholder="Материал, размеры, что в комплекте, как ухаживать" />
+                    {L.form.description}
+                    <textarea id="mk-p-description" name="description" rows={4} defaultValue={product?.description} placeholder={L.form.descriptionPlaceholder} />
                     {fail('description')}
                 </label>
                 <label className="mk-field">
-                    Категория
+                    {L.form.category}
                     <select id="mk-p-category" name="category" defaultValue={product?.category ?? ''}>
-                        <option value="">Выберите категорию</option>
+                        <option value="">{L.form.chooseCategory}</option>
                         {groups.map((group) => (
                             <optgroup key={group.root} label={group.root}>
                                 {group.items.map((item) => (
@@ -425,63 +424,63 @@ function ProductFields({
                     {fail('category')}
                 </label>
                 <label className="mk-field">
-                    ИКПУ
-                    <input id="mk-p-ikpu" name="ikpu" inputMode="numeric" defaultValue={product?.ikpu ?? ''} placeholder="17 цифр" />
-                    {fail('ikpu') || <small>Код товара для чека — без него товар не выйдет в продажу</small>}
+                    {L.form.ikpu}
+                    <input id="mk-p-ikpu" name="ikpu" inputMode="numeric" defaultValue={product?.ikpu ?? ''} placeholder={L.form.ikpuPlaceholder} />
+                    {fail('ikpu') || <small>{L.form.ikpuHint}</small>}
                 </label>
                 <label className="mk-field">
-                    Штрихкод
+                    {L.form.barcode}
                     <input id="mk-p-barcode" name="barcode" inputMode="numeric" defaultValue={product?.barcode ?? ''} />
                     {fail('barcode')}
                 </label>
                 <label className="mk-field">
-                    Вес, г
+                    {L.form.weight}
                     <input id="mk-p-weight" name="weight_g" inputMode="numeric" defaultValue={product?.weight_g ?? ''} />
                     {fail('weight_g')}
                 </label>
                 <div className="mk-field mk-field--wide">
-                    Габариты упаковки, мм
+                    {L.form.dimensions}
                     <div className="mk-range">
-                        <input name="length_mm" inputMode="numeric" aria-label="Длина, мм" placeholder="длина" defaultValue={product?.length_mm ?? ''} />
-                        <input name="width_mm" inputMode="numeric" aria-label="Ширина, мм" placeholder="ширина" defaultValue={product?.width_mm ?? ''} />
-                        <input name="height_mm" inputMode="numeric" aria-label="Высота, мм" placeholder="высота" defaultValue={product?.height_mm ?? ''} />
+                        <input name="length_mm" inputMode="numeric" aria-label={L.form.lengthLabel} placeholder={L.form.length} defaultValue={product?.length_mm ?? ''} />
+                        <input name="width_mm" inputMode="numeric" aria-label={L.form.widthLabel} placeholder={L.form.width} defaultValue={product?.width_mm ?? ''} />
+                        <input name="height_mm" inputMode="numeric" aria-label={L.form.heightLabel} placeholder={L.form.height} defaultValue={product?.height_mm ?? ''} />
                     </div>
-                    <small>Вес и габариты нужны складу</small>
+                    <small>{L.form.dimensionsHint}</small>
                 </div>
 
                 <div className="mk-field mk-field--wide">
-                    Цена и варианты
+                    {L.form.priceAndVariants}
                     {!locked && (
                         <label className="mk-field" style={{ maxWidth: 320 }}>
-                            <small>Чем отличаются варианты — если товар один, оставьте пустым</small>
-                            <input id="mk-p-dimension" value={dimension} onChange={(e) => setDimension(e.target.value)} placeholder="Цвет, размер, объём…" maxLength={40} />
+                            <small>{L.form.dimensionHint}</small>
+                            <input id="mk-p-dimension" value={dimension} onChange={(e) => setDimension(e.target.value)} placeholder={L.form.dimensionPlaceholder} maxLength={40} />
                         </label>
                     )}
                     <div className="mk-variants">
                         {rows.map((row, i) => (
                             <div key={row.id ?? `new-${i}`} className="mk-variant">
                                 <label className="mk-field">
-                                    <small>{locked ? 'Вариант' : dimension.trim() || 'Вариант'}</small>
+                                    <small>{locked ? L.form.variant : dimension.trim() || L.form.variant}</small>
                                     {locked ? (
                                         <input value={Object.values(row.options).join(' · ')} readOnly />
                                     ) : (
-                                        <input value={row.value} onChange={(e) => patch(i, { value: e.target.value })} placeholder={several ? 'Чёрный' : 'один вариант'} disabled={!several} />
+                                        <input value={row.value} onChange={(e) => patch(i, { value: e.target.value })} placeholder={several ? L.form.variantExample : L.form.singleVariant} disabled={!several} />
                                     )}
                                 </label>
                                 <label className="mk-field">
-                                    <small>Цена, сум</small>
+                                    <small>{L.form.price}</small>
                                     <input inputMode="numeric" value={row.price} onChange={(e) => patch(i, { price: e.target.value })} />
                                 </label>
                                 <label className="mk-field">
-                                    <small>Старая цена</small>
+                                    <small>{L.form.oldPrice}</small>
                                     <input inputMode="numeric" value={row.oldPrice} onChange={(e) => patch(i, { oldPrice: e.target.value })} />
                                 </label>
                                 <label className="mk-field">
-                                    <small>Артикул</small>
+                                    <small>{L.form.sku}</small>
                                     <input value={row.sku} onChange={(e) => patch(i, { sku: e.target.value })} />
                                 </label>
                                 {!locked && rows.length > 1 ? (
-                                    <button type="button" aria-label="Убрать вариант" onClick={() => setRows(rows.filter((_, x) => x !== i))}>
+                                    <button type="button" aria-label={L.form.removeVariant} onClick={() => setRows(rows.filter((_, x) => x !== i))}>
                                         <Trash2 size={16} aria-hidden />
                                     </button>
                                 ) : (
@@ -498,24 +497,22 @@ function ProductFields({
                             onClick={() => setRows([...rows, { options: {}, value: '', sku: '', price: '', oldPrice: '' }])}
                             disabled={!dimension.trim()}
                         >
-                            + Добавить вариант
+                            {L.form.addVariant}
                         </button>
                     )}
                     <small>
-                        {locked
-                            ? 'У товара несколько характеристик выбора — здесь правятся только цена и артикул.'
-                            : 'Старая цена, если она больше новой, даёт скидку на карточке. Остаток ставит склад.'}
+                        {locked ? L.form.lockedHint : L.form.variantsHint}
                     </small>
                 </div>
 
                 <div className="mk-field mk-field--wide">
-                    Фото — до 10
+                    {L.form.photos}
                     {product ? (
                         <div className="mk-thumbs-edit">
                             {product.images.map((image) => (
                                 <figure key={image.id}>
                                     <img src={image.thumb} alt="" />
-                                    <button type="button" aria-label="Удалить фото" onClick={() => void removeImage(image.id)}>
+                                    <button type="button" aria-label={L.form.removePhoto} onClick={() => void removeImage(image.id)}>
                                         <X size={13} aria-hidden />
                                     </button>
                                 </figure>
@@ -523,60 +520,59 @@ function ProductFields({
                             {product.images.length < 10 && (
                                 <label>
                                     <input type="file" accept="image/*" className="sr-only" onChange={(event) => void upload(event)} disabled={busy} />
-                                    Добавить фото
+                                    {L.form.addPhoto}
                                 </label>
                             )}
                         </div>
                     ) : (
-                        <small>Фото можно загрузить после первого сохранения.</small>
+                        <small>{L.form.photosLater}</small>
                     )}
                 </div>
 
                 <div className="mk-field--wide" style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                     <button type="submit" className="mk-btn" disabled={busy}>
-                        {product ? 'Сохранить' : 'Сохранить черновик'}
+                        {product ? L.form.save : L.form.saveDraft}
                     </button>
                     {product && (status === 'draft' || status === 'rejected' || status === 'hidden') && (
                         <button type="button" className="mk-btn mk-btn--ghost" disabled={busy} onClick={() => void publish()}>
-                            Отправить на продажу
+                            {L.form.publish}
                         </button>
                     )}
                     {product && (status === 'active' || status === 'pending') && (
                         <button type="button" className="mk-btn mk-btn--ghost" disabled={busy} onClick={() => void hide()}>
-                            Снять с продажи
+                            {L.form.hide}
                         </button>
                     )}
                 </div>
             </form>
             <p className="mk-hint">
-                {needsReview
-                    ? 'Пока вы новый продавец, правка названия, описания, категории или фото возвращает товар в черновик — на повторную проверку. Цена и варианты статус не меняют.'
-                    : 'Изменения сохраняются сразу.'}{' '}
-                Характеристики для фильтров (материал, память и т. п.) появятся в этой форме следующим шагом.
+                {needsReview ? L.form.hintReview : L.form.hintFree} {L.form.hintSpecs}
             </p>
         </section>
     );
 }
 
 function Stock({ products }: { products: MyProduct[] }) {
+    const L = lang(sellerText);
+
     return (
         <>
             <div className="mk-bar">
-                <h2>Остатки на складе</h2>
+                <h2>{L.stock.title}</h2>
             </div>
             {products.length === 0 ? (
                 <div className="mk-empty">
                     <span aria-hidden>🏬</span>
-                    <h2>На складе пока ничего нет</h2>
-                    <p>Остатки появятся, когда вы добавите товары и склад примет поставку.</p>
+                    <h2>{L.stock.emptyTitle}</h2>
+                    <p>{L.stock.emptyText}</p>
                 </div>
             ) : (
                 <div className="mk-table-wrap">
                     <table className="mk-table">
                         <thead>
                             <tr>
-                                <th>Товар</th>
-                                <th className="is-num">На складе</th>
+                                <th>{L.stock.colProduct}</th>
+                                <th className="is-num">{L.stock.colStock}</th>
                                 <th />
                             </tr>
                         </thead>
@@ -592,51 +588,61 @@ function Stock({ products }: { products: MyProduct[] }) {
                                         </div>
                                     </td>
                                     <td className={cn('is-num', p.stock < 10 && 'mk-low')}>{p.stock}</td>
-                                    <td>{p.stock === 0 ? 'Нет в продаже — нужна поставка' : p.stock < 10 ? 'Заканчивается' : ''}</td>
+                                    <td>{p.stock === 0 ? L.stock.none : p.stock < 10 ? L.stock.low : ''}</td>
                                 </tr>
                             ))}
                         </tbody>
                     </table>
                 </div>
             )}
-            <p className="mk-hint">Остаток — сумма по всем вариантам товара. Его ставит склад при приёмке; купить можно только то, что есть на складе.</p>
+            <p className="mk-hint">{L.stock.hint}</p>
         </>
     );
 }
 
-const Sample = ({ children }: { children: ReactNode }) => <p className="mk-sample">Пример: {children}</p>;
+function Sample({ children }: { children: ReactNode }) {
+    const L = lang(sellerText);
+
+    return (
+        <p className="mk-sample">
+            {L.supplies.sample} {children}
+        </p>
+    );
+}
 
 function Supplies() {
+    const L = lang(sellerText);
+
     return (
         <>
             <div className="mk-bar">
-                <h2>Поставки на склад</h2>
+                <h2>{L.supplies.title}</h2>
             </div>
-            <Sample>раздел появится вместе со складом BTS — заявка на поставку, приёмка и брак. Ниже — как это будет выглядеть.</Sample>
+            <Sample>{L.supplies.note}</Sample>
             <div className="mk-table-wrap">
                 <table className="mk-table">
                     <thead>
                         <tr>
-                            <th>Поставка</th>
-                            <th>Дата</th>
-                            <th>Товар</th>
-                            <th className="is-num">Везёте</th>
-                            <th className="is-num">Принято</th>
-                            <th>Статус</th>
+                            <th>{L.supplies.colSupply}</th>
+                            <th>{L.supplies.colDate}</th>
+                            <th>{L.supplies.colProduct}</th>
+                            <th className="is-num">{L.supplies.colQuantity}</th>
+                            <th className="is-num">{L.supplies.colAccepted}</th>
+                            <th>{L.supplies.colStatus}</th>
                         </tr>
                     </thead>
                     <tbody>
                         {SAMPLE_SUPPLIES.map((s) => (
                             <tr key={s.id}>
-                                <td>{s.id}</td>
+                                <td>{L.supplies.number(s.id)}</td>
                                 <td>{day(s.date)}</td>
-                                <td>{s.title}</td>
+                                <td>{L.supplies.items[s.item]}</td>
                                 <td className="is-num">{s.quantity}</td>
                                 <td className="is-num">{s.accepted ?? '—'}</td>
                                 <td>
-                                    {s.status === 'planned' && <span className="mk-pill mk-pill--warn">Ждём на складе</span>}
-                                    {s.status === 'accepted' && <span className="mk-pill mk-pill--ok">Принята</span>}
-                                    {s.status === 'partial' && <span className="mk-pill">Принята частично: брак {s.quantity - (s.accepted ?? 0)}</span>}
+                                    {s.status === 'planned' && <span className="mk-pill mk-pill--warn">{L.supplies.planned}</span>}
+                                    {s.status === 'accepted' && <span className="mk-pill mk-pill--ok">{L.supplies.accepted}</span>}
+                                    {s.status === 'partial' && <span className="mk-pill">{L.supplies.partial(s.quantity - (s.accepted ?? 0))}</span>}
                                 </td>
                             </tr>
                         ))}
@@ -649,19 +655,20 @@ function Supplies() {
 
 /** Заказы с товарами продавца (/market/api/me/orders): только его части, о покупателе — имя. */
 function Orders() {
+    const L = lang(sellerText);
     const { data, loading, error, reload } = useApi<{ orders: SellerOrder[] }>('me/orders');
 
     return (
         <>
             <div className="mk-bar">
-                <h2>Заказы с вашими товарами</h2>
+                <h2>{L.orders.title}</h2>
             </div>
             <Loading loading={loading} error={error} reload={reload} />
             {data && data.orders.length === 0 && (
                 <div className="mk-empty">
                     <span aria-hidden>🧾</span>
-                    <h2>Заказов пока нет</h2>
-                    <p>Когда покупатель оформит заказ с вашим товаром, он появится здесь.</p>
+                    <h2>{L.orders.emptyTitle}</h2>
+                    <p>{L.orders.emptyText}</p>
                 </div>
             )}
             {data && data.orders.length > 0 && (
@@ -669,14 +676,14 @@ function Orders() {
                     <table className="mk-table">
                         <thead>
                             <tr>
-                                <th>Заказ</th>
-                                <th>Дата</th>
-                                <th>Товары</th>
-                                <th>Покупатель</th>
-                                <th>Пункт выдачи</th>
-                                <th className="is-num">Сумма</th>
-                                <th className="is-num">Вам</th>
-                                <th>Статус</th>
+                                <th>{L.orders.colOrder}</th>
+                                <th>{L.orders.colDate}</th>
+                                <th>{L.orders.colItems}</th>
+                                <th>{L.orders.colBuyer}</th>
+                                <th>{L.orders.colPickup}</th>
+                                <th className="is-num">{L.orders.colTotal}</th>
+                                <th className="is-num">{L.orders.colPayout}</th>
+                                <th>{L.orders.colStatus}</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -687,8 +694,8 @@ function Orders() {
                                     <td>{o.items.map((item) => `${item.title} × ${item.quantity}`).join(', ')}</td>
                                     <td>{o.buyer.name}</td>
                                     <td>{o.pickupPoint.name}</td>
-                                    <td className="is-num">{sum(o.total)} сум</td>
-                                    <td className="is-num">{sum(o.payout)} сум</td>
+                                    <td className="is-num">{L.money(sum(o.total))}</td>
+                                    <td className="is-num">{L.money(sum(o.payout))}</td>
                                     <td>
                                         <StatusPill status={o.status} />
                                     </td>
@@ -698,64 +705,65 @@ function Orders() {
                     </table>
                 </div>
             )}
-            <p className="mk-hint">Собирает и выдаёт заказ склад и пункт выдачи. Телефон покупателя продавцу не показывается — только имя и номер заказа. «Вам» — после комиссии площадки.</p>
+            <p className="mk-hint">{L.orders.hint}</p>
         </>
     );
 }
 
 /** Касса продавца (/market/api/me/balance): начислено, держится, доступно, выплаты. */
 function Payouts() {
+    const L = lang(sellerText);
     const { data, loading, error, reload } = useApi<{ balance: SellerBalance }>('me/balance');
     const balance = data?.balance;
 
     return (
         <>
             <div className="mk-bar">
-                <h2>Начисления</h2>
+                <h2>{L.payouts.title}</h2>
             </div>
             <Loading loading={loading} error={error} reload={reload} />
             {balance && (
                 <>
                     <div className="mk-kpis">
                         <div className="mk-kpi">
-                            <small>Начислено всего</small>
-                            <b>{sum(balance.accrued)} сум</b>
+                            <small>{L.payouts.accrued}</small>
+                            <b>{L.money(sum(balance.accrued))}</b>
                         </div>
                         <div className="mk-kpi">
-                            <small>Держится</small>
-                            <b>{sum(balance.onHold)} сум</b>
-                            <span>заказ не выдан или идёт срок на возврат ({balance.holdDays} дн.)</span>
+                            <small>{L.payouts.onHold}</small>
+                            <b>{L.money(sum(balance.onHold))}</b>
+                            <span>{L.payouts.onHoldNote(balance.holdDays)}</span>
                         </div>
                         <div className="mk-kpi">
-                            <small>Доступно к выплате</small>
-                            <b>{sum(balance.available)} сум</b>
+                            <small>{L.payouts.available}</small>
+                            <b>{L.money(sum(balance.available))}</b>
                         </div>
                         <div className="mk-kpi">
-                            <small>Выплачено</small>
-                            <b>{sum(balance.paid)} сум</b>
-                            {balance.inWork > 0 && <span>в работе: {sum(balance.inWork)} сум</span>}
+                            <small>{L.payouts.paid}</small>
+                            <b>{L.money(sum(balance.paid))}</b>
+                            {balance.inWork > 0 && <span>{L.payouts.inWork(sum(balance.inWork))}</span>}
                         </div>
                     </div>
-                    <h3 className="mk-subhead">Выплаты</h3>
+                    <h3 className="mk-subhead">{L.payouts.payouts}</h3>
                     {balance.payouts.length === 0 ? (
-                        <p className="mk-hint">Выплат пока не было.</p>
+                        <p className="mk-hint">{L.payouts.none}</p>
                     ) : (
                         <div className="mk-table-wrap">
                             <table className="mk-table">
                                 <thead>
                                     <tr>
-                                        <th>Создана</th>
-                                        <th className="is-num">Сумма</th>
-                                        <th>Статус</th>
-                                        <th>Выплачена</th>
-                                        <th>Платёжка</th>
+                                        <th>{L.payouts.colCreated}</th>
+                                        <th className="is-num">{L.payouts.colAmount}</th>
+                                        <th>{L.payouts.colStatus}</th>
+                                        <th>{L.payouts.colPaid}</th>
+                                        <th>{L.payouts.colReference}</th>
                                     </tr>
                                 </thead>
                                 <tbody>
                                     {balance.payouts.map((p) => (
                                         <tr key={p.id}>
                                             <td>{when(p.createdAt)}</td>
-                                            <td className="is-num">{sum(p.amount)} сум</td>
+                                            <td className="is-num">{L.money(sum(p.amount))}</td>
                                             <td>
                                                 <span className="mk-pill">{p.status.text}</span>
                                             </td>
@@ -769,7 +777,7 @@ function Payouts() {
                     )}
                 </>
             )}
-            <p className="mk-hint">Начисление появляется после оплаты заказа и становится доступным к выплате, когда заказ выдан и прошёл срок на возврат. Выплаты проводит касса площадки.</p>
+            <p className="mk-hint">{L.payouts.hint}</p>
             <Requisites />
         </>
     );
@@ -784,12 +792,13 @@ interface RequisitesData {
     changedAt: string | null;
 }
 
-const REQUISITE_FIELDS: [keyof Omit<RequisitesData, 'changedAt'>, string, string, 'numeric' | 'text'][] = [
-    ['recipientName', 'Получатель', 'Как в банке: ООО «…» или ИП …', 'text'],
-    ['recipientTin', 'ИНН или ПИНФЛ получателя', '9 или 14 цифр', 'numeric'],
-    ['bankName', 'Банк', 'Например: Капиталбанк', 'text'],
-    ['bankMfo', 'МФО банка', '5 цифр', 'numeric'],
-    ['bankAccount', 'Расчётный счёт', '20 цифр', 'numeric'],
+// Подпись и подсказка поля — из text/seller.ts (requisites.fields)
+const REQUISITE_FIELDS: [keyof Omit<RequisitesData, 'changedAt'>, 'numeric' | 'text'][] = [
+    ['recipientName', 'text'],
+    ['recipientTin', 'numeric'],
+    ['bankName', 'text'],
+    ['bankMfo', 'numeric'],
+    ['bankAccount', 'numeric'],
 ];
 
 /**
@@ -799,6 +808,7 @@ const REQUISITE_FIELDS: [keyof Omit<RequisitesData, 'changedAt'>, string, string
  * после сверки кассой.
  */
 function Requisites() {
+    const L = lang(sellerText);
     const loaded = useApi<{ requisites: RequisitesData | null }>('me/requisites');
     const [saved, setSaved] = useState<RequisitesData | null>(null);
     const [errors, setErrors] = useState<Record<string, string[]>>({});
@@ -809,7 +819,7 @@ function Requisites() {
     if (loaded.status === 403) {
         return (
             <section className="mk-panel">
-                <h2>Реквизиты для выплат</h2>
+                <h2>{L.requisites.title}</h2>
                 <p className="mk-hint">{loaded.error}</p>
             </section>
         );
@@ -843,10 +853,10 @@ function Requisites() {
     return (
         <section className="mk-panel">
             <div className="mk-bar">
-                <h2>Реквизиты для выплат</h2>
+                <h2>{L.requisites.title}</h2>
                 {current && !editing && (
                     <button type="button" className="mk-btn mk-btn--ghost" onClick={() => setEditing(true)}>
-                        Изменить
+                        {L.requisites.edit}
                     </button>
                 )}
             </div>
@@ -855,21 +865,21 @@ function Requisites() {
                 <div className="mk-failed">
                     <p>{loaded.error}</p>
                     <button type="button" className="mk-btn" onClick={loaded.reload}>
-                        Повторить
+                        {L.retry}
                     </button>
                 </div>
             )}
             {!loaded.loading && !loaded.error && current && !editing && (
                 <dl className="mk-specs">
-                    {REQUISITE_FIELDS.map(([key, label]) => (
+                    {REQUISITE_FIELDS.map(([key]) => (
                         <div key={key}>
-                            <dt>{label}</dt>
+                            <dt>{L.requisites.fields[key][0]}</dt>
                             <dd>{current[key]}</dd>
                         </div>
                     ))}
                     {current.changedAt && (
                         <div>
-                            <dt>Изменены</dt>
+                            <dt>{L.requisites.changed}</dt>
                             <dd>{when(current.changedAt)}</dd>
                         </div>
                     )}
@@ -877,30 +887,30 @@ function Requisites() {
             )}
             {!loaded.loading && !loaded.error && (!current || editing) && (
                 <form className="mk-form mk-form--2" onSubmit={(event) => void save(event)} noValidate>
-                    {!current && <p className="mk-hint mk-field--wide">Реквизитов ещё нет — без них касса не сможет перевести деньги.</p>}
-                    {REQUISITE_FIELDS.map(([key, label, hint, mode]) => (
+                    {!current && <p className="mk-hint mk-field--wide">{L.requisites.none}</p>}
+                    {REQUISITE_FIELDS.map(([key, mode]) => (
                         <label key={key} className={key === 'recipientName' || key === 'bankAccount' ? 'mk-field mk-field--wide' : 'mk-field'}>
-                            {label}
-                            <input id={`mk-r-${key}`} name={key} inputMode={mode} defaultValue={current?.[key] ?? ''} placeholder={hint} autoComplete="off" />
+                            {L.requisites.fields[key][0]}
+                            <input id={`mk-r-${key}`} name={key} inputMode={mode} defaultValue={current?.[key] ?? ''} placeholder={L.requisites.fields[key][1]} autoComplete="off" />
                             {errors[key]?.[0] && <small className="is-error">{errors[key][0]}</small>}
                         </label>
                     ))}
                     <label className="mk-field mk-field--wide">
-                        Пароль от входа — для подтверждения
+                        {L.requisites.password}
                         <input id="mk-r-password" name="password" type="password" autoComplete="current-password" />
-                        {errors.password?.[0] ? <small className="is-error">{errors.password[0]}</small> : <small>Пять неверных паролей подряд закрывают смену реквизитов на сутки.</small>}
+                        {errors.password?.[0] ? <small className="is-error">{errors.password[0]}</small> : <small>{L.requisites.passwordHint}</small>}
                     </label>
                     <div className="mk-field--wide" style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                         <button type="submit" className="mk-btn" disabled={busy}>
-                            Сохранить реквизиты
+                            {L.requisites.save}
                         </button>
                         {editing && (
                             <button type="button" className="mk-btn mk-btn--ghost" onClick={() => setEditing(false)}>
-                                Отмена
+                                {L.requisites.cancel}
                             </button>
                         )}
                     </div>
-                    <p className="mk-hint mk-field--wide">Выплата на новые реквизиты — не раньше чем через сутки или после проверки кассой. Владельцам компании придёт уведомление о смене.</p>
+                    <p className="mk-hint mk-field--wide">{L.requisites.hint}</p>
                 </form>
             )}
         </section>
@@ -908,6 +918,8 @@ function Requisites() {
 }
 
 function Loading({ loading, error, reload }: { loading: boolean; error: string | null; reload: () => void }) {
+    const L = lang(sellerText);
+
     if (loading) return <div className="mk-skel-block" style={{ height: 200 }} aria-busy />;
 
     if (!error) return null;
@@ -916,7 +928,7 @@ function Loading({ loading, error, reload }: { loading: boolean; error: string |
         <div className="mk-failed">
             <p>{error}</p>
             <button type="button" className="mk-btn" onClick={reload}>
-                Повторить
+                {L.retry}
             </button>
         </div>
     );

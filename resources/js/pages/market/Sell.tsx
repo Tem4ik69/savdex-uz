@@ -4,18 +4,15 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { Link } from '@/components/ui/Link';
 import { MarketLayout } from '@/layouts/MarketLayout';
 import { api, ApiError, useApi } from '@/market/api';
+import { lang } from '@/market/lang';
 import { notify } from '@/market/store';
+import { sellText } from '@/market/text/sell';
 import type { SellerApplication } from '@/market/types';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
 
 /** Что нужно для заявки — в порядке, в котором это делают. */
-const CHECKS: [keyof SellerApplication['checks'], string, string][] = [
-    ['company', 'Компания или ИП на SavdEx', 'Создайте карточку компании'],
-    ['owner', 'Заявку подаёт владелец компании', 'Войдите под владельцем компании'],
-    ['tin', 'В карточке компании указан ИНН', 'Укажите ИНН'],
-    ['documents', 'Загружен документ о регистрации', 'Загрузите документ'],
-];
+const CHECKS: (keyof SellerApplication['checks'])[] = ['company', 'owner', 'tin', 'documents'];
 
 /**
  * «Стать продавцом»: что это даёт, как устроено и заявка
@@ -27,18 +24,19 @@ const CHECKS: [keyof SellerApplication['checks'], string, string][] = [
  * OneID возвращает человека сюда же с итогом в адресе (?oneid=…).
  */
 
-/** Итоги возврата из OneID: что произошло и тон сообщения. */
-const ONEID_RESULTS: Record<string, [string, boolean]> = {
-    ok: ['OneID подтвердил компанию — вы продавец SavdEx Market.', false],
-    review: ['OneID пройден, заявка ушла модератору на проверку.', false],
-    off: ['Подтверждение через OneID пока не подключено — подайте заявку с документами.', true],
-    denied: ['Вход в OneID отменён. Попробуйте ещё раз или подайте заявку с документами.', true],
-    expired: ['Время на подтверждение вышло. Начните заново.', true],
-    mismatch: ['ИНН в OneID не совпал с ИНН компании на SavdEx. Проверьте ИНН в карточке компании или подайте заявку с документами.', true],
-    blocked: ['Продажи компании приостановлены — подтвердить через OneID нельзя. Напишите в поддержку.', true],
-    error: ['OneID не ответил. Попробуйте позже или подайте заявку с документами.', true],
+/** Итоги возврата из OneID и тон сообщения (true — предупреждение); тексты — в sellText.oneid. */
+const ONEID_RESULTS: Record<string, boolean> = {
+    ok: false,
+    review: false,
+    off: true,
+    denied: true,
+    expired: true,
+    mismatch: true,
+    blocked: true,
+    error: true,
 };
 export default function MarketSell() {
+    const L = lang(sellText);
     const { auth } = usePage<SharedProps>().props;
     const { data, loading, error, reload } = useApi<SellerApplication>(auth.user ? 'me/seller' : null);
     const [sent, setSent] = useState<SellerApplication | null>(null);
@@ -52,62 +50,46 @@ export default function MarketSell() {
 
         if (!result) return;
 
-        setOneid(ONEID_RESULTS[result] ? result : 'error');
+        setOneid(Object.hasOwn(ONEID_RESULTS, result) ? result : 'error');
         params.delete('oneid');
         window.history.replaceState(window.history.state, '', window.location.pathname + (params.toString() ? `?${params}` : ''));
     }, []);
 
     return (
-        <MarketLayout title="Стать продавцом · SavdEx Market">
+        <MarketLayout title={L.title}>
             <div className="mk-in">
-                <nav className="mk-bc" aria-label="Путь">
-                    <Link href={routes.market}>Главная</Link>› Стать продавцом
+                <nav className="mk-bc" aria-label={L.crumbs}>
+                    <Link href={routes.market}>{L.home}</Link>› {L.becomeSeller}
                 </nav>
 
                 <div className="mk-sell">
                     <section className="mk-sell__hero">
-                        <h1>Продавайте на SavdEx Market — склад, выдача и оплата на нас</h1>
-                        <p>Вы привозите товар на склад в Ташкенте. Мы храним его, принимаем оплату и выдаём заказы в пунктах BTS.</p>
+                        <h1>{L.heroTitle}</h1>
+                        <p>{L.heroText}</p>
                         <ol className="mk-sell__steps">
-                            <li>
-                                <span>
-                                    <b>Подайте заявку</b>
-                                    <small>Компания или ИП на SavdEx; проверка документов</small>
-                                </span>
-                            </li>
-                            <li>
-                                <span>
-                                    <b>Добавьте товары</b>
-                                    <small>Первые товары проверяет модератор, дальше — сразу в продажу</small>
-                                </span>
-                            </li>
-                            <li>
-                                <span>
-                                    <b>Привезите поставку на склад</b>
-                                    <small>Продаётся только то, что принято на склад</small>
-                                </span>
-                            </li>
-                            <li>
-                                <span>
-                                    <b>Получайте начисления</b>
-                                    <small>За каждый выданный заказ — за вычетом комиссии площадки</small>
-                                </span>
-                            </li>
+                            {L.steps.map(([step, hint]) => (
+                                <li key={step}>
+                                    <span>
+                                        <b>{step}</b>
+                                        <small>{hint}</small>
+                                    </span>
+                                </li>
+                            ))}
                         </ol>
                     </section>
 
                     <section className="mk-panel" aria-busy={loading}>
                         {oneid && (
-                            <p className={ONEID_RESULTS[oneid][1] ? 'mk-sample' : 'mk-ok-note'} role="status">
-                                {ONEID_RESULTS[oneid][0]}
+                            <p className={ONEID_RESULTS[oneid] ? 'mk-sample' : 'mk-ok-note'} role="status">
+                                {L.oneid[oneid]}
                             </p>
                         )}
                         {!auth.user && (
                             <div className="mk-status">
-                                <h2>Заявка продавца</h2>
-                                <p>Продавец — это компания или ИП на SavdEx. Войдите в аккаунт компании, чтобы подать заявку.</p>
+                                <h2>{L.application}</h2>
+                                <p>{L.gateText}</p>
                                 <Link href={routes.loginBack(routes.marketSell)} className="mk-btn">
-                                    Войти или зарегистрироваться
+                                    {L.loginOrRegister}
                                 </Link>
                             </div>
                         )}
@@ -116,10 +98,10 @@ export default function MarketSell() {
 
                         {error && !state && (
                             <div className="mk-status">
-                                <h2>Не получилось загрузить заявку</h2>
+                                <h2>{L.loadFailed}</h2>
                                 <p>{error}</p>
                                 <button type="button" className="mk-btn" onClick={reload}>
-                                    Повторить
+                                    {L.retry}
                                 </button>
                             </div>
                         )}
@@ -129,18 +111,18 @@ export default function MarketSell() {
                         {state?.status === 'pending' && (
                             <div className="mk-status">
                                 <span aria-hidden>⏳</span>
-                                <h2>Заявка на проверке</h2>
-                                <p>Модератор проверит документы компании и ответит в уведомлениях. Кабинет продавца откроется после подтверждения.</p>
+                                <h2>{L.pendingTitle}</h2>
+                                <p>{L.pendingText}</p>
                             </div>
                         )}
 
                         {state?.status === 'approved' && (
                             <div className="mk-status">
                                 <span aria-hidden>✅</span>
-                                <h2>Вы — продавец SavdEx Market</h2>
-                                <p>Заявка подтверждена. Добавьте товары — после проверки и приёмки на складе они появятся в каталоге.</p>
+                                <h2>{L.approvedTitle}</h2>
+                                <p>{L.approvedText}</p>
                                 <Link href={routes.marketSeller()} className="mk-btn">
-                                    Открыть кабинет продавца
+                                    {L.openCabinet}
                                 </Link>
                             </div>
                         )}
@@ -148,10 +130,10 @@ export default function MarketSell() {
                         {state?.status === 'blocked' && (
                             <div className="mk-status">
                                 <span aria-hidden>⛔</span>
-                                <h2>Продажи приостановлены</h2>
-                                <p>Модератор приостановил продажи вашей компании. Напишите в поддержку — подскажем, что исправить.</p>
+                                <h2>{L.blockedTitle}</h2>
+                                <p>{L.blockedText}</p>
                                 <Link href={routes.help} className="mk-btn mk-btn--ghost">
-                                    Помощь
+                                    {L.help}
                                 </Link>
                             </div>
                         )}
@@ -163,6 +145,7 @@ export default function MarketSell() {
 }
 
 function Application({ state, onSent }: { state: SellerApplication; onSent: (next: SellerApplication) => void }) {
+    const L = lang(sellText);
     const [agreed, setAgreed] = useState(false);
     const [note, setNote] = useState('');
     const [problem, setProblem] = useState<string | null>(null);
@@ -174,7 +157,7 @@ function Application({ state, onSent }: { state: SellerApplication; onSent: (nex
     function offer(): boolean {
         if (agreed) return true;
 
-        setProblem('Без согласия с офертой заявку не отправить');
+        setProblem(L.needOffer);
 
         return false;
     }
@@ -190,7 +173,7 @@ function Application({ state, onSent }: { state: SellerApplication; onSent: (nex
 
             window.location.assign(redirect);
         } catch (failure) {
-            setProblem(failure instanceof ApiError ? failure.message : 'Не получилось открыть OneID. Попробуйте ещё раз.');
+            setProblem(failure instanceof ApiError ? failure.message : L.oneidFailed);
             setSending(null);
         }
     }
@@ -209,7 +192,7 @@ function Application({ state, onSent }: { state: SellerApplication; onSent: (nex
             notify(data.message);
             onSent(data.seller);
         } catch (failure) {
-            setProblem(failure instanceof ApiError ? failure.message : 'Не получилось отправить заявку. Попробуйте ещё раз.');
+            setProblem(failure instanceof ApiError ? failure.message : L.sendFailed);
         } finally {
             setSending(null);
         }
@@ -217,23 +200,23 @@ function Application({ state, onSent }: { state: SellerApplication; onSent: (nex
 
     return (
         <>
-            <h2>Заявка продавца</h2>
+            <h2>{L.application}</h2>
             {state.status === 'rejected' && (
                 <p className="mk-sample">
-                    Прошлую заявку отклонили{state.rejectReason ? `: ${state.rejectReason}` : '.'} Исправьте и подайте снова.
+                    {L.rejected(state.rejectReason)}
                 </p>
             )}
 
             <ul className="mk-checks">
-                {CHECKS.map(([key, label, action]) => (
+                {CHECKS.map((key) => (
                     <li key={key} className={state.checks[key] ? 'is-ok' : 'is-miss'}>
                         {state.checks[key] ? <CircleCheck size={18} aria-hidden /> : <CircleX size={18} aria-hidden />}
                         <span>
-                            {label}
-                            {key === 'documents' && <small className="mk-checks__hint"> — не нужен при подтверждении через OneID</small>}
-                            <span className="sr-only">{state.checks[key] ? ' — готово' : ' — не выполнено'}</span>
+                            {L.checks[key][0]}
+                            {key === 'documents' && <small className="mk-checks__hint">{L.documentsHint}</small>}
+                            <span className="sr-only">{state.checks[key] ? L.done : L.notDone}</span>
                         </span>
-                        {!state.checks[key] && key !== 'owner' && <Link href={routes.cabinetCompany}>{action}</Link>}
+                        {!state.checks[key] && key !== 'owner' && <Link href={routes.cabinetCompany}>{L.checks[key][1]}</Link>}
                     </li>
                 ))}
             </ul>
@@ -241,24 +224,24 @@ function Application({ state, onSent }: { state: SellerApplication; onSent: (nex
             <form className="mk-form" onSubmit={(event) => void submit(event)} noValidate>
                 <label className="mk-check">
                     <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />
-                    Принимаю оферту продавца
+                    {L.acceptOffer}
                 </label>
 
                 <div className="mk-oneid">
                     <span>
-                        <b>Подтвердить через OneID</b>
-                        <small>Быстро: ЭЦП для компании или вход для ИП. ИНН сверим с карточкой компании.</small>
+                        <b>{L.oneidTitle}</b>
+                        <small>{L.oneidText}</small>
                     </span>
                     <button type="button" className="mk-btn" disabled={!oneidReady || sending !== null} onClick={() => void viaOneid()}>
                         OneID
                     </button>
                 </div>
 
-                <p className="mk-or">или заявка с документами — проверит модератор</p>
+                <p className="mk-or">{L.or}</p>
 
                 <label className="mk-field">
-                    Что будете продавать (необязательно)
-                    <textarea id="mk-sell-note" rows={3} maxLength={1000} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Например: домашний текстиль собственного производства" />
+                    {L.noteLabel}
+                    <textarea id="mk-sell-note" rows={3} maxLength={1000} value={note} onChange={(e) => setNote(e.target.value)} placeholder={L.notePlaceholder} />
                 </label>
                 {problem && (
                     <small style={{ color: 'var(--danger)' }} role="alert">
@@ -266,10 +249,10 @@ function Application({ state, onSent }: { state: SellerApplication; onSent: (nex
                     </small>
                 )}
                 <button type="submit" className="mk-btn mk-btn--ghost" disabled={!ready || sending !== null}>
-                    Отправить заявку с документами
+                    {L.submit}
                 </button>
-                {!oneidReady && <p className="mk-hint">Для заявки нужны карточка компании, ИНН и вход владельца — всё это в кабинете компании на SavdEx.</p>}
-                {oneidReady && !ready && <p className="mk-hint">Для заявки с документами загрузите документ о регистрации — или подтвердите компанию через OneID.</p>}
+                {!oneidReady && <p className="mk-hint">{L.needAll}</p>}
+                {oneidReady && !ready && <p className="mk-hint">{L.needDocuments}</p>}
             </form>
         </>
     );

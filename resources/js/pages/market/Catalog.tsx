@@ -6,21 +6,16 @@ import { Link } from '@/components/ui/Link';
 import { cn } from '@/lib/cn';
 import { MarketLayout } from '@/layouts/MarketLayout';
 import { useApi } from '@/market/api';
-import { plural, sum } from '@/market/format';
+import { sum } from '@/market/format';
+import { lang } from '@/market/lang';
 import { useCategories } from '@/market/store';
+import { catalogText } from '@/market/text/catalog';
 import type { MarketFilter, MarketListing } from '@/market/types';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
 
-const SORTS: [string, string][] = [
-    ['popular', 'Популярные'],
-    ['cheap', 'Дешевле'],
-    ['expensive', 'Дороже'],
-    ['new', 'Новые'],
-    ['rating', 'С высоким рейтингом'],
-];
-
-const SHELVES: Record<string, string> = { sale: 'Скидки', new: 'Новинки', hit: 'Хиты продаж', fav: 'Избранное' };
+/** Порядок сортировок; подписи — в catalogText.sorts. */
+const SORTS = ['popular', 'cheap', 'expensive', 'new', 'rating'] as const;
 
 /**
  * Каталог. Всё, что выбрано, лежит в адресе (категория, поиск, цена,
@@ -30,6 +25,7 @@ const SHELVES: Record<string, string> = { sale: 'Скидки', new: 'Новин
  * категории, границы цены. Избранное — тот же каталог с only=fav.
  */
 export default function MarketCatalog({ search }: { search: string }) {
+    const L = lang(catalogText);
     const { auth } = usePage<SharedProps>().props;
     const categories = useCategories();
     const params = new URLSearchParams(search);
@@ -56,7 +52,7 @@ export default function MarketCatalog({ search }: { search: string }) {
 
     const q = (params.get('q') ?? '').trim();
     const category = data?.category ?? null;
-    const title = q ? `Поиск: «${q}»` : (category?.name ?? SHELVES[only] ?? 'Каталог');
+    const title = q ? L.search(q) : (category?.name ?? L.shelves[only] ?? L.catalog);
     const sort = params.get('sort') ?? 'popular';
     // Раздел верхнего уровня, внутри которого мы сейчас, — чтобы раскрыть его подразделы
     const rootSlug = category?.path[0]?.slug ?? params.get('category');
@@ -80,8 +76,8 @@ export default function MarketCatalog({ search }: { search: string }) {
     return (
         <MarketLayout title={`${title} · SavdEx Market`} tab="catalog" search={q}>
             <div className="mk-in">
-                <nav className="mk-bc" aria-label="Путь">
-                    <Link href={routes.market}>Главная</Link>›<Link href={routes.marketCatalog}>Каталог</Link>
+                <nav className="mk-bc" aria-label={L.crumbs}>
+                    <Link href={routes.market}>{L.home}</Link>›<Link href={routes.marketCatalog}>{L.catalog}</Link>
                     {category?.path.map((step, i) =>
                         i < category.path.length - 1 ? (
                             <span key={step.slug}>
@@ -91,34 +87,32 @@ export default function MarketCatalog({ search }: { search: string }) {
                             <span key={step.slug}>› {step.name}</span>
                         ),
                     )}
-                    {!category && title !== 'Каталог' && <>› {title}</>}
+                    {!category && title !== L.catalog && <>› {title}</>}
                 </nav>
                 <div className="mk-title">
                     <h1>{title}</h1>
                     {data && (
-                        <span>
-                            {sum(data.total)} {plural(data.total, ['товар', 'товара', 'товаров'])}
-                        </span>
+                        <span>{L.items(sum(data.total), data.total)}</span>
                     )}
                 </div>
 
                 {needsLogin ? (
                     <div className="mk-gate">
-                        <h2>Войдите, чтобы увидеть избранное</h2>
-                        <p>Товары, отмеченные сердечком, хранятся в вашем аккаунте и видны с любого устройства.</p>
+                        <h2>{L.favGateTitle}</h2>
+                        <p>{L.favGateText}</p>
                         <Link href={routes.loginBack(`${routes.marketCatalog}?only=fav`)} className="mk-btn">
-                            Войти или зарегистрироваться
+                            {L.loginOrRegister}
                         </Link>
                     </div>
                 ) : (
                     <div className="mk-catalog">
-                        <aside className={cn('mk-filters', filtersOpen && 'is-open')} aria-label="Фильтры">
+                        <aside className={cn('mk-filters', filtersOpen && 'is-open')} aria-label={L.filters}>
                             <div>
-                                <h3>Категории</h3>
+                                <h3>{L.categories}</h3>
                                 <ul>
                                     <li>
                                         <Link href={routes.marketCatalog} aria-current={!params.get('category') && !only}>
-                                            Все товары
+                                            {L.allItems}
                                         </Link>
                                     </li>
                                     {(categories ?? []).map((c) => (
@@ -154,31 +148,31 @@ export default function MarketCatalog({ search }: { search: string }) {
                             />
                             <label className="mk-check">
                                 <input type="checkbox" checked={only === 'sale'} onChange={(e) => update({ only: e.target.checked ? 'sale' : null })} />
-                                Только со скидкой
+                                {L.saleOnly}
                             </label>
                             {(data?.filters ?? []).map((filter) => (
                                 <Filter key={filter.key} filter={filter} params={params} update={update} />
                             ))}
                             {changed && (
                                 <button type="button" className="mk-reset" onClick={reset}>
-                                    Сбросить фильтры
+                                    {L.resetFilters}
                                 </button>
                             )}
                         </aside>
 
                         <div aria-busy={loading}>
-                            <div className="mk-sort" role="group" aria-label="Сортировка">
+                            <div className="mk-sort" role="group" aria-label={L.sorting}>
                                 <button type="button" className="mk-filters-toggle" aria-expanded={filtersOpen} onClick={() => setFiltersOpen(!filtersOpen)}>
-                                    <SlidersHorizontal size={14} aria-hidden style={{ display: 'inline', verticalAlign: '-2px' }} /> Фильтры
+                                    <SlidersHorizontal size={14} aria-hidden style={{ display: 'inline', verticalAlign: '-2px' }} /> {L.filters}
                                 </button>
-                                {SORTS.map(([key, label]) => (
+                                {SORTS.map((key) => (
                                     <button key={key} type="button" aria-pressed={sort === key} onClick={() => update({ sort: key === 'popular' ? null : key })}>
-                                        {label}
+                                        {L.sorts[key]}
                                     </button>
                                 ))}
                             </div>
 
-                            {data?.fuzzy && <p className="mk-fuzzy">Точных совпадений нет — показаны товары с похожим названием.</p>}
+                            {data?.fuzzy && <p className="mk-fuzzy">{L.fuzzy}</p>}
 
                             {loading && (
                                 <div className="mk-grid">
@@ -188,10 +182,10 @@ export default function MarketCatalog({ search }: { search: string }) {
 
                             {error && (
                                 <div className="mk-failed">
-                                    <h2>Каталог не загрузился</h2>
+                                    <h2>{L.failed}</h2>
                                     <p>{error}</p>
                                     <button type="button" className="mk-btn" onClick={reload}>
-                                        Повторить
+                                        {L.retry}
                                     </button>
                                 </div>
                             )}
@@ -204,25 +198,23 @@ export default function MarketCatalog({ search }: { search: string }) {
                                         ))}
                                     </div>
                                     {data.pages > 1 && (
-                                        <nav className="mk-pages" aria-label="Страницы каталога">
+                                        <nav className="mk-pages" aria-label={L.pagesLabel}>
                                             <button
                                                 type="button"
                                                 className="mk-btn mk-btn--ghost"
                                                 disabled={data.page <= 1}
                                                 onClick={() => update({ page: data.page > 2 ? String(data.page - 1) : null }, true)}
                                             >
-                                                ← Назад
+                                                {L.back}
                                             </button>
-                                            <span className="mk-pages__now">
-                                                Страница {data.page} из {data.pages}
-                                            </span>
+                                            <span className="mk-pages__now">{L.page(data.page, data.pages)}</span>
                                             <button
                                                 type="button"
                                                 className="mk-btn mk-btn--ghost"
                                                 disabled={data.page >= data.pages}
                                                 onClick={() => update({ page: String(data.page + 1) }, true)}
                                             >
-                                                Дальше →
+                                                {L.next}
                                             </button>
                                         </nav>
                                     )}
@@ -234,29 +226,29 @@ export default function MarketCatalog({ search }: { search: string }) {
                                     <span aria-hidden>{only === 'fav' && !changed ? '🤍' : '🔎'}</span>
                                     {only === 'fav' && !changed ? (
                                         <>
-                                            <h2>В избранном пока пусто</h2>
-                                            <p>Нажмите на сердечко на карточке товара — он появится здесь.</p>
+                                            <h2>{L.favEmptyTitle}</h2>
+                                            <p>{L.favEmptyText}</p>
                                             <Link href={routes.marketCatalog} className="mk-btn">
-                                                Перейти в каталог
+                                                {L.toCatalog}
                                             </Link>
                                         </>
                                     ) : (
                                         <>
-                                            <h2>Ничего не нашлось</h2>
+                                            <h2>{L.nothingTitle}</h2>
                                             <p>
                                                 {changed
-                                                    ? 'Под такие фильтры товаров нет. Сбросьте их или расширьте цену.'
+                                                    ? L.nothingFilters
                                                     : q
-                                                      ? 'Попробуйте другое слово или посмотрите в категориях.'
-                                                      : 'В этом разделе пока нет товаров. Загляните в другие категории.'}
+                                                      ? L.nothingSearch
+                                                      : L.nothingSection}
                                             </p>
                                             {changed ? (
                                                 <button type="button" className="mk-btn" onClick={reset}>
-                                                    Сбросить фильтры
+                                                    {L.resetFilters}
                                                 </button>
                                             ) : (
                                                 <Link href={routes.marketCatalog} className="mk-btn">
-                                                    Все товары
+                                                    {L.allItems}
                                                 </Link>
                                             )}
                                         </>
@@ -283,6 +275,7 @@ function PriceRange({
     bounds: { min: number | null; max: number | null } | null;
     onChange: (min: string | null, max: string | null) => void;
 }) {
+    const L = lang(catalogText);
     const [min, setMin] = useState(from);
     const [max, setMax] = useState(to);
     const digits = (text: string) => text.replace(/\D/g, '');
@@ -293,12 +286,12 @@ function PriceRange({
 
     return (
         <div>
-            <h3>Цена, сум</h3>
+            <h3>{L.price}</h3>
             <div className="mk-range">
                 <input
                     inputMode="numeric"
-                    placeholder={bounds?.min != null ? `от ${sum(bounds.min)}` : 'от'}
-                    aria-label="Цена от"
+                    placeholder={bounds?.min != null ? L.fromValue(sum(bounds.min)) : L.from}
+                    aria-label={L.priceFrom}
                     value={min}
                     onChange={(e) => setMin(e.target.value)}
                     onBlur={commit}
@@ -306,8 +299,8 @@ function PriceRange({
                 />
                 <input
                     inputMode="numeric"
-                    placeholder={bounds?.max != null ? `до ${sum(bounds.max)}` : 'до'}
-                    aria-label="Цена до"
+                    placeholder={bounds?.max != null ? L.toValue(sum(bounds.max)) : L.to}
+                    aria-label={L.priceTo}
                     value={max}
                     onChange={(e) => setMax(e.target.value)}
                     onBlur={commit}
@@ -391,6 +384,7 @@ function NumberRange({
     high: number;
     onChange: (min: string | null, max: string | null) => void;
 }) {
+    const L = lang(catalogText);
     const [min, setMin] = useState(from);
     const [max, setMax] = useState(to);
     const clean = (text: string) => text.replace(',', '.').replace(/[^\d.]/g, '');
@@ -403,8 +397,8 @@ function NumberRange({
         <div>
             <h3>{title}</h3>
             <div className="mk-range">
-                <input inputMode="decimal" placeholder={`от ${low}`} aria-label={`${title}: от`} value={min} onChange={(e) => setMin(e.target.value)} onBlur={commit} onKeyDown={onKey} />
-                <input inputMode="decimal" placeholder={`до ${high}`} aria-label={`${title}: до`} value={max} onChange={(e) => setMax(e.target.value)} onBlur={commit} onKeyDown={onKey} />
+                <input inputMode="decimal" placeholder={L.fromValue(low)} aria-label={L.rangeFrom(title)} value={min} onChange={(e) => setMin(e.target.value)} onBlur={commit} onKeyDown={onKey} />
+                <input inputMode="decimal" placeholder={L.toValue(high)} aria-label={L.rangeTo(title)} value={max} onChange={(e) => setMax(e.target.value)} onBlur={commit} onKeyDown={onKey} />
             </div>
         </div>
     );

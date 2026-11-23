@@ -3,33 +3,36 @@ import { StatusPill } from '@/components/market/OrderView';
 import { Link } from '@/components/ui/Link';
 import { MarketLayout } from '@/layouts/MarketLayout';
 import { useApi } from '@/market/api';
-import { plural, sum } from '@/market/format';
+import { sum } from '@/market/format';
+import { lang } from '@/market/lang';
 import { when } from '@/market/orders';
+import { ordersPageText } from '@/market/text/orders-page';
 import type { OrderSummary } from '@/market/types';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
 
 /** «Мои заказы»: список с сервера (/market/api/orders), новые сверху; заказ целиком — на своей странице. */
 export default function MarketOrders() {
+    const L = lang(ordersPageText);
     const { auth } = usePage<SharedProps>().props;
     const { data, loading, error, reload } = useApi<{ orders: OrderSummary[] }>(auth.user ? 'orders' : null);
 
     return (
-        <MarketLayout title="Мои заказы · SavdEx Market" tab="orders">
+        <MarketLayout title={L.title} tab="orders">
             <div className="mk-in">
-                <nav className="mk-bc" aria-label="Путь">
-                    <Link href={routes.market}>Главная</Link>› Мои заказы
+                <nav className="mk-bc" aria-label={L.crumbs}>
+                    <Link href={routes.market}>{L.home}</Link>› {L.heading}
                 </nav>
                 <div className="mk-title">
-                    <h1>Мои заказы</h1>
+                    <h1>{L.heading}</h1>
                 </div>
 
                 {!auth.user && (
                     <div className="mk-gate">
-                        <h2>Войдите, чтобы увидеть заказы</h2>
-                        <p>Заказы хранятся в вашем аккаунте.</p>
+                        <h2>{L.gateTitle}</h2>
+                        <p>{L.gateText}</p>
                         <Link href={routes.loginBack(routes.marketOrders)} className="mk-btn">
-                            Войти
+                            {L.login}
                         </Link>
                     </div>
                 )}
@@ -38,10 +41,10 @@ export default function MarketOrders() {
 
                 {error && (
                     <div className="mk-failed">
-                        <h2>Заказы не загрузились</h2>
+                        <h2>{L.failed}</h2>
                         <p>{error}</p>
                         <button type="button" className="mk-btn" onClick={reload}>
-                            Повторить
+                            {L.retry}
                         </button>
                     </div>
                 )}
@@ -49,10 +52,10 @@ export default function MarketOrders() {
                 {data && data.orders.length === 0 && (
                     <div className="mk-empty">
                         <span aria-hidden>📦</span>
-                        <h2>Заказов пока нет</h2>
-                        <p>Оформленные заказы появятся здесь — с их статусом и пунктом выдачи.</p>
+                        <h2>{L.emptyTitle}</h2>
+                        <p>{L.emptyText}</p>
                         <Link href={routes.marketCatalog} className="mk-btn">
-                            Перейти в каталог
+                            {L.toCatalog}
                         </Link>
                     </div>
                 )}
@@ -63,17 +66,17 @@ export default function MarketOrders() {
                             <Link key={order.number} href={routes.marketOrder(order.number)} className="mk-order mk-order--row">
                                 <div className="mk-order__head">
                                     <h2>
-                                        Заказ {order.number}
+                                        {L.order(order.number)}
                                         <small>{when(order.createdAt)}</small>
                                     </h2>
                                     <StatusPill status={order.status} />
                                 </div>
                                 <div className="mk-order__foot">
                                     <span className="mk-note">
-                                        {order.count} {plural(order.count, ['товар', 'товара', 'товаров'])} · {order.pickupPoint.name} ·{' '}
-                                        {order.paymentMethod === 'card' ? 'картой' : 'при получении'}
+                                        {L.items(order.count)} · {order.pickupPoint.name} ·{' '}
+                                        {order.paymentMethod === 'card' ? L.byCard : L.onDelivery}
                                     </span>
-                                    <b>{sum(order.total)} сум</b>
+                                    <b>{sum(order.total)} {L.currency}</b>
                                 </div>
                             </Link>
                         ))}
