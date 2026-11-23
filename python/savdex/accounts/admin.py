@@ -811,6 +811,11 @@ MARKET_USER_REFERENCES: tuple[tuple[str, str], ...] = (
     ("market_payouts", "cancelled_by"),
     ("market_seller_requisites", "changed_by"),
     ("market_seller_requisites_log", "changed_by"),
+    ("market_orders", "issued_by"),
+    ("market_supplies", "received_by"),
+    ("market_shipments", "shipped_by"),
+    ("market_shipments", "delivered_by"),
+    ("market_stock_movements", "actor_user_id"),
 )
 
 
