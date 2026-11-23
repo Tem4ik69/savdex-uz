@@ -324,6 +324,24 @@ case "$what" in
             fi
             shares="${shares:+$shares, }$table $share%"
         done
+        # Маркетплейс: товары, заказы, журнал денег. Таблицы маленькие, и
+        # «90% строк» дало бы ложную тревогу от пары новых строк за ночь.
+        # Иначе: каждая строка, созданная раньше копии (с запасом 30 мин на
+        # снятие и выгрузку), должна быть в копии — сайт не удаляет ни
+        # товары, ни заказы, журнал денег только дописывается. Пока на
+        # боевом таких строк нет — таблица не проверяется
+        before="to_timestamp($(( uploaded - 1800 ))) at time zone 'utc'"
+        for table in market_products market_orders market_ledger; do
+            old=$(live "select count(*) from $table where created_at < $before")
+            if [ "$old" -eq 0 ]; then
+                continue
+            fi
+            got=$(restored "select count(*) from $table where created_at < $before")
+            if [ "$got" -lt "$old" ]; then
+                fail "в копии $name в таблице $table $got строк из $old, созданных до копии — копия неполная"
+            fi
+            shares="$shares, $table $got из $old"
+        done
         docker rm -f "$check_box" > /dev/null 2>&1 || true
         check_box=""
 
