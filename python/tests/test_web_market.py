@@ -162,3 +162,23 @@ def test_заказ_получает_номер_заглавными(сайт):
 )
 def test_заголовок_страницы_на_русском_или_узбекском(сайт, path, title):
     assert title in открыть(сайт, path)["body"]
+
+
+@pytest.mark.parametrize(
+    ("path", "component", "tab"),
+    [
+        ("/market/warehouse", "market/Warehouse", "supplies"),
+        ("/market/warehouse?tab=picking", "market/Warehouse", "picking"),
+        ("/market/warehouse?tab=nope", "market/Warehouse", "supplies"),
+        ("/uz/market/point", "market/Point", "issue"),
+        ("/market/point?tab=cash", "market/Point", "cash"),
+        ("/market/seller?tab=removals", "market/Seller", "removals"),
+    ],
+)
+def test_экраны_склада_и_пункта_знают_свои_вкладки(сайт, path, component, tab):
+    д = открыть(сайт, path)
+
+    assert д["status"] == 200
+    assert страница(д["body"])["component"] == component
+    assert страница(д["body"])["props"]["tab"] == tab
+    assert "noindex" in д["body"]

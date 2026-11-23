@@ -608,6 +608,40 @@ BTS дольше срока (раздел «Сверка» выше); сверк
 | GET `me/supplies/<номер>` | своя поставка; чужая — 404 |
 | POST `me/supplies/<номер>/submit` · `…/cancel` | отправить черновик · отменить до приёмки; иначе — 409 |
 
+## Экраны склада и пункта — контракт (предложение)
+
+Экраны сотрудников — `/market/warehouse` (склад, планшет) и
+`/market/point` (пункт выдачи, телефон), вкладки — `?tab=…`; страницы
+открываются вошедшему, свой склад или пункт сервер проверяет в каждом
+запросе (чужому — 403 с текстом). Решение «простые экраны, не общая
+админка» — ТЗ «2026-11-23 Команда — склад маркетплейса SavdEx» (Жавохир:
+«сотрудникам пунктов — отдельный простой экран»; Шерзод: «адреса дам по
+контракту»).
+
+Пока адреса нет (сервер отвечает 404), экран показывает образец того же
+вида с пометкой «Образец» — `resources/js/market/staff/data.ts`. Типы
+ответов и тела запросов — `resources/js/market/staff/contract.ts`;
+предложение Максуда, Шерзод может поправить — экраны подстроятся.
+
+| Адрес (`/market/api/…`) | Что |
+|---|---|
+| GET `warehouse/me` | `{warehouse, staff, counts}` — свой склад и цифры на вкладках |
+| GET `warehouse/supplies?status=` | поставки на склад: продавец, строки (`itemId`, заявлено, принято, брак) |
+| POST `warehouse/supplies/<номер>/receive` `{items: [{itemId, accepted, defect}]}` · `…/reject` `{reason}` | приёмка по факту · отказ с причиной |
+| GET `warehouse/stock?q=` | остатки: на полке, в резерве, брак, ячейка, продавец |
+| GET `warehouse/picking` · POST `warehouse/picking/<номер>/start` · `…/done` `{places}` | сборка заказов целиком |
+| GET `warehouse/shipments/ready` · `warehouse/shipments` · POST `warehouse/shipments/create` `{pickupPoint}` · `…/<номер>/send` | партии склад → пункт |
+| GET `warehouse/returns` · POST `warehouse/returns/<номер>/receive` `{items: [{order, variantId, good, defect}]}` | возвратные партии из пунктов |
+| GET `warehouse/removals` · POST `…/<номер>/ready` · `…/<номер>/done` | вывоз продавцам |
+| GET `warehouse/writeoffs` · POST `warehouse/writeoffs/create` `{variantId, quantity, reason}` | заявки на списание; подтверждает администратор |
+| GET `point/me` | `{point, staff, counts}` |
+| GET `point/batches` · POST `point/batches/<номер>/accept` `{problems: [{order, note}]}` | принять партию; проблемные заказы — с пометкой |
+| GET `point/orders/<номер>` | заказ по номеру с наклейки: места, к оплате (только «при получении»), срок, пауза кода; без имени и телефона |
+| POST `point/orders/<номер>/issue` `{code}` → `{result: issued\|wrong\|locked, attemptsLeft, lockedUntil}` · `…/refuse` `{reason}` | выдача по номеру и коду; отказ при получении — целиком |
+| GET `point/unclaimed` · POST `point/returns/create` `{orders}` | невостребованные и отказы → возвратная партия |
+| GET `point/cash?date=` | наличные за день: заказы, суммы, итог |
+| GET `me/removals` · `me/removals/available` · POST `me/removals/create` `{warehouse, items: [{variantId, kind, quantity}]}` · `…/<номер>/cancel` | продавец: «Вывоз» годного и брака |
+
 ## Адреса для страниц — `/market/api/…`
 
 Ответ — JSON. Языковой префикс работает как у страниц:

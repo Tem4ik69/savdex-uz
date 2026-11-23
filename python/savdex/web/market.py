@@ -36,6 +36,8 @@ _TITLES: dict[str, tuple[str, str]] = {
     "order": ("Заказ", "Buyurtma"),
     "sell": ("Стать продавцом", "Sotuvchi bo‘lish"),
     "seller": ("Кабинет продавца", "Sotuvchi kabineti"),
+    "warehouse": ("Склад", "Ombor"),
+    "point": ("Пункт выдачи", "Topshirish punkti"),
 }
 
 
@@ -48,7 +50,21 @@ def _title(page: str, locale: str) -> str:
 
 
 #: Вкладки кабинета продавца; первая — та, что открывается по умолчанию
-_SELLER_TABS = ("products", "stock", "supplies", "orders", "payouts")
+_SELLER_TABS = ("products", "stock", "supplies", "removals", "orders", "payouts")
+
+#: Экраны сотрудника склада (планшет) и пункта выдачи (телефон) — ТЗ
+#: «2026-11-23 Команда — склад маркетплейса SavdEx», раздел «Экраны»
+_WAREHOUSE_TABS = (
+    "supplies",
+    "receiving",
+    "stock",
+    "picking",
+    "shipments",
+    "returns",
+    "removals",
+    "writeoffs",
+)
+_POINT_TABS = ("issue", "batches", "unclaimed", "cash")
 
 
 def _seo(ctx: Context, title: str) -> Seo:
@@ -125,3 +141,24 @@ def seller(request: HttpRequest) -> HttpResponse:
         "seller",
         {"tab": tab if tab in _SELLER_TABS else _SELLER_TABS[0]},
     )
+
+
+def _tab(request: HttpRequest, tabs: tuple[str, ...]) -> str:
+    tab = request.GET.get("tab", "")
+
+    return tab if tab in tabs else tabs[0]
+
+
+def warehouse_screen(request: HttpRequest) -> HttpResponse:
+    """
+    Экран сотрудника склада (планшет). Страница открывается всем вошедшим:
+    свой склад и права проверяет сервер в каждом запросе
+    /market/api/warehouse/… — чужому он отвечает 403, и экран говорит, что
+    доступа нет.
+    """
+    return _page(request, "market/Warehouse", "warehouse", {"tab": _tab(request, _WAREHOUSE_TABS)})
+
+
+def point_screen(request: HttpRequest) -> HttpResponse:
+    """Экран сотрудника пункта выдачи (телефон); права — как у склада, на сервере."""
+    return _page(request, "market/Point", "point", {"tab": _tab(request, _POINT_TABS)})

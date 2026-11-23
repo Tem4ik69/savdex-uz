@@ -76,6 +76,9 @@ export const routes = {
         return `${marketBase}/sell`;
     },
     marketSeller: (tab?: string) => (tab ? `${marketBase}/seller?tab=${tab}` : `${marketBase}/seller`),
+    // Экраны сотрудников: склад (планшет) и пункт выдачи (телефон)
+    marketWarehouse: (tab?: string) => (tab ? `${marketBase}/warehouse?tab=${tab}` : `${marketBase}/warehouse`),
+    marketPoint: (tab?: string) => (tab ? `${marketBase}/point?tab=${tab}` : `${marketBase}/point`),
 
     // Избранное
     favorites: '/favorites',
