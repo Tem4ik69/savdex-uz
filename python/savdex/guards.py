@@ -252,6 +252,19 @@ OWNED_TABLES: frozenset[str] = frozenset(
         "market_seller_requisites",
         "market_seller_requisites_log",
         "market_payouts",
+        # Маркетплейс, склад и пункты выдачи — этап 2 (миграция
+        # 2026_11_23_100000): склады, поставки, отгрузки; движения остатка
+        # только дописываются, остаток склада пишет триггер (у роли
+        # приложения — только чтение)
+        "market_warehouses",
+        "market_warehouse_staff",
+        "market_pickup_point_staff",
+        "market_supplies",
+        "market_supply_items",
+        "market_warehouse_stock",
+        "market_shipments",
+        "market_shipment_orders",
+        "market_stock_movements",
     }
 )
 
