@@ -349,8 +349,9 @@ def _split(total: int, parts: int) -> list[int]:
 
 
 #: Пункты выдачи BTS — как POINTS в resources/js/market/orders.ts: код (с «demo-»,
-#: чтобы не спутать с настоящими кодами BTS), название, район и адрес. Часов работы
-#: и координат в таблице пока нет — они ждут ответов BTS (ТЗ, вопросы 4–5).
+#: чтобы не спутать с настоящими кодами BTS), название, район и адрес. Часы —
+#: одинаковые демо-часы (настоящие и точки на карте ждут ответов BTS, ТЗ,
+#: вопросы 4–5).
 PICKUP_POINTS: list[tuple[str, str, str]] = [
     ("demo-chilanzar", "BTS Чиланзар", "Чиланзарский район, ул. Бунёдкор, 12"),
     ("demo-yunusabad", "BTS Юнусабад", "Юнусабадский район, ул. Амира Темура, 107"),
@@ -370,8 +371,9 @@ def _pickup_points() -> int:
     for sort, (code, name, address) in enumerate(PICKUP_POINTS):
         made += len(
             demo._rows(
-                "insert into market_pickup_points (code, name, address, city, sort) "
-                "values (%s, %s, %s, 'Ташкент', %s) on conflict (code) do nothing returning id",
+                "insert into market_pickup_points (code, name, address, city, sort, hours) "
+                "values (%s, %s, %s, 'Ташкент', %s, 'Пн–Сб 9:00–20:00') "
+                "on conflict (code) do nothing returning id",
                 [code, name, address, sort],
             )
         )
@@ -385,7 +387,13 @@ def seed(*, now: datetime | None = None) -> dict[str, int]:
         raise demo.DemoRefusedError(why)
 
     # Пункты выдачи — отдельно от продавцов: доезжают и туда, где демо-товары уже есть
-    made = {"sellers": 0, "products": 0, "variants": 0, "pickup_points": _pickup_points()}
+    made = {
+        "sellers": 0,
+        "products": 0,
+        "variants": 0,
+        "supplies": 0,
+        "pickup_points": _pickup_points(),
+    }
 
     if demo._rows("select 1 from companies where source_note = %s limit 1", [MARK]):
         return made
@@ -408,6 +416,8 @@ def seed(*, now: datetime | None = None) -> dict[str, int]:
         )
 
     sellers: dict[str, int] = {}
+    #: Остаток вариантов по продавцам — его заведёт приёмка поставки (_receive)
+    arrivals: dict[int, list[tuple[int, int, int]]] = {}
 
     with transaction.atomic():
         for n, (slug, name, verified, rating) in enumerate(SELLERS, start=1):
@@ -493,7 +503,7 @@ def seed(*, now: datetime | None = None) -> dict[str, int]:
             for sort, (options, stock) in enumerate(
                 zip(picks, _split(data["stock"], len(picks)), strict=True)
             ):
-                demo._insert(
+                variant_id = demo._insert(
                     "market_product_variants",
                     {
                         "product_id": product_id,
@@ -501,11 +511,17 @@ def seed(*, now: datetime | None = None) -> dict[str, int]:
                         "sku": f"{data['slug'][:50]}-{sort + 1}",
                         "price": data["price"] * 100,
                         "old_price": data["old"] * 100 if data["old"] else None,
-                        "stock": stock,
+                        # Остаток — только приёмкой поставки (_receive ниже)
+                        "stock": 0,
                         "sort": sort,
                     },
                 )
                 made["variants"] += 1
+
+                if stock:
+                    arrivals.setdefault(sellers[data["seller"]], []).append(
+                        (product_id, variant_id, stock)
+                    )
 
             for name, value in data["specs"]:
                 demo._rows(
@@ -517,4 +533,89 @@ def seed(*, now: datetime | None = None) -> dict[str, int]:
             products.refresh(product_id)
             made["products"] += 1
 
+        made["supplies"] = _receive(arrivals, now)
+
     return made
+
+
+#: Демо-склад — код с «demo-», как у демо-пунктов выдачи
+WAREHOUSE = ("demo-bts", "Склад BTS (демо)", "Сергелийский район, ул. Янги Сергели, 1")
+
+
+def _receive(arrivals: dict[int, list[tuple[int, int, int]]], now: datetime) -> int:
+    """
+    Остаток демо-товаров — так же, как у настоящих продавцов: принятая
+    поставка на демо-склад и движение «receipt» по каждой строке
+    (savdex/market/warehouse.py). Правки остатка в обход склада нет.
+    Итог — сколько поставок заведено.
+    """
+    from savdex.market import warehouse
+
+    code, name, address = WAREHOUSE
+    found = demo._rows(
+        "insert into market_warehouses (code, name, address, city) "
+        "values (%s, %s, %s, 'Ташкент') on conflict (code) do nothing returning id",
+        [code, name, address],
+    ) or demo._rows("select id from market_warehouses where code = %s", [code])
+    store = int(found[0][0])
+    # Кто «принял» поставку — первый сотрудник админки, иначе первый пользователь
+    staff = demo._rows("select id from users order by is_admin desc, id limit 1") or [
+        (
+            demo._insert(
+                "users",
+                {
+                    "name": "Склад (демо)",
+                    "email": f"stock@{demo.EMAIL_DOMAIN}",
+                    "password": "!",
+                    "status": "active",
+                    "created_at": now,
+                    "updated_at": now,
+                },
+            ),
+        )
+    ]
+    receiver = int(staff[0][0])
+    arrived = now - timedelta(days=7)
+
+    for seller_id, lines in sorted(arrivals.items()):
+        supply = demo._insert(
+            "market_supplies",
+            {
+                "number": f"DEMO{seller_id:08d}",
+                "seller_id": seller_id,
+                "warehouse_id": store,
+                "status": "received",
+                "note": "Демо-поставка тестового сервера",
+                "submitted_at": arrived,
+                "received_at": arrived,
+                "received_by": receiver,
+                "created_at": arrived,
+                "updated_at": arrived,
+            },
+        )
+
+        for product_id, variant_id, quantity in lines:
+            item = demo._insert(
+                "market_supply_items",
+                {
+                    "supply_id": supply,
+                    "seller_id": seller_id,
+                    "product_id": product_id,
+                    "variant_id": variant_id,
+                    "quantity_declared": quantity,
+                    "quantity_accepted": quantity,
+                    "quantity_defect": 0,
+                    "created_at": arrived,
+                    "updated_at": arrived,
+                },
+            )
+            warehouse.move(
+                store,
+                variant_id,
+                "receipt",
+                quantity,
+                actor_user_id=receiver,
+                supply_item_id=item,
+            )
+
+    return len(arrivals)

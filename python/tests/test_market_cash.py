@@ -44,6 +44,7 @@ from .test_market_orders import (
     _manage,
     _python,
     _в_корзину,
+    _до_выдачи,
     _оформить,
     _покупатель,
     _статус,
@@ -216,17 +217,12 @@ def _заказ(сайт: str, вариант: int, method: str = "cash") -> tup
 
 def _выдать(pk: int, дней_назад: int = 0, *, сверить: bool = True) -> None:
     """
-    Заказ с оплатой при получении — до выдачи (orders.advance), выдан
-    дней_назад; наличные — сверены с отчётом BTS (иначе не «к выплате»).
+    Заказ с оплатой при получении — до выдачи (сборка, отгрузка, код в
+    пункте — _до_выдачи), выдан дней_назад; наличные — сверены с отчётом
+    BTS (иначе не «к выплате»).
     """
     админ = _сотрудник("admin")
-    код = (
-        "from savdex.market import orders\n"
-        "for b in ('cash_on_pickup', 'assembling', 'in_transit', 'ready'):\n"
-        f"    assert orders.advance({pk}, b, actor_user_id={админ})\n"
-        "print('ok')"
-    )
-    assert _python(код) == "ok"
+    _до_выдачи(pk, админ)
     # Сверка — как у кассы (cash.reconcile_cash): когда, кто и номер отчёта
     # вместе (их держит проверка market_orders_cash_reconciled_check)
     sql(
@@ -360,15 +356,22 @@ def test_склад_ведёт_заказ_до_выдачи(сайт):
     _, отмена = django(склад, ("post", карточка + "decide/", {"decision": "cancel:cash_on_pickup"}))
     assert отмена["status"] == 302 and _статус(number) == "cash_on_pickup"
 
-    for before, after in (
-        ("cash_on_pickup", "assembling"),
-        ("assembling", "in_transit"),
-        ("in_transit", "ready"),
-        ("ready", "issued"),
-    ):
-        _, шаг = django(склад, ("post", карточка + "decide/", {"decision": f"to:{before}:{after}"}))
-        assert шаг["status"] == 302 and _статус(number) == after
-        assert журнал("status_changed")["section"] == "market_stock"
+    _, шаг = django(
+        склад, ("post", карточка + "decide/", {"decision": "to:cash_on_pickup:assembling"})
+    )
+    assert шаг["status"] == 302 and _статус(number) == "assembling"
+    assert журнал("status_changed")["section"] == "market_stock"
+
+    # Дальше кнопок в карточке заказа нет: «в пути» и «можно забрать» —
+    # отгрузкой, «выдан» — по коду в пункте (test_market_stock.py)
+    _, карточка_в_сборке = django(склад, ("get", карточка + "change/", None))
+    assert "Отгружен со склада" not in карточка_в_сборке["body"]
+    _, мимо = django(
+        склад, ("post", карточка + "decide/", {"decision": "to:assembling:in_transit"})
+    )
+    assert мимо["status"] == 302 and _статус(number) == "assembling"
+    _до_выдачи(pk, склад)
+    assert _статус(number) == "issued"
 
     # Выдан при получении: долг покупателя закрыт наличными — один раз
     assert sql(

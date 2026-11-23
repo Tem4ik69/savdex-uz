@@ -21,11 +21,12 @@ from collections.abc import Callable
 from functools import wraps
 from typing import Any
 
+from django.db import transaction
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
 from savdex.audit import client_ip
 from savdex.market import banners as market_banners
-from savdex.market import cart, cash, catalog, oneid, orders, products, sellers
+from savdex.market import cart, cash, catalog, oneid, orders, products, sellers, warehouse
 from savdex.market.common import one, t
 from savdex.web import session, throttle
 from savdex.web.actions import form
@@ -659,6 +660,169 @@ def my_seller_orders(request: HttpRequest) -> HttpResponse:
     assert seller is not None
 
     return _json({"orders": orders.seller_orders(int(seller["id"]), ctx.locale)})
+
+
+# ── Поставки продавца на склад (savdex/market/warehouse.py) ─────────
+
+
+@_get
+def my_warehouses(request: HttpRequest) -> HttpResponse:
+    """Склады, куда продавец может везти поставку."""
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    _, refused = _seller_ctx(ctx)
+
+    if refused is not None:
+        return refused
+
+    return _json({"warehouses": warehouse.warehouses()})
+
+
+@_get
+def my_supplies(request: HttpRequest) -> HttpResponse:
+    """Поставки продавца — только свои."""
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    seller, refused = _seller_ctx(ctx)
+
+    if refused is not None:
+        return refused
+
+    assert seller is not None
+
+    return _json({"supplies": warehouse.supplies_of(seller, ctx.locale)})
+
+
+@form()
+def my_supply_create(request: HttpRequest) -> HttpResponse:
+    """
+    POST {warehouse, expectedAt?, note?, items: [{variantId, quantity}],
+    submit?}: заявка на поставку (черновик; submit: true — сразу на склад).
+    """
+    ctx = action(request, auth=False, throttle=20, throttle_prefix="market-supply")
+    seller, refused = _seller_ctx(ctx)
+
+    if refused is not None:
+        return refused
+
+    assert seller is not None and ctx.user is not None
+    data = input_of(request)
+
+    try:
+        with transaction.atomic():
+            number = warehouse.supply_create(seller, int(ctx.user["id"]), data)
+
+            if data.get("submit") is True:
+                warehouse.supply_submit(seller, number)
+    except orders.OrderRefused as refusal:
+        return _order_refused(ctx, refusal, int(ctx.user["id"]))
+
+    return _json(
+        {
+            "message": t("supply.created", ctx.locale),
+            "supply": warehouse.supply_detail(seller, number, ctx.locale),
+        },
+        201,
+    )
+
+
+def my_supply(request: HttpRequest, number: str) -> HttpResponse:
+    """GET — поставка; POST — правка до приёмки."""
+    if request.method == "POST":
+        return _my_supply_update(request, number)
+
+    return _my_supply_view(request, number)
+
+
+@form()
+def _my_supply_update(request: HttpRequest, number: str) -> HttpResponse:
+    """
+    POST {expectedAt?, note?, items: [{variantId, quantity}]}: изменить
+    поставку до приёмки — количество и новые строки; убрать строку нельзя.
+    """
+    ctx = action(request, auth=False, throttle=20, throttle_prefix="market-supply")
+    seller, refused = _seller_ctx(ctx)
+
+    if refused is not None:
+        return refused
+
+    assert seller is not None and ctx.user is not None
+
+    try:
+        warehouse.supply_update(seller, number, input_of(request))
+    except orders.OrderRefused as refusal:
+        return _order_refused(ctx, refusal, int(ctx.user["id"]))
+
+    return _json(
+        {
+            "message": t("supply.updated", ctx.locale),
+            "supply": warehouse.supply_detail(seller, number, ctx.locale),
+        }
+    )
+
+
+@_get
+def _my_supply_view(request: HttpRequest, number: str) -> HttpResponse:
+    """Поставка по номеру — только своя; чужая и несуществующая — 404."""
+    ctx = _reader(request)
+
+    if isinstance(ctx, HttpResponse):
+        return ctx
+
+    seller, refused = _seller_ctx(ctx)
+
+    if refused is not None:
+        return refused
+
+    assert seller is not None
+    found = warehouse.supply_detail(seller, number, ctx.locale)
+
+    if found is None:
+        return _message(ctx, "supply.not_found", 404)
+
+    return _json({"supply": found})
+
+
+def _supply_step(request: HttpRequest, number: str, step: str) -> HttpResponse:
+    ctx = action(request, auth=False, throttle=20, throttle_prefix="market-supply")
+    seller, refused = _seller_ctx(ctx)
+
+    if refused is not None:
+        return refused
+
+    assert seller is not None and ctx.user is not None
+
+    try:
+        (warehouse.supply_submit if step == "submit" else warehouse.supply_cancel)(seller, number)
+    except orders.OrderRefused as refusal:
+        return _order_refused(ctx, refusal, int(ctx.user["id"]))
+
+    return _json(
+        {
+            "message": t(
+                "supply.submitted" if step == "submit" else "supply.cancelled", ctx.locale
+            ),
+            "supply": warehouse.supply_detail(seller, number, ctx.locale),
+        }
+    )
+
+
+@form()
+def my_supply_submit(request: HttpRequest, number: str) -> HttpResponse:
+    """POST: отправить черновик поставки на склад."""
+    return _supply_step(request, number, "submit")
+
+
+@form()
+def my_supply_cancel(request: HttpRequest, number: str) -> HttpResponse:
+    """POST: отменить поставку — до приёмки."""
+    return _supply_step(request, number, "cancel")
 
 
 # ── Касса продавца: баланс и реквизиты ─────────────────────────────

@@ -311,6 +311,35 @@ def _python(code: str) -> str:
     return итог.stdout.strip().splitlines()[-1]
 
 
+def _до_выдачи(pk: int, сотрудник: int, *, выдать: bool = True) -> None:
+    """
+    Заказ — по шагам, как в жизни (savdex/market/warehouse.py): «в сборку»,
+    отгрузка с тестового склада (остаток на нём — от _товар) в пункт заказа
+    — только этот заказ, — приёмка в пункте и выдача по коду покупателя.
+    """
+    код = (
+        "from savdex.market import orders, warehouse\n"
+        "from savdex.market.common import one\n"
+        f"pk, uid = {pk}, {сотрудник}\n"
+        "o = one('select status, pickup_point_id from market_orders where id = %s', [pk])\n"
+        "if o['status'] in ('paid', 'cash_on_pickup'):\n"
+        "    assert orders.advance(pk, o['status'], actor_user_id=uid)\n"
+        "w = one(\"select id from market_warehouses where code = 'test-sklad'\")['id']\n"
+        "sid, _, _ = warehouse.shipment_create(w, o['pickup_point_id'], 'to_point', "
+        "actor_user_id=uid)\n"
+        "for other in warehouse.shipment_orders(sid):\n"
+        "    if other['id'] != pk:\n"
+        "        warehouse.shipment_remove(sid, other['id'])\n"
+        "warehouse.shipment_ship(sid, actor_user_id=uid)\n"
+        "warehouse.shipment_deliver(sid, actor_user_id=uid)\n"
+        f"if {выдать}:\n"
+        "    o = one('select id, status, ready_at from market_orders where id = %s', [pk])\n"
+        "    assert warehouse.issue(pk, warehouse.code_of(o), actor_user_id=uid) == 'issued'\n"
+        "print('ok')"
+    )
+    assert _python(код) == "ok"
+
+
 # ── Оформление ──────────────────────────────────────────────────────
 
 
@@ -893,20 +922,28 @@ def test_сотрудник_ведёт_заказ_до_выдачи(сайт, м
     _, карточка = django(администратор, ("get", f"/py/admin/market/order/{pk}/change/", None))
     assert "В сборку" in карточка["body"] and "Отменить заказ" in карточка["body"]
 
+    шаг = _шаг(администратор, pk, "to:cash_on_pickup:assembling", "склад BTS")
+    assert шаг["status"] == 302 and _статус(number) == "assembling"
+    запись = журнал("status_changed")
+    assert запись["section"] == "market_orders" and запись["subject_label"] == number
+    assert запись["changes"] == {
+        "before": {"status": "cash_on_pickup"},
+        "after": {"status": "assembling"},
+    }
+
+    # Дальше кнопок нет: «в пути» и «можно забрать» ставит отгрузка, «выдан»
+    # — код в пункте выдачи (test_market_stock.py)
+    for мимо in ("to:assembling:in_transit", "to:in_transit:ready", "to:ready:issued"):
+        assert "Это решение уже недоступно" in _шаг(администратор, pk, мимо)["body"]
+        assert _статус(number) == "assembling"
+
+    _до_выдачи(pk, администратор)
     цепочка = [
         ("cash_on_pickup", "assembling"),
         ("assembling", "in_transit"),
         ("in_transit", "ready"),
         ("ready", "issued"),
     ]
-
-    for before, after in цепочка:
-        шаг = _шаг(администратор, pk, f"to:{before}:{after}", "склад BTS")
-        assert шаг["status"] == 302
-        assert _статус(number) == after
-        запись = журнал("status_changed")
-        assert запись["section"] == "market_orders" and запись["subject_label"] == number
-        assert запись["changes"] == {"before": {"status": before}, "after": {"status": after}}
 
     assert sql("select status from market_order_parts where order_id = %s", [pk]) == [("issued",)]
     assert sql(
@@ -967,7 +1004,7 @@ def test_сборка_не_истекает_и_отмена_сотруднико
 
 
 def test_неудачный_шаг_заказа_предупреждение(monkeypatch):
-    """Шаг не прошёл (статус уже сменили, остатка не хватило) — DecisionRefused, не «готово»."""
+    """Шаг не прошёл (статус уже сменили) — DecisionRefused, не «готово»."""
     import contextlib
     from types import SimpleNamespace
 
@@ -982,17 +1019,9 @@ def test_неудачный_шаг_заказа_предупреждение(mon
     monkeypatch.setattr(market_admin.orders, "advance", lambda *a, **k: False)
     monkeypatch.setattr(market_admin.orders, "staff_cancel", lambda *a, **k: None)
 
-    for решение in ("to:assembling:in_transit", "cancel:paid"):
+    for решение in ("to:paid:assembling", "cancel:paid"):
         with pytest.raises(market_admin.DecisionRefused, match="уже изменился"):
             раздел.decide(object(), заказ, решение, "", None)
-
-    def нехватка(*a: Any, **k: Any) -> bool:
-        raise orders.WriteOffError("нет остатка")
-
-    monkeypatch.setattr(market_admin.orders, "advance", нехватка)
-
-    with pytest.raises(market_admin.DecisionRefused, match="не выдан"):
-        раздел.decide(object(), заказ, "to:ready:issued", "", None)
 
 
 @нужна_база
@@ -1010,19 +1039,25 @@ def test_выдача_списывает_остаток_один_раз(сайт
     ]
     assert _сводка(товар) == 7
 
-    for before, after in (
-        ("cash_on_pickup", "assembling"),
-        ("assembling", "in_transit"),
-        ("in_transit", "ready"),
-    ):
-        assert _шаг(администратор, pk, f"to:{before}:{after}")["status"] == 302
-
-    # До выдачи остаток не тронут — только резерв
+    # Сборка, отгрузка, приёмка в пункте — до выдачи остаток не тронут,
+    # только резерв
+    _до_выдачи(pk, администратор, выдать=False)
+    assert _статус(number) == "ready"
     assert sql("select stock, reserved from market_product_variants where id = %s", [вариант]) == [
         (10, 3)
     ]
 
-    assert _шаг(администратор, pk, "to:ready:issued")["status"] == 302
+    код = _python(
+        "from savdex.market import warehouse\n"
+        "from savdex.market.common import one\n"
+        f"o = one('select id, status, ready_at from market_orders where id = %s', [{pk}])\n"
+        "print(warehouse.code_of(o))"
+    )
+    выдача = (
+        "from savdex.market import warehouse\n"
+        f"print(warehouse.issue({pk}, '{код}', actor_user_id={администратор}))"
+    )
+    assert _python(выдача) == "issued"
     assert _статус(number) == "issued"
     assert sql("select stock, reserved from market_product_variants where id = %s", [вариант]) == [
         (7, 0)
@@ -1035,10 +1070,12 @@ def test_выдача_списывает_остаток_один_раз(сайт
         [pk],
     ) == [(True, True)]
 
-    # Повтор шага — предупреждение, второй раз не списывает
-    повтор = _шаг(администратор, pk, "to:ready:issued")
-    assert 'class="warning"' in повтор["body"]
-    assert "Это решение уже недоступно" in повтор["body"]
+    # Выдача — движением «issue» со склада, откуда заказ приехал
+    assert sql("select kind, quantity from market_stock_movements where order_id = %s", [pk]) == [
+        ("issue", -3)
+    ]
+    # Повтор выдачи — заказ уже не ждёт, второй раз не списывает
+    assert _python(выдача) == "changed"
     # Резерв у выданного не снимается: его уже нет
     assert _python(f"from savdex.market import orders; print(orders.release_reserve({pk}))") == (
         "False"
