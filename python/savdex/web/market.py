@@ -5,9 +5,8 @@
 товара или продавца, строку отбора каталога, вкладку кабинета. Сами
 данные страница берёт запросами к /market/api/… (savdex/market/api.py,
 docs/marketplace.md): каталог, товар, корзина, избранное, заявка
-продавца, «Мои товары». Заказов, склада и кассы на сервере ещё нет —
-оформление, «Мои заказы» и часть кабинета продавца пока показывают
-образцы.
+продавца, «Мои товары», оформление и заказы, касса продавца. Склада на
+сервере ещё нет — поставки в кабинете продавца пока образец.
 
 Пока маркетплейс не запущен, страницы закрыты от поисковиков, а на
 боевом (APP_ENV=production) не открываются вовсе.
@@ -79,6 +78,13 @@ def checkout(request: HttpRequest) -> HttpResponse:
 
 def orders(request: HttpRequest) -> HttpResponse:
     return _page(request, "market/Orders", "Мои заказы · SavdEx Market", {})
+
+
+def order(request: HttpRequest, number: str) -> HttpResponse:
+    """Один заказ: сюда же возвращает покупателя страница оплаты провайдера."""
+    return _page(
+        request, "market/Order", "Заказ · SavdEx Market", {"number": number.strip().upper()}
+    )
 
 
 def shop(request: HttpRequest, slug: str) -> HttpResponse:

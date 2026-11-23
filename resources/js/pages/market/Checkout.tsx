@@ -1,65 +1,75 @@
 import { router, usePage } from '@inertiajs/react';
 import { Banknote, CreditCard } from 'lucide-react';
 import { useState, type FormEvent } from 'react';
+import { MarketPhoto } from '@/components/market/MarketPhoto';
 import { Link } from '@/components/ui/Link';
 import { MarketLayout } from '@/layouts/MarketLayout';
-import { MarketPhoto } from '@/components/market/MarketPhoto';
+import { localize } from '@/lib/locale';
+import { api, ApiError, useApi } from '@/market/api';
 import { sum } from '@/market/format';
-import { itemOf, placeOrder, pointOf, POINTS } from '@/market/orders';
-import { cartLines, setCartQuantity, useCart } from '@/market/store';
+import { payByCard } from '@/market/orders';
+import { cartLines, notify, putCart, reloadCart, useCart } from '@/market/store';
+import type { CartSummary, OrderDetail, PickupPoint } from '@/market/types';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
 
 /**
- * Врезка OpenStreetMap с отметкой пункта — как у карты офиса
- * (components/OfficeMap): без ключа API и стороннего скрипта.
- */
-function mapSrc(lat: number, lng: number): string {
-    const dx = 0.012;
-    const dy = 0.007;
-
-    return `https://www.openstreetmap.org/export/embed.html?bbox=${lng - dx}%2C${lat - dy}%2C${lng + dx}%2C${lat + dy}&layer=mapnik&marker=${lat}%2C${lng}`;
-}
-
-/**
- * Оформление заказа: получатель, пункт выдачи (список и карта), способ
- * оплаты. Купить можно только с входом. Товары и цены — из настоящей
- * корзины на сервере; сам заказ пока демо: сервер заказов ещё не готов,
- * поэтому он сохраняется в браузере (market/orders.ts), а оплата не
- * списывается.
+ * Оформление заказа: пункт выдачи и способ оплаты (/market/api/checkout).
+ *
+ * Получатель — владелец аккаунта: отдельно имя и телефон не спрашиваем. Сервер сверяет сумму, которую видел
+ * покупатель (expectedTotal): цена изменилась или товар кончился — 409 и
+ * свежая корзина, покупатель видит новую сумму и подтверждает ещё раз.
+ * Картой — после заказа сразу страница оплаты провайдера; при получении —
+ * страница заказа.
  */
 export default function MarketCheckout() {
     const { auth } = usePage<SharedProps>().props;
     const cart = useCart();
-    const [sending, setSending] = useState(false);
-    const [name, setName] = useState(auth.user?.name ?? '');
-    const [phone, setPhone] = useState('');
-    const [point, setPoint] = useState(POINTS[0].id);
-    // Карта — сторонний сервер (OSM, за рубежом): грузим только по просьбе
-    // покупателя, без Referer и в песочнице — выбор пункта сам не уходит
-    const [showMap, setShowMap] = useState(false);
+    const points = useApi<{ pickupPoints: PickupPoint[] }>(auth.user ? 'pickup-points' : null);
+    const [point, setPoint] = useState<string | null>(null);
     const [payment, setPayment] = useState<'card' | 'cash'>('card');
-    const [tried, setTried] = useState(false);
+    const [errors, setErrors] = useState<Record<string, string[]>>({});
+    const [sending, setSending] = useState(false);
 
-    const lines = cartLines(cart).filter((line) => line.buyable);
+    const list = points.data?.pickupPoints ?? [];
+    const chosen = list.find((p) => p.code === point) ?? null;
+    const lines = cartLines(cart).filter((line) => line.buyable && line.available > 0);
     const total = cart?.total ?? 0;
-    const chosen = pointOf(point);
-    const phoneOk = phone.replace(/\D/g, '').length >= 9;
-    const nameOk = name.trim().length > 1;
+    const left = cartLines(cart).length - lines.length;
 
     async function submit(event: FormEvent) {
         event.preventDefault();
-        setTried(true);
 
-        if (!phoneOk || !nameOk || sending) return;
+        if (!chosen) {
+            setErrors({ pickupPoint: ['Выберите пункт выдачи'] });
+
+            return;
+        }
 
         setSending(true);
-        placeOrder(lines.map(itemOf), point, payment);
+        setErrors({});
 
-        // Купленное уходит из корзины — как после настоящего заказа
-        for (const line of lines) await setCartQuantity(line.variantId, 0);
+        try {
+            const { order } = await api<{ message: string; order: OrderDetail }>('checkout', {
+                body: { pickupPoint: chosen.code, paymentMethod: payment, expectedTotal: total },
+            });
 
-        router.get(`${routes.marketOrders}?new=1`);
+            await reloadCart();
+
+            if (payment === 'card' && (await payByCard(order.number))) return;
+
+            router.visit(localize(routes.marketOrder(order.number)));
+        } catch (failure) {
+            if (failure instanceof ApiError) {
+                setErrors(failure.errors);
+                notify(failure.message, true);
+
+                // Цена или остаток изменились: сервер прислал свежую корзину
+                if (failure.status === 409 && failure.data.cart) putCart(failure.data.cart as CartSummary);
+            }
+        } finally {
+            setSending(false);
+        }
     }
 
     const shell = (children: React.ReactNode) => (
@@ -88,9 +98,7 @@ export default function MarketCheckout() {
         );
     }
 
-    if (cart === null) {
-        return shell(<div className="mk-skel-block" style={{ height: 320 }} aria-busy />);
-    }
+    if (cart === null) return shell(<div className="mk-skel-block" style={{ height: 320 }} aria-busy />);
 
     if (lines.length === 0) {
         return shell(
@@ -106,82 +114,44 @@ export default function MarketCheckout() {
     }
 
     return shell(
-        <form className="mk-checkout" onSubmit={submit} noValidate>
+        <form className="mk-checkout" onSubmit={(event) => void submit(event)} noValidate>
             <div>
                 <section className="mk-panel">
                     <h2 className="mk-step-title">
-                        <i>1</i> Получатель
+                        <i>1</i> Пункт выдачи
                     </h2>
-                    <div className="mk-form mk-form--2">
-                        <label className="mk-field">
-                            Имя
-                            <input id="mk-name" value={name} onChange={(e) => setName(e.target.value)} autoComplete="name" />
-                            {tried && !nameOk && <small className="is-error">Укажите имя — его назовут в пункте выдачи</small>}
-                        </label>
-                        <label className="mk-field">
-                            Телефон
-                            <input
-                                id="mk-phone"
-                                type="tel"
-                                inputMode="tel"
-                                placeholder="+998 90 123 45 67"
-                                value={phone}
-                                onChange={(e) => setPhone(e.target.value)}
-                                autoComplete="tel"
-                            />
-                            {tried && !phoneOk ? (
-                                <small className="is-error">Укажите телефон — на него придёт код выдачи</small>
-                            ) : (
-                                <small>На него придёт сообщение с кодом выдачи</small>
-                            )}
-                        </label>
-                    </div>
-                </section>
-
-                <section className="mk-panel">
-                    <h2 className="mk-step-title">
-                        <i>2</i> Пункт выдачи
-                    </h2>
-                    <div className="mk-pickup">
-                        <div className="mk-points" role="radiogroup" aria-label="Пункты выдачи BTS в Ташкенте">
-                            {POINTS.map((p) => (
-                                <label key={p.id} className="mk-choice">
-                                    <input type="radio" name="point" checked={point === p.id} onChange={() => setPoint(p.id)} />
+                    {points.loading && <div className="mk-skel-block" style={{ height: 180 }} aria-busy />}
+                    {points.error && (
+                        <div className="mk-failed">
+                            <p>Пункты выдачи не загрузились. {points.error}</p>
+                            <button type="button" className="mk-btn" onClick={points.reload}>
+                                Повторить
+                            </button>
+                        </div>
+                    )}
+                    {points.data && list.length === 0 && <p className="mk-note">Пунктов выдачи пока нет — оформить заказ не получится. Загляните позже.</p>}
+                    {list.length > 0 && (
+                        <div className="mk-points mk-points--wide" role="radiogroup" aria-label="Пункты выдачи BTS">
+                            {list.map((p) => (
+                                <label key={p.code} className="mk-choice">
+                                    <input type="radio" name="point" checked={point === p.code} onChange={() => setPoint(p.code)} />
                                     <span>
                                         <b>{p.name}</b>
                                         <small>
-                                            {p.district}, {p.address}
+                                            {p.city}, {p.address}
                                         </small>
-                                        <small>{p.hours}</small>
                                     </span>
                                 </label>
                             ))}
                         </div>
-                        <div className="mk-map">
-                            {showMap ? (
-                                <iframe
-                                    key={chosen.id}
-                                    title={`Карта: ${chosen.name}`}
-                                    src={mapSrc(chosen.lat, chosen.lng)}
-                                    loading="lazy"
-                                    referrerPolicy="no-referrer"
-                                    sandbox="allow-scripts allow-same-origin"
-                                />
-                            ) : (
-                                <button type="button" className="mk-btn mk-btn--ghost" onClick={() => setShowMap(true)}>
-                                    Показать на карте
-                                </button>
-                            )}
-                            <p>
-                                {chosen.name} · {chosen.address}. Доставки до двери пока нет — заказ забирают в пункте.
-                            </p>
-                        </div>
-                    </div>
+                    )}
+                    {errors.pickupPoint?.[0] && <p className="mk-line__warn">{errors.pickupPoint[0]}</p>}
+                    <p className="mk-note">Доставки до двери пока нет — заказ забирают в пункте. Часы работы и карта пунктов появятся позже.</p>
                 </section>
 
                 <section className="mk-panel">
                     <h2 className="mk-step-title">
-                        <i>3</i> Способ оплаты
+                        <i>2</i> Способ оплаты
                     </h2>
                     <div className="mk-pay" role="radiogroup" aria-label="Способ оплаты">
                         <label className="mk-choice">
@@ -190,7 +160,7 @@ export default function MarketCheckout() {
                                 <b>
                                     <CreditCard size={16} aria-hidden style={{ display: 'inline', verticalAlign: '-3px' }} /> Картой онлайн
                                 </b>
-                                <small>Uzcard, Humo, Visa, Mastercard — через Uzum</small>
+                                <small>Uzcard, Humo, Visa, Mastercard — на странице платёжной системы</small>
                             </span>
                         </label>
                         <label className="mk-choice">
@@ -203,6 +173,7 @@ export default function MarketCheckout() {
                             </span>
                         </label>
                     </div>
+                    {errors.paymentMethod?.[0] && <p className="mk-line__warn">{errors.paymentMethod[0]}</p>}
                 </section>
             </div>
 
@@ -219,7 +190,7 @@ export default function MarketCheckout() {
                 ))}
                 <dl>
                     <div>
-                        <dt>Выдача в {chosen.name}</dt>
+                        <dt>{chosen ? `Выдача: ${chosen.name}` : 'Выдача в пункте BTS'}</dt>
                         <dd>0 сум</dd>
                     </div>
                     <div className="is-total">
@@ -227,12 +198,12 @@ export default function MarketCheckout() {
                         <dd>{sum(total)} сум</dd>
                     </div>
                 </dl>
-                <button type="submit" className="mk-btn mk-btn--block" disabled={sending}>
-                    {payment === 'card' ? 'Оплатить и оформить' : 'Оформить заказ'}
+                <button type="submit" className="mk-btn mk-btn--block" disabled={sending || list.length === 0}>
+                    {payment === 'card' ? 'Оформить и оплатить' : 'Оформить заказ'}
                 </button>
                 <p className="mk-note">
-                    Раздел в разработке: оплата не списывается, заказ сохраняется только в этом браузере. Товары и цены — настоящие, из
-                    вашей корзины.
+                    Получатель — владелец аккаунта: имя и телефон берём из него. Статус заказа — в «Моих заказах».
+                    {left > 0 && ' Товары без наличия останутся в корзине.'}
                 </p>
             </aside>
         </form>,

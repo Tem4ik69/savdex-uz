@@ -123,6 +123,11 @@ urlpatterns = [
     re_path(r"^(?:(?:uz|en|zh|tr)/)?market/checkout$", market.checkout, name="market.checkout"),
     re_path(r"^(?:(?:uz|en|zh|tr)/)?market/orders$", market.orders, name="market.orders"),
     re_path(
+        r"^(?:(?:uz|en|zh|tr)/)?market/orders/(?P<number>[0-9A-Za-z]{8,16})$",
+        market.order,
+        name="market.order",
+    ),
+    re_path(
         r"^(?:(?:uz|en|zh|tr)/)?market/shop/(?P<slug>[a-z0-9-]{1,80})$",
         market.shop,
         name="market.shop",

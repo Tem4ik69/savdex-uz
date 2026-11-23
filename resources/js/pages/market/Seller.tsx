@@ -2,14 +2,16 @@ import { usePage } from '@inertiajs/react';
 import { Plus, Trash2, X } from 'lucide-react';
 import { useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
 import { MarketPhoto } from '@/components/market/MarketPhoto';
+import { StatusPill } from '@/components/market/OrderView';
 import { Link } from '@/components/ui/Link';
 import { cn } from '@/lib/cn';
 import { MarketLayout } from '@/layouts/MarketLayout';
 import { api, ApiError, useApi } from '@/market/api';
 import { sum } from '@/market/format';
-import { COMMISSION, SAMPLE_ORDERS, SAMPLE_SUPPLIES } from '@/market/seller';
+import { when } from '@/market/orders';
+import { SAMPLE_SUPPLIES } from '@/market/seller';
 import { notify, useCategories } from '@/market/store';
-import type { MarketCategory, MyProduct, MyProductDetail, MyVariant, ProductStatus } from '@/market/types';
+import type { MarketCategory, MyProduct, MyProductDetail, MyVariant, ProductStatus, SellerBalance, SellerOrder } from '@/market/types';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
 
@@ -35,9 +37,9 @@ const day = (iso: string) => new Date(`${iso}T12:00:00`).toLocaleDateString('ru-
 /**
  * Кабинет продавца. «Мои товары» и «Остатки» — с сервера
  * (/market/api/me/products): добавить, изменить, загрузить фото,
- * отправить на продажу, снять. Поставки, заказы и начисления сервер
- * ещё не ведёт (склад, заказы и касса — следующие этапы) — там образцы
- * с пометкой. Открыт только подтверждённому продавцу: остальным сервер
+ * отправить на продажу, снять. Заказы и начисления — тоже с сервера
+ * (me/orders, me/balance). Поставки сервер ещё не ведёт (склад BTS —
+ * следующий этап) — там образец с пометкой. Открыт только подтверждённому продавцу: остальным сервер
  * отвечает «нельзя», и страница ведёт к заявке.
  */
 export default function MarketSeller({ tab }: { tab: string }) {
@@ -640,94 +642,144 @@ function Supplies() {
     );
 }
 
+/** Заказы с товарами продавца (/market/api/me/orders): только его части, о покупателе — имя. */
 function Orders() {
+    const { data, loading, error, reload } = useApi<{ orders: SellerOrder[] }>('me/orders');
+
     return (
         <>
             <div className="mk-bar">
                 <h2>Заказы с вашими товарами</h2>
             </div>
-            <Sample>раздел появится вместе с заказами. Телефон покупателя продавцу не показывается — только имя и номер заказа.</Sample>
-            <div className="mk-table-wrap">
-                <table className="mk-table">
-                    <thead>
-                        <tr>
-                            <th>Заказ</th>
-                            <th>Дата</th>
-                            <th>Товар</th>
-                            <th className="is-num">Кол-во</th>
-                            <th className="is-num">Сумма</th>
-                            <th>Покупатель</th>
-                            <th>Статус</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {SAMPLE_ORDERS.map((o) => (
-                            <tr key={o.id}>
-                                <td>{o.id}</td>
-                                <td>{day(o.date)}</td>
-                                <td>{o.title}</td>
-                                <td className="is-num">{o.quantity}</td>
-                                <td className="is-num">{sum(o.sum)} сум</td>
-                                <td>{o.buyer}</td>
-                                <td>
-                                    <span className={cn('mk-pill', o.status === 'Выдан' && 'mk-pill--ok', o.status === 'Отменён' && 'mk-pill--off')}>{o.status}</span>
-                                </td>
+            <Loading loading={loading} error={error} reload={reload} />
+            {data && data.orders.length === 0 && (
+                <div className="mk-empty">
+                    <span aria-hidden>🧾</span>
+                    <h2>Заказов пока нет</h2>
+                    <p>Когда покупатель оформит заказ с вашим товаром, он появится здесь.</p>
+                </div>
+            )}
+            {data && data.orders.length > 0 && (
+                <div className="mk-table-wrap">
+                    <table className="mk-table">
+                        <thead>
+                            <tr>
+                                <th>Заказ</th>
+                                <th>Дата</th>
+                                <th>Товары</th>
+                                <th>Покупатель</th>
+                                <th>Пункт выдачи</th>
+                                <th className="is-num">Сумма</th>
+                                <th className="is-num">Вам</th>
+                                <th>Статус</th>
                             </tr>
-                        ))}
-                    </tbody>
-                </table>
-            </div>
+                        </thead>
+                        <tbody>
+                            {data.orders.map((o) => (
+                                <tr key={o.number}>
+                                    <td>{o.number}</td>
+                                    <td>{when(o.createdAt)}</td>
+                                    <td>{o.items.map((item) => `${item.title} × ${item.quantity}`).join(', ')}</td>
+                                    <td>{o.buyer.name}</td>
+                                    <td>{o.pickupPoint.name}</td>
+                                    <td className="is-num">{sum(o.total)} сум</td>
+                                    <td className="is-num">{sum(o.payout)} сум</td>
+                                    <td>
+                                        <StatusPill status={o.status} />
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+            <p className="mk-hint">Собирает и выдаёт заказ склад и пункт выдачи. Телефон покупателя продавцу не показывается — только имя и номер заказа. «Вам» — после комиссии площадки.</p>
         </>
     );
 }
 
+/** Касса продавца (/market/api/me/balance): начислено, держится, доступно, выплаты. */
 function Payouts() {
-    const paid = SAMPLE_ORDERS.filter((o) => o.status === 'Выдан');
-    const gross = paid.reduce((s, o) => s + o.sum, 0);
-    const net = Math.round((gross * (100 - COMMISSION)) / 100);
+    const { data, loading, error, reload } = useApi<{ balance: SellerBalance }>('me/balance');
+    const balance = data?.balance;
 
     return (
         <>
             <div className="mk-bar">
                 <h2>Начисления</h2>
             </div>
-            <Sample>раздел появится вместе с кассой маркетплейса. Процент комиссии ({COMMISSION}%) условный — он ещё не определён.</Sample>
-            <div className="mk-table-wrap">
-                <table className="mk-table">
-                    <thead>
-                        <tr>
-                            <th>Дата</th>
-                            <th>Заказ</th>
-                            <th className="is-num">Сумма заказа</th>
-                            <th className="is-num">Комиссия</th>
-                            <th className="is-num">Вам</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {paid.map((o) => {
-                            const fee = Math.round((o.sum * COMMISSION) / 100);
-
-                            return (
-                                <tr key={o.id}>
-                                    <td>{day(o.date)}</td>
-                                    <td>{o.id}</td>
-                                    <td className="is-num">{sum(o.sum)} сум</td>
-                                    <td className="is-num">−{sum(fee)} сум</td>
-                                    <td className="is-num">{sum(o.sum - fee)} сум</td>
-                                </tr>
-                            );
-                        })}
-                    </tbody>
-                    <tfoot>
-                        <tr>
-                            <td colSpan={2}>К выплате</td>
-                            <td className="is-num">{sum(gross)} сум</td>
-                            <td className="is-num">−{sum(gross - net)} сум</td>
-                            <td className="is-num">{sum(net)} сум</td>
-                        </tr>
-                    </tfoot>
-                </table>
-            </div>
+            <Loading loading={loading} error={error} reload={reload} />
+            {balance && (
+                <>
+                    <div className="mk-kpis">
+                        <div className="mk-kpi">
+                            <small>Начислено всего</small>
+                            <b>{sum(balance.accrued)} сум</b>
+                        </div>
+                        <div className="mk-kpi">
+                            <small>Держится</small>
+                            <b>{sum(balance.onHold)} сум</b>
+                            <span>заказ не выдан или идёт срок на возврат ({balance.holdDays} дн.)</span>
+                        </div>
+                        <div className="mk-kpi">
+                            <small>Доступно к выплате</small>
+                            <b>{sum(balance.available)} сум</b>
+                        </div>
+                        <div className="mk-kpi">
+                            <small>Выплачено</small>
+                            <b>{sum(balance.paid)} сум</b>
+                            {balance.inWork > 0 && <span>в работе: {sum(balance.inWork)} сум</span>}
+                        </div>
+                    </div>
+                    <h3 className="mk-subhead">Выплаты</h3>
+                    {balance.payouts.length === 0 ? (
+                        <p className="mk-hint">Выплат пока не было.</p>
+                    ) : (
+                        <div className="mk-table-wrap">
+                            <table className="mk-table">
+                                <thead>
+                                    <tr>
+                                        <th>Создана</th>
+                                        <th className="is-num">Сумма</th>
+                                        <th>Статус</th>
+                                        <th>Выплачена</th>
+                                        <th>Платёжка</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {balance.payouts.map((p) => (
+                                        <tr key={p.id}>
+                                            <td>{when(p.createdAt)}</td>
+                                            <td className="is-num">{sum(p.amount)} сум</td>
+                                            <td>
+                                                <span className="mk-pill">{p.status.text}</span>
+                                            </td>
+                                            <td>{when(p.paidAt) || '—'}</td>
+                                            <td>{p.bankReference ?? '—'}</td>
+                                        </tr>
+                                    ))}
+                                </tbody>
+                            </table>
+                        </div>
+                    )}
+                </>
+            )}
+            <p className="mk-hint">Начисление появляется после оплаты заказа и становится доступным к выплате, когда заказ выдан и прошёл срок на возврат. Выплаты проводит касса площадки.</p>
         </>
+    );
+}
+
+function Loading({ loading, error, reload }: { loading: boolean; error: string | null; reload: () => void }) {
+    if (loading) return <div className="mk-skel-block" style={{ height: 200 }} aria-busy />;
+
+    if (!error) return null;
+
+    return (
+        <div className="mk-failed">
+            <p>{error}</p>
+            <button type="button" className="mk-btn" onClick={reload}>
+                Повторить
+            </button>
+        </div>
     );
 }

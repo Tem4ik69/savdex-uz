@@ -185,3 +185,17 @@ export function findCategory(tree: MarketCategory[] | null, slug: string): { nod
 
     return tree ? walk(tree, '') : null;
 }
+
+/** Перечитать корзину с сервера — после заказа часть строк из неё ушла. */
+export async function reloadCart(): Promise<void> {
+    try {
+        set({ cart: await api<CartSummary>('cart', { loginRedirect: false }) });
+    } catch {
+        // Не прочиталась — значок обновится на следующей странице
+    }
+}
+
+/** Положить в общее состояние корзину из ответа сервера (409 при оформлении присылает свежую). */
+export function putCart(cart: CartSummary): void {
+    set({ cart });
+}

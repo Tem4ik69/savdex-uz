@@ -42,6 +42,7 @@ def сайт() -> Iterator[str]:
         ("/market/cart", "market/Cart"),
         ("/market/checkout", "market/Checkout"),
         ("/market/orders", "market/Orders"),
+        ("/market/orders/AB23CD45EF", "market/Order"),
         ("/market/shop/technomir", "market/Shop"),
         ("/tr/market/sell", "market/Sell"),
         ("/market/seller", "market/Seller"),
@@ -141,3 +142,9 @@ def test_пункт_в_шапке_есть_везде_кроме_боевого(
     боевой = открыть(сайт, "/about", env={"APP_ENV": "production", "DJANGO_ALLOWED_HOSTS": "*"})
 
     assert страница(боевой["body"])["props"]["market"] is False
+
+
+def test_заказ_получает_номер_заглавными(сайт):
+    д = открыть(сайт, "/market/orders/ab23cd45ef")
+
+    assert страница(д["body"])["props"]["number"] == "AB23CD45EF"

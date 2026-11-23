@@ -179,3 +179,78 @@ export interface MyProductDetail {
     variants: MyVariant[];
     images: MarketImage[];
 }
+
+export interface PickupPoint {
+    code: string;
+    name: string;
+    address: string;
+    city: string;
+}
+
+/** Статус с сервера: код для логики и текст на языке страницы. */
+export interface OrderStatusView {
+    code: 'created' | 'paid' | 'cash_on_pickup' | 'assembling' | 'in_transit' | 'ready' | 'issued' | 'cancelled' | 'refund_pending' | 'refunded';
+    text: string;
+}
+
+/** Заказ в списке «Мои заказы». */
+export interface OrderSummary {
+    number: string;
+    status: OrderStatusView;
+    paymentMethod: 'card' | 'cash';
+    total: number;
+    count: number;
+    pickupPoint: { name: string; address: string };
+    createdAt: string | null;
+}
+
+export interface OrderItem {
+    variantId: number;
+    title: string;
+    slug: string;
+    image: string | null;
+    options: Record<string, string>;
+    quantity: number;
+    price?: number;
+    total?: number;
+}
+
+/** Заказ целиком: части по продавцам, суммы, можно ли отменить. */
+export interface OrderDetail {
+    number: string;
+    status: OrderStatusView;
+    paymentMethod: 'card' | 'cash';
+    pickupPoint: { name: string; address: string };
+    itemsTotal: number;
+    delivery: number;
+    total: number;
+    parts: { seller: { slug: string; name: string }; status: OrderStatusView; total: number; items: OrderItem[] }[];
+    canCancel: boolean;
+    createdAt: string | null;
+    paidAt: string | null;
+    cancelledAt: string | null;
+    issuedAt: string | null;
+}
+
+/** Часть заказа у продавца: о покупателе — только имя (ТЗ, раздел 10). */
+export interface SellerOrder {
+    number: string;
+    status: OrderStatusView;
+    buyer: { name: string };
+    pickupPoint: { name: string };
+    total: number;
+    commission: number;
+    payout: number;
+    items: OrderItem[];
+    createdAt: string | null;
+}
+
+export interface SellerBalance {
+    accrued: number;
+    onHold: number;
+    available: number;
+    inWork: number;
+    paid: number;
+    holdDays: number;
+    payouts: { id: number; amount: number; status: { code: string; text: string }; bankReference: string | null; createdAt: string | null; paidAt: string | null }[];
+}
