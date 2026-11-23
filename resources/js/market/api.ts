@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { localize } from '@/lib/locale';
+import { lang } from '@/market/lang';
+import { commonText } from '@/market/text/common';
 
 /**
  * Запросы к серверу маркетплейса — /market/api/… (docs/marketplace.md).
@@ -21,7 +23,8 @@ export class ApiError extends Error {
     }
 }
 
-const FALLBACK = 'Не получилось выполнить запрос. Проверьте связь и попробуйте ещё раз.';
+/** Общее сообщение об ошибке — на языке страницы в момент ошибки. */
+const fallback = (): string => lang(commonText).requestFailed;
 
 function token(): Record<string, string> {
     const value = document.cookie.match(/XSRF-TOKEN=([^;]+)/)?.[1];
@@ -64,7 +67,7 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
     } catch (error) {
         if (error instanceof DOMException && error.name === 'AbortError') throw error;
 
-        throw new ApiError(FALLBACK, 0);
+        throw new ApiError(fallback(), 0);
     }
 
     const data = ((await response.json().catch(() => null)) ?? {}) as Record<string, unknown>;
@@ -76,7 +79,7 @@ export async function api<T>(path: string, options: Options = {}): Promise<T> {
     }
 
     throw new ApiError(
-        typeof data.message === 'string' && data.message ? data.message : FALLBACK,
+        typeof data.message === 'string' && data.message ? data.message : fallback(),
         response.status,
         (data.errors as Record<string, string[]> | undefined) ?? {},
         data,
@@ -127,7 +130,7 @@ export function useApi<T>(path: string | null): Loaded<T> {
             .catch((error: unknown) => {
                 if (controller.signal.aborted || !alive.current) return;
 
-                const failure = error instanceof ApiError ? error : new ApiError(FALLBACK, 0);
+                const failure = error instanceof ApiError ? error : new ApiError(fallback(), 0);
 
                 setState({ path, data: null, error: failure.message, status: failure.status });
             });

@@ -70,6 +70,7 @@ export const routes = {
     get marketOrders() {
         return `${marketBase}/orders`;
     },
+    marketOrder: (number: string) => `${marketBase}/orders/${number}`,
     marketShop: (slug: string) => `${marketBase}/shop/${slug}`,
     get marketSell() {
         return `${marketBase}/sell`;

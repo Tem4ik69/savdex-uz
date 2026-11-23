@@ -5,7 +5,10 @@ import { Link } from '@/components/ui/Link';
 import { cn } from '@/lib/cn';
 import { MarketLayout } from '@/layouts/MarketLayout';
 import { sum } from '@/market/format';
+import { lang } from '@/market/lang';
 import { setCartQuantity, useCart } from '@/market/store';
+import { cartText } from '@/market/text/cart';
+import { commonText } from '@/market/text/common';
 import type { CartLine } from '@/market/types';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
@@ -23,18 +26,20 @@ export const optionsText = (options: Record<string, string>): string =>
  * уже нет в наличии, остаётся в списке с пометкой, но в итог не входит.
  */
 export default function MarketCart() {
+    const L = lang(cartText);
+    const C = lang(commonText);
     const { auth } = usePage<SharedProps>().props;
     const cart = useCart();
 
     const shell = (children: React.ReactNode, count?: number) => (
-        <MarketLayout title="Корзина · SavdEx Market" tab="cart">
+        <MarketLayout title={L.pageTitle} tab="cart">
             <div className="mk-in">
-                <nav className="mk-bc" aria-label="Путь">
-                    <Link href={routes.market}>Главная</Link>› Корзина
+                <nav className="mk-bc" aria-label={L.breadcrumbs}>
+                    <Link href={routes.market}>{L.home}</Link>› {L.title}
                 </nav>
                 <div className="mk-title">
-                    <h1>Корзина</h1>
-                    {count ? <span>{count} шт.</span> : null}
+                    <h1>{L.title}</h1>
+                    {count ? <span>{L.pieces(count)}</span> : null}
                 </div>
                 {children}
             </div>
@@ -44,10 +49,10 @@ export default function MarketCart() {
     if (!auth.user) {
         return shell(
             <div className="mk-gate">
-                <h2>Войдите, чтобы пользоваться корзиной</h2>
-                <p>Корзина хранится в вашем аккаунте: она не пропадёт и откроется с любого устройства. Смотреть каталог можно и без входа.</p>
+                <h2>{L.gateTitle}</h2>
+                <p>{L.gateText}</p>
                 <Link href={routes.loginBack(routes.marketCart)} className="mk-btn">
-                    Войти или зарегистрироваться
+                    {L.loginOrRegister}
                 </Link>
             </div>,
         );
@@ -73,10 +78,10 @@ export default function MarketCart() {
         return shell(
             <div className="mk-empty">
                 <span aria-hidden>🛒</span>
-                <h2>В корзине пока пусто</h2>
-                <p>Добавьте товары из каталога — они сохранятся в вашем аккаунте.</p>
+                <h2>{L.emptyTitle}</h2>
+                <p>{L.emptyText}</p>
                 <Link href={routes.marketCatalog} className="mk-btn">
-                    Перейти в каталог
+                    {L.toCatalog}
                 </Link>
             </div>,
         );
@@ -93,7 +98,7 @@ export default function MarketCart() {
                     <div key={part.seller.slug}>
                         <div className="mk-part">
                             <Link href={routes.marketShop(part.seller.slug)}>{part.seller.name}</Link>
-                            <span>{sum(part.total)} сум</span>
+                            <span>{sum(part.total)} {C.currency}</span>
                         </div>
                         {part.items.map((line) => (
                             <Line key={line.variantId} line={line} />
@@ -102,38 +107,38 @@ export default function MarketCart() {
                 ))}
             </div>
 
-            <aside className="mk-sum" aria-label="Итог">
-                <h2>Ваш заказ</h2>
+            <aside className="mk-sum" aria-label={L.summary}>
+                <h2>{L.yourOrder}</h2>
                 <dl>
                     <div>
-                        <dt>Товары, {cart.count} шт.</dt>
-                        <dd>{sum(full)} сум</dd>
+                        <dt>{L.goods(cart.count)}</dt>
+                        <dd>{sum(full)} {C.currency}</dd>
                     </div>
                     {full > cart.total && (
                         <div className="is-save">
-                            <dt>Скидка</dt>
-                            <dd>−{sum(full - cart.total)} сум</dd>
+                            <dt>{L.discount}</dt>
+                            <dd>−{sum(full - cart.total)} {C.currency}</dd>
                         </div>
                     )}
                     <div>
-                        <dt>Выдача в пункте BTS</dt>
-                        <dd>0 сум</dd>
+                        <dt>{L.pickupBts}</dt>
+                        <dd>0 {C.currency}</dd>
                     </div>
                     <div className="is-total">
-                        <dt>Итого</dt>
-                        <dd>{sum(cart.total)} сум</dd>
+                        <dt>{L.total}</dt>
+                        <dd>{sum(cart.total)} {C.currency}</dd>
                     </div>
                 </dl>
                 {cart.count > 0 ? (
                     <Link href={routes.marketCheckout} className="mk-btn mk-btn--block">
-                        Перейти к оформлению
+                        {L.toCheckout}
                     </Link>
                 ) : (
                     <button type="button" className="mk-btn mk-btn--block" disabled>
-                        Перейти к оформлению
+                        {L.toCheckout}
                     </button>
                 )}
-                {unavailable > 0 && <p className="mk-note">Товары без наличия в заказ не попадут — их можно убрать или оставить на потом.</p>}
+                {unavailable > 0 && <p className="mk-note">{L.unavailableNote}</p>}
             </aside>
         </div>,
         cart.count,
@@ -141,6 +146,8 @@ export default function MarketCart() {
 }
 
 function Line({ line }: { line: CartLine }) {
+    const L = lang(cartText);
+    const C = lang(commonText);
     const [busy, setBusy] = useState(false);
     const variant = optionsText(line.options);
 
@@ -160,26 +167,26 @@ function Line({ line }: { line: CartLine }) {
                     <Link href={routes.marketProduct(line.slug)}>{line.title}</Link>
                 </h3>
                 {variant && <small>{variant}</small>}
-                {!line.buyable && <div className="mk-line__warn">Нет в наличии</div>}
-                {line.buyable && line.quantity > line.available && <div className="mk-line__warn">В наличии только {line.available} шт.</div>}
+                {!line.buyable && <div className="mk-line__warn">{L.outOfStock}</div>}
+                {line.buyable && line.quantity > line.available && <div className="mk-line__warn">{L.onlyLeft(line.available)}</div>}
                 <div className="mk-line__ctl">
                     <div className="mk-qty">
-                        <button type="button" aria-label="Меньше" disabled={busy || line.quantity <= 1} onClick={() => void change(line.quantity - 1)}>
+                        <button type="button" aria-label={L.less} disabled={busy || line.quantity <= 1} onClick={() => void change(line.quantity - 1)}>
                             −
                         </button>
-                        <output aria-label="Количество">{line.quantity}</output>
-                        <button type="button" aria-label="Больше" disabled={busy || !line.buyable || line.quantity >= line.available} onClick={() => void change(line.quantity + 1)}>
+                        <output aria-label={L.quantity}>{line.quantity}</output>
+                        <button type="button" aria-label={L.more} disabled={busy || !line.buyable || line.quantity >= line.available} onClick={() => void change(line.quantity + 1)}>
                             +
                         </button>
                     </div>
                     <button type="button" className="mk-line__del" disabled={busy} onClick={() => void change(0)}>
-                        Удалить
+                        {L.remove}
                     </button>
                 </div>
             </div>
             <div className="mk-line__sum">
-                {sum(line.total)} сум
-                {line.oldPrice && line.buyable && <s>{sum(line.oldPrice * Math.min(line.quantity, line.available))} сум</s>}
+                {sum(line.total)} {C.currency}
+                {line.oldPrice && line.buyable && <s>{sum(line.oldPrice * Math.min(line.quantity, line.available))} {C.currency}</s>}
             </div>
         </div>
     );

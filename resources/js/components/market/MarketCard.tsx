@@ -6,8 +6,10 @@ import { Link } from '@/components/ui/Link';
 import { cn } from '@/lib/cn';
 import { localize } from '@/lib/locale';
 import { rating, sum } from '@/market/format';
+import { lang } from '@/market/lang';
 import { addProductToCart, cartLines, toggleFavorite, useCart, useFavorites } from '@/market/store';
 import type { MarketProduct } from '@/market/types';
+import { cardText } from '@/market/text/card';
 import { routes } from '@/routes';
 
 /**
@@ -21,6 +23,7 @@ import { routes } from '@/routes';
  * открывает страницу товара. Гостя обе кнопки ведут на вход.
  */
 export function MarketCard({ product }: { product: MarketProduct }) {
+    const L = lang(cardText);
     const inCart = cartLines(useCart()).some((line) => line.productId === product.id);
     const liked = useFavorites().includes(product.id);
     const [busy, setBusy] = useState(false);
@@ -41,12 +44,12 @@ export function MarketCard({ product }: { product: MarketProduct }) {
         <article className="mk-card mk-card--hit">
             <div className="mk-card__ph">
                 <MarketPhoto image={product.image} id={product.id} category={product.category} />
-                {out && <span className="mk-card__out">Нет в наличии</span>}
+                {out && <span className="mk-card__out">{L.outOfStock}</span>}
                 <button
                     type="button"
                     className="mk-fav"
                     aria-pressed={liked}
-                    aria-label={liked ? 'Убрать из избранного' : 'В избранное'}
+                    aria-label={liked ? L.favRemove : L.favAdd}
                     onClick={() => void toggleFavorite(product.id)}
                 >
                     <Heart size={17} aria-hidden />
@@ -55,7 +58,7 @@ export function MarketCard({ product }: { product: MarketProduct }) {
             <div className="mk-card__body">
                 <div className="mk-card__price">
                     <b>
-                        {sum(product.price)} <i>сум</i>
+                        {sum(product.price)} <i>{L.currency}</i>
                     </b>
                     {product.oldPrice && <s>{sum(product.oldPrice)}</s>}
                     {off > 0 && <span className="mk-card__disc">−{off}%</span>}
@@ -66,7 +69,7 @@ export function MarketCard({ product }: { product: MarketProduct }) {
                 <div className="mk-card__meta">
                     {product.reviews > 0 ? (
                         <>
-                            <b aria-hidden>★</b> {rating(product.rating)} · {sum(product.reviews)} отзывов
+                            <b aria-hidden>★</b> {rating(product.rating)} · {L.reviews(product.reviews)}
                         </>
                     ) : (
                         product.sellerName
@@ -76,11 +79,11 @@ export function MarketCard({ product }: { product: MarketProduct }) {
                     type="button"
                     className={cn('mk-card__cart', inCart && 'is-in')}
                     disabled={out || busy}
-                    aria-label={inCart ? `В корзине: ${product.title}` : `В корзину: ${product.title}`}
+                    aria-label={inCart ? L.inCartLabel(product.title) : L.toCartLabel(product.title)}
                     onClick={() => void toCart()}
                 >
                     {inCart ? <Check size={17} aria-hidden /> : <ShoppingCart size={17} aria-hidden />}
-                    <span>{out ? 'Нет в наличии' : inCart ? 'В корзине' : 'В корзину'}</span>
+                    <span>{out ? L.outOfStock : inCart ? L.inCart : L.toCart}</span>
                 </button>
             </div>
         </article>

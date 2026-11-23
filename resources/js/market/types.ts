@@ -179,3 +179,107 @@ export interface MyProductDetail {
     variants: MyVariant[];
     images: MarketImage[];
 }
+
+export interface PickupPoint {
+    code: string;
+    name: string;
+    address: string;
+    city: string;
+}
+
+/** Статус с сервера: код для логики и текст на языке страницы. */
+export interface OrderStatusView {
+    code: 'created' | 'paid' | 'cash_on_pickup' | 'assembling' | 'in_transit' | 'ready' | 'issued' | 'cancelled' | 'refund_pending' | 'refunded';
+    text: string;
+}
+
+/** Заказ в списке «Мои заказы». */
+export interface OrderSummary {
+    number: string;
+    status: OrderStatusView;
+    paymentMethod: 'card' | 'cash';
+    total: number;
+    count: number;
+    pickupPoint: { name: string; address: string };
+    createdAt: string | null;
+}
+
+export interface OrderItem {
+    variantId: number;
+    title: string;
+    slug: string;
+    image: string | null;
+    options: Record<string, string>;
+    quantity: number;
+    price?: number;
+    total?: number;
+}
+
+/** Заказ целиком: части по продавцам, суммы, можно ли отменить. */
+export interface OrderDetail {
+    number: string;
+    status: OrderStatusView;
+    paymentMethod: 'card' | 'cash';
+    /** hours — часы работы пункта, если склад их завёл */
+    pickupPoint: { name: string; address: string; hours?: string | null };
+    /** Код выдачи — только покупателю и только пока заказ «можно забрать»; иначе null */
+    pickupCode?: string | null;
+    readyAt?: string | null;
+    itemsTotal: number;
+    delivery: number;
+    total: number;
+    parts: { seller: { slug: string; name: string }; status: OrderStatusView; total: number; items: OrderItem[] }[];
+    canCancel: boolean;
+    createdAt: string | null;
+    paidAt: string | null;
+    cancelledAt: string | null;
+    issuedAt: string | null;
+}
+
+/** Часть заказа у продавца: о покупателе — только имя (ТЗ, раздел 10). */
+export interface SellerOrder {
+    number: string;
+    status: OrderStatusView;
+    buyer: { name: string };
+    pickupPoint: { name: string };
+    total: number;
+    commission: number;
+    payout: number;
+    items: OrderItem[];
+    createdAt: string | null;
+}
+
+export interface SellerBalance {
+    accrued: number;
+    onHold: number;
+    available: number;
+    inWork: number;
+    paid: number;
+    holdDays: number;
+    payouts: { id: number; amount: number; status: { code: string; text: string }; bankReference: string | null; createdAt: string | null; paidAt: string | null }[];
+}
+
+/** Склад, куда продавец везёт поставку (/market/api/me/warehouses). */
+export interface Warehouse {
+    code: string;
+    name: string;
+    address: string;
+    city: string;
+}
+
+/** Поставка продавца на склад (/market/api/me/supplies). */
+export interface Supply {
+    number: string;
+    status: { code: 'draft' | 'submitted' | 'received' | 'rejected' | 'cancelled'; text: string };
+    warehouse: { code: string; name: string; address: string };
+    note: string | null;
+    /** Дата «ГГГГ-ММ-ДД» или null */
+    expectedAt: string | null;
+    rejectReason: string | null;
+    items: { variantId: number; title: string; options: Record<string, string>; declared: number; accepted: number | null; defect: number | null }[];
+    canSubmit: boolean;
+    canCancel: boolean;
+    createdAt: string | null;
+    submittedAt: string | null;
+    receivedAt: string | null;
+}

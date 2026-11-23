@@ -35,6 +35,7 @@ import {
 import { useState } from 'react';
 import { NewsCover } from '@/components/NewsCover';
 import { BannerSlot, type BannerData } from '@/components/BannerSlot';
+import { MarketHomeBlock } from '@/components/market/MarketHomeBlock';
 import { CardRow } from '@/components/CardRow';
 import { ProductCard, type ProductRow } from '@/components/ProductCard';
 import { ReviewCard, type FeedReview } from '@/components/ReviewCard';
@@ -353,7 +354,8 @@ export default function Home({
     const block = (key: string): Block => blocks[key] ?? EMPTY_BLOCK;
     // «Разместить» — как в шапке: вошедшему сразу мастер объявления.
     // Регистрация вошедшего отправляла на главную, и кнопка не работала
-    const authed = Boolean(usePage<SharedProps>().props.auth?.user);
+    const { auth, market } = usePage<SharedProps>().props;
+    const authed = Boolean(auth?.user);
     const postHref = authed ? routes.listingCreate : routes.register;
     const shown = (key: string): boolean => block(key).visible;
     const hero = block('hero');
@@ -563,6 +565,10 @@ export default function Home({
                     </div>
                 </section>
             )}
+
+            {/* ── Маркетплейс: на видном месте, сразу под категориями
+                 (ТЗ 18.11, раздел 3). Пока он не открыт — блока нет ── */}
+            {market && <MarketHomeBlock />}
 
             {/* ── Витрина VIP: объявления компаний с высшим тарифом ── */}
             {shown('vip') && latest.length > 0 && (

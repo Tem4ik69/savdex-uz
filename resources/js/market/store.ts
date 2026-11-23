@@ -65,21 +65,29 @@ let sessionFor: number | null | undefined;
 let categoriesAsked = false;
 
 /**
+ * Дерево категорий — один раз на страницу. Зовут раскладка маркетплейса
+ * и блок маркетплейса на главной savdex.uz (там корзина не нужна).
+ */
+export function loadCategories(): void {
+    if (categoriesAsked) return;
+
+    categoriesAsked = true;
+    api<{ categories: MarketCategory[] }>('categories')
+        .then((data) => set({ categories: data.categories }))
+        .catch(() => {
+            // Без категорий страница работает: меню каталога покажет, что список не загрузился
+            categoriesAsked = false;
+            set({ categories: [] });
+        });
+}
+
+/**
  * Загрузить то, что нужно всем страницам: категории — всегда, корзину и
  * избранное — вошедшему. Зовёт раскладка; повторный вызов для того же
  * пользователя ничего не делает.
  */
 export function startSession(userId: number | null): void {
-    if (!categoriesAsked) {
-        categoriesAsked = true;
-        api<{ categories: MarketCategory[] }>('categories')
-            .then((data) => set({ categories: data.categories }))
-            .catch(() => {
-                // Без категорий страница работает: меню каталога покажет, что список не загрузился
-                categoriesAsked = false;
-                set({ categories: [] });
-            });
-    }
+    loadCategories();
 
     if (sessionFor === userId) return;
     sessionFor = userId;
@@ -184,4 +192,18 @@ export function findCategory(tree: MarketCategory[] | null, slug: string): { nod
     };
 
     return tree ? walk(tree, '') : null;
+}
+
+/** Перечитать корзину с сервера — после заказа часть строк из неё ушла. */
+export async function reloadCart(): Promise<void> {
+    try {
+        set({ cart: await api<CartSummary>('cart', { loginRedirect: false }) });
+    } catch {
+        // Не прочиталась — значок обновится на следующей странице
+    }
+}
+
+/** Положить в общее состояние корзину из ответа сервера (409 при оформлении присылает свежую). */
+export function putCart(cart: CartSummary): void {
+    set({ cart });
 }
