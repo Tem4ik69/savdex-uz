@@ -45,8 +45,12 @@ class Command(BaseCommand):
         total = 0
 
         for report in reports:
-            # У кассы оплат провайдеров нет — только расхождения
-            payments = "" if report.provider == reconcile.CASH else f"оплат {report.payments}, "
+            # У кассы и склада оплат провайдеров нет — только расхождения
+            payments = (
+                ""
+                if report.provider in (reconcile.CASH, reconcile.STOCK)
+                else f"оплат {report.payments}, "
+            )
             self.stdout.write(
                 f"{report.label}: {payments}расхождений {len(report.problems)}"
                 + (", выписка сверена" if report.statement else "")
