@@ -43,6 +43,14 @@ manage.py market_reconcile_payments [--day ГГГГ-ММ-ДД] и расписа
 Сверка ``cash_collected`` с самим отчётом BTS и ``payout_clearing`` с
 выпиской банка — когда будут их выгрузки (договор с BTS, банк).
 
+Склад (``check_stock``, отчёт «склад») — на момент сверки, не по дню.
+Остаток меняется только движением (market_stock_movements), остаток склада
+и остаток варианта двигает триггер базы (миграция 2026_11_23_100000).
+Расхождение значит, что остаток поменяли мимо движений:
+
+- остаток варианта не равен сумме его остатков по складам;
+- остаток на складе не равен сумме движений по этому складу и варианту.
+
 Расхождение — строка ERROR в журнале приложения: только счётчики, без
 номеров заказов, сумм и данных покупателей. Сигнал наружу — Healthchecks
 (``signal``, MARKET_HC_PING_PAYMENTS): удача или сбой с итогом в цифрах.
@@ -95,6 +103,7 @@ PING_KEY = "MARKET_HC_PING_PAYMENTS"
 #: Отчёт общей части и отчёт кассы — не провайдеры
 COMMON = "*"
 CASH = "касса"
+STOCK = "склад"
 
 
 @dataclass
@@ -348,10 +357,39 @@ def check_cash(day: date, moment: datetime | None = None) -> Report:
     return report
 
 
+def check_stock() -> Report:
+    """Склад: остатки вариантов и складов сходятся с движениями."""
+    report = Report(STOCK)
+
+    for variant in rows(
+        "select v.id, v.stock, coalesce(sum(w.quantity), 0) as stored "
+        "from market_product_variants v "
+        "left join market_warehouse_stock w on w.variant_id = v.id "
+        "group by v.id having v.stock <> coalesce(sum(w.quantity), 0) order by v.id"
+    ):
+        report.problems.append(
+            f"вариант {variant['id']}: остаток {variant['stock']}, на складах {variant['stored']}"
+        )
+
+    for place in rows(
+        "select w.warehouse_id, w.variant_id, w.quantity, coalesce(sum(m.quantity), 0) as moved "
+        "from market_warehouse_stock w left join market_stock_movements m "
+        "on m.warehouse_id = w.warehouse_id and m.variant_id = w.variant_id "
+        "group by w.warehouse_id, w.variant_id, w.quantity "
+        "having w.quantity <> coalesce(sum(m.quantity), 0) order by w.warehouse_id, w.variant_id"
+    ):
+        report.problems.append(
+            f"склад {place['warehouse_id']}, вариант {place['variant_id']}: "
+            f"остаток {place['quantity']}, по движениям {place['moved']}"
+        )
+
+    return report
+
+
 def run(day: date) -> list[Report]:
     """
     Сверка за сутки: каждый провайдер, у которого есть ключи или оплаты,
-    общая часть и касса. Расхождение — ERROR в журнале со счётчиками.
+    общая часть, касса и склад. Расхождение — ERROR в журнале со счётчиками.
     """
     start, end = _bounds(day)
     active = {
@@ -367,6 +405,7 @@ def run(day: date) -> list[Report]:
     ]
     reports.append(check_common(day))
     reports.append(check_cash(day))
+    reports.append(check_stock())
 
     for report in reports:
         if report.problems:

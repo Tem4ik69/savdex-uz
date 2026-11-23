@@ -435,3 +435,50 @@ def test_пункт_выдачи_точка_на_карте(склад):
         "update market_pickup_points set hours = 'Пн–Сб 9:00–20:00' where id = %s",
         [склад["пункт"]],
     )
+
+
+def test_ночная_сверка_видит_остаток_мимо_движений(склад):
+    """
+    Сверка (reconcile.check_stock, отчёт «склад»): остаток варианта не равен
+    остаткам складов, остаток склада не равен движениям — расхождение;
+    остаток, поменянный движениями, — нет.
+    """
+    from .test_market_orders import _manage
+
+    def сверка() -> str:
+        [(сегодня,)] = sql("select ((now() at time zone 'utc')::date)::text")
+        итог = _manage("market_reconcile_payments", "--day", сегодня)
+        assert итог.returncode in (0, 1), итог.stderr[-3000:]
+
+        return итог.stdout
+
+    _движение(склад, "adjust", 4, reason="инвентаризация")
+    вывод = сверка()
+    assert "склад: расхождений 0" in вывод, вывод
+
+    # Остаток варианта поправили мимо движений (владельцем базы)
+    sql("update market_product_variants set stock = stock + 3 where id = %s", [склад["вариант"]])
+    # Остаток склада — тоже мимо движений; триггер запрещает это только сайту
+    sql(
+        "update market_warehouse_stock set quantity = quantity + 3 where variant_id = %s",
+        [склад["вариант"]],
+    )
+    try:
+        вывод = сверка()
+        assert "склад: расхождений 1" in вывод, вывод
+        assert f"склад {склад['склад']}, вариант {склад['вариант']}: остаток" in вывод
+
+        sql(
+            "update market_warehouse_stock set quantity = quantity - 3 where variant_id = %s",
+            [склад["вариант"]],
+        )
+        вывод = сверка()
+        assert "склад: расхождений 1" in вывод, вывод
+        assert f"вариант {склад['вариант']}: остаток" in вывод
+    finally:
+        sql(
+            "update market_product_variants set stock = stock - 3 where id = %s",
+            [склад["вариант"]],
+        )
+
+    assert "склад: расхождений 0" in сверка()
