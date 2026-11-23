@@ -1,6 +1,6 @@
 import { usePage } from '@inertiajs/react';
 import { CircleCheck, CircleX } from 'lucide-react';
-import { useState, type FormEvent } from 'react';
+import { useEffect, useState, type FormEvent } from 'react';
 import { Link } from '@/components/ui/Link';
 import { MarketLayout } from '@/layouts/MarketLayout';
 import { api, ApiError, useApi } from '@/market/api';
@@ -22,13 +22,40 @@ const CHECKS: [keyof SellerApplication['checks'], string, string][] = [
  * (/market/api/me/seller). Продавец — компания на SavdEx: её карточка,
  * ИНН и документы уже есть в кабинете, копий здесь нет. Заявку подаёт
  * владелец, модератор подтверждает или отклоняет с причиной.
- * Подтверждение через OneID появится, когда его подключат.
+ * Подтверждение через OneID (/market/api/oneid/start) — быстрый путь:
+ * ЭЦП для компании или вход для ИП, ИНН сверяется с компанией на SavdEx.
+ * OneID возвращает человека сюда же с итогом в адресе (?oneid=…).
  */
+
+/** Итоги возврата из OneID: что произошло и тон сообщения. */
+const ONEID_RESULTS: Record<string, [string, boolean]> = {
+    ok: ['OneID подтвердил компанию — вы продавец SavdEx Market.', false],
+    review: ['OneID пройден, заявка ушла модератору на проверку.', false],
+    off: ['Подтверждение через OneID пока не подключено — подайте заявку с документами.', true],
+    denied: ['Вход в OneID отменён. Попробуйте ещё раз или подайте заявку с документами.', true],
+    expired: ['Время на подтверждение вышло. Начните заново.', true],
+    mismatch: ['ИНН в OneID не совпал с ИНН компании на SavdEx. Проверьте ИНН в карточке компании или подайте заявку с документами.', true],
+    blocked: ['Продажи компании приостановлены — подтвердить через OneID нельзя. Напишите в поддержку.', true],
+    error: ['OneID не ответил. Попробуйте позже или подайте заявку с документами.', true],
+};
 export default function MarketSell() {
     const { auth } = usePage<SharedProps>().props;
     const { data, loading, error, reload } = useApi<SellerApplication>(auth.user ? 'me/seller' : null);
     const [sent, setSent] = useState<SellerApplication | null>(null);
+    const [oneid, setOneid] = useState<string | null>(null);
     const state = sent ?? data;
+
+    // Итог возврата из OneID — из адреса, один раз; сам адрес чистим
+    useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        const result = params.get('oneid');
+
+        if (!result) return;
+
+        setOneid(ONEID_RESULTS[result] ? result : 'error');
+        params.delete('oneid');
+        window.history.replaceState(window.history.state, '', window.location.pathname + (params.toString() ? `?${params}` : ''));
+    }, []);
 
     return (
         <MarketLayout title="Стать продавцом · SavdEx Market">
@@ -70,6 +97,11 @@ export default function MarketSell() {
                     </section>
 
                     <section className="mk-panel" aria-busy={loading}>
+                        {oneid && (
+                            <p className={ONEID_RESULTS[oneid][1] ? 'mk-sample' : 'mk-ok-note'} role="status">
+                                {ONEID_RESULTS[oneid][0]}
+                            </p>
+                        )}
                         {!auth.user && (
                             <div className="mk-status">
                                 <h2>Заявка продавца</h2>
@@ -134,19 +166,41 @@ function Application({ state, onSent }: { state: SellerApplication; onSent: (nex
     const [agreed, setAgreed] = useState(false);
     const [note, setNote] = useState('');
     const [problem, setProblem] = useState<string | null>(null);
-    const [sending, setSending] = useState(false);
+    const [sending, setSending] = useState<'oneid' | 'documents' | null>(null);
     const ready = Object.values(state.checks).every(Boolean);
+    // Для OneID документы не нужны: компанию подтверждает сам OneID
+    const oneidReady = state.checks.company && state.checks.owner && state.checks.tin;
+
+    function offer(): boolean {
+        if (agreed) return true;
+
+        setProblem('Без согласия с офертой заявку не отправить');
+
+        return false;
+    }
+
+    async function viaOneid() {
+        if (!offer()) return;
+
+        setSending('oneid');
+        setProblem(null);
+
+        try {
+            const { redirect } = await api<{ redirect: string }>('oneid/start', { body: { offer: true } });
+
+            window.location.assign(redirect);
+        } catch (failure) {
+            setProblem(failure instanceof ApiError ? failure.message : 'Не получилось открыть OneID. Попробуйте ещё раз.');
+            setSending(null);
+        }
+    }
 
     async function submit(event: FormEvent) {
         event.preventDefault();
 
-        if (!agreed) {
-            setProblem('Без согласия с офертой заявку не отправить');
+        if (!offer()) return;
 
-            return;
-        }
-
-        setSending(true);
+        setSending('documents');
         setProblem(null);
 
         try {
@@ -157,7 +211,7 @@ function Application({ state, onSent }: { state: SellerApplication; onSent: (nex
         } catch (failure) {
             setProblem(failure instanceof ApiError ? failure.message : 'Не получилось отправить заявку. Попробуйте ещё раз.');
         } finally {
-            setSending(false);
+            setSending(null);
         }
     }
 
@@ -169,16 +223,6 @@ function Application({ state, onSent }: { state: SellerApplication; onSent: (nex
                     Прошлую заявку отклонили{state.rejectReason ? `: ${state.rejectReason}` : '.'} Исправьте и подайте снова.
                 </p>
             )}
-            <div className="mk-oneid">
-                <span>
-                    <b>Подтвердить через OneID</b>
-                    <small>Быстрый способ: ЭЦП для компании или вход для ИП. Скоро.</small>
-                </span>
-                <button type="button" className="mk-btn mk-btn--ghost" disabled>
-                    OneID
-                </button>
-            </div>
-            <p className="mk-or">пока — по документам компании</p>
 
             <ul className="mk-checks">
                 {CHECKS.map(([key, label, action]) => (
@@ -186,6 +230,7 @@ function Application({ state, onSent }: { state: SellerApplication; onSent: (nex
                         {state.checks[key] ? <CircleCheck size={18} aria-hidden /> : <CircleX size={18} aria-hidden />}
                         <span>
                             {label}
+                            {key === 'documents' && <small className="mk-checks__hint"> — не нужен при подтверждении через OneID</small>}
                             <span className="sr-only">{state.checks[key] ? ' — готово' : ' — не выполнено'}</span>
                         </span>
                         {!state.checks[key] && key !== 'owner' && <Link href={routes.cabinetCompany}>{action}</Link>}
@@ -193,28 +238,39 @@ function Application({ state, onSent }: { state: SellerApplication; onSent: (nex
                 ))}
             </ul>
 
-            {ready ? (
-                <form className="mk-form" onSubmit={submit} noValidate>
-                    <label className="mk-field">
-                        Что будете продавать (необязательно)
-                        <textarea id="mk-sell-note" rows={3} maxLength={1000} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Например: домашний текстиль собственного производства" />
-                    </label>
-                    <label className="mk-check">
-                        <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />
-                        Принимаю оферту продавца
-                    </label>
-                    {problem && (
-                        <small style={{ color: 'var(--danger)' }} role="alert">
-                            {problem}
-                        </small>
-                    )}
-                    <button type="submit" className="mk-btn" disabled={sending}>
-                        Отправить заявку
+            <form className="mk-form" onSubmit={(event) => void submit(event)} noValidate>
+                <label className="mk-check">
+                    <input type="checkbox" checked={agreed} onChange={(e) => setAgreed(e.target.checked)} />
+                    Принимаю оферту продавца
+                </label>
+
+                <div className="mk-oneid">
+                    <span>
+                        <b>Подтвердить через OneID</b>
+                        <small>Быстро: ЭЦП для компании или вход для ИП. ИНН сверим с карточкой компании.</small>
+                    </span>
+                    <button type="button" className="mk-btn" disabled={!oneidReady || sending !== null} onClick={() => void viaOneid()}>
+                        OneID
                     </button>
-                </form>
-            ) : (
-                <p className="mk-hint">Заявку можно будет отправить, когда выполнены все пункты. Карточка компании, ИНН и документы — в кабинете компании на SavdEx.</p>
-            )}
+                </div>
+
+                <p className="mk-or">или заявка с документами — проверит модератор</p>
+
+                <label className="mk-field">
+                    Что будете продавать (необязательно)
+                    <textarea id="mk-sell-note" rows={3} maxLength={1000} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Например: домашний текстиль собственного производства" />
+                </label>
+                {problem && (
+                    <small style={{ color: 'var(--danger)' }} role="alert">
+                        {problem}
+                    </small>
+                )}
+                <button type="submit" className="mk-btn mk-btn--ghost" disabled={!ready || sending !== null}>
+                    Отправить заявку с документами
+                </button>
+                {!oneidReady && <p className="mk-hint">Для заявки нужны карточка компании, ИНН и вход владельца — всё это в кабинете компании на SavdEx.</p>}
+                {oneidReady && !ready && <p className="mk-hint">Для заявки с документами загрузите документ о регистрации — или подтвердите компанию через OneID.</p>}
+            </form>
         </>
     );
 }

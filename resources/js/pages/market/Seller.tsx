@@ -159,7 +159,7 @@ function Products({ products, needsReview, reload }: { products: MyProduct[]; ne
                                             </span>
                                             {p.title}
                                         </div>
-                                        {p.rejectReason && <div className="mk-line__warn">Причина: {p.rejectReason}</div>}
+                                        {p.rejectReason && (p.status === 'rejected' || p.status === 'blocked') && <div className="mk-line__warn">Причина: {p.rejectReason}</div>}
                                     </td>
                                     <td className="is-num">{p.price ? `${sum(p.price)} сум` : '—'}</td>
                                     <td className={cn('is-num', p.stock === 0 && 'mk-low')}>{p.stock}</td>
@@ -390,7 +390,12 @@ function ProductFields({
                     <X size={16} aria-hidden /> К списку
                 </button>
             </div>
-            {product?.rejectReason && <p className="mk-sample">Модератор отклонил товар: {product.rejectReason}</p>}
+            {/* Причина приходит и у товара на проверке — показываем только отклонённому и снятому */}
+            {product?.rejectReason && (status === 'rejected' || status === 'blocked') && (
+                <p className="mk-sample">
+                    {status === 'blocked' ? 'Модератор снял товар' : 'Модератор отклонил товар'}: {product.rejectReason}
+                </p>
+            )}
 
             <form className="mk-form mk-form--2" onSubmit={(event) => void save(event)} noValidate>
                 <label className="mk-field mk-field--wide">
@@ -765,7 +770,140 @@ function Payouts() {
                 </>
             )}
             <p className="mk-hint">Начисление появляется после оплаты заказа и становится доступным к выплате, когда заказ выдан и прошёл срок на возврат. Выплаты проводит касса площадки.</p>
+            <Requisites />
         </>
+    );
+}
+
+interface RequisitesData {
+    bankAccount: string;
+    bankMfo: string;
+    bankName: string;
+    recipientName: string;
+    recipientTin: string;
+    changedAt: string | null;
+}
+
+const REQUISITE_FIELDS: [keyof Omit<RequisitesData, 'changedAt'>, string, string, 'numeric' | 'text'][] = [
+    ['recipientName', 'Получатель', 'Как в банке: ООО «…» или ИП …', 'text'],
+    ['recipientTin', 'ИНН или ПИНФЛ получателя', '9 или 14 цифр', 'numeric'],
+    ['bankName', 'Банк', 'Например: Капиталбанк', 'text'],
+    ['bankMfo', 'МФО банка', '5 цифр', 'numeric'],
+    ['bankAccount', 'Расчётный счёт', '20 цифр', 'numeric'],
+];
+
+/**
+ * Реквизиты для выплат (/market/api/me/requisites) — видит и меняет только
+ * владелец компании; сохранение — с паролем от входа, чтобы чужая открытая
+ * сессия не подменила счёт. Выплата на новые реквизиты — через сутки или
+ * после сверки кассой.
+ */
+function Requisites() {
+    const loaded = useApi<{ requisites: RequisitesData | null }>('me/requisites');
+    const [saved, setSaved] = useState<RequisitesData | null>(null);
+    const [errors, setErrors] = useState<Record<string, string[]>>({});
+    const [busy, setBusy] = useState(false);
+    const [editing, setEditing] = useState(false);
+    const current = saved ?? loaded.data?.requisites ?? null;
+
+    if (loaded.status === 403) {
+        return (
+            <section className="mk-panel">
+                <h2>Реквизиты для выплат</h2>
+                <p className="mk-hint">{loaded.error}</p>
+            </section>
+        );
+    }
+
+    async function save(event: FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+
+        const form = new FormData(event.currentTarget);
+        const body = Object.fromEntries([...REQUISITE_FIELDS.map(([key]) => key), 'password'].map((key) => [key, String(form.get(key) ?? '').trim()]));
+
+        setBusy(true);
+        setErrors({});
+
+        try {
+            const data = await api<{ message: string; requisites: RequisitesData }>('me/requisites', { body });
+
+            notify(data.message);
+            setSaved(data.requisites ?? { ...(body as unknown as RequisitesData), changedAt: new Date().toISOString() });
+            setEditing(false);
+        } catch (failure) {
+            if (failure instanceof ApiError) {
+                setErrors(failure.errors);
+                notify(failure.message, true);
+            }
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    return (
+        <section className="mk-panel">
+            <div className="mk-bar">
+                <h2>Реквизиты для выплат</h2>
+                {current && !editing && (
+                    <button type="button" className="mk-btn mk-btn--ghost" onClick={() => setEditing(true)}>
+                        Изменить
+                    </button>
+                )}
+            </div>
+            {loaded.loading && <div className="mk-skel-block" style={{ height: 120 }} aria-busy />}
+            {loaded.error && loaded.status !== 403 && (
+                <div className="mk-failed">
+                    <p>{loaded.error}</p>
+                    <button type="button" className="mk-btn" onClick={loaded.reload}>
+                        Повторить
+                    </button>
+                </div>
+            )}
+            {!loaded.loading && !loaded.error && current && !editing && (
+                <dl className="mk-specs">
+                    {REQUISITE_FIELDS.map(([key, label]) => (
+                        <div key={key}>
+                            <dt>{label}</dt>
+                            <dd>{current[key]}</dd>
+                        </div>
+                    ))}
+                    {current.changedAt && (
+                        <div>
+                            <dt>Изменены</dt>
+                            <dd>{when(current.changedAt)}</dd>
+                        </div>
+                    )}
+                </dl>
+            )}
+            {!loaded.loading && !loaded.error && (!current || editing) && (
+                <form className="mk-form mk-form--2" onSubmit={(event) => void save(event)} noValidate>
+                    {!current && <p className="mk-hint mk-field--wide">Реквизитов ещё нет — без них касса не сможет перевести деньги.</p>}
+                    {REQUISITE_FIELDS.map(([key, label, hint, mode]) => (
+                        <label key={key} className={key === 'recipientName' || key === 'bankAccount' ? 'mk-field mk-field--wide' : 'mk-field'}>
+                            {label}
+                            <input id={`mk-r-${key}`} name={key} inputMode={mode} defaultValue={current?.[key] ?? ''} placeholder={hint} autoComplete="off" />
+                            {errors[key]?.[0] && <small className="is-error">{errors[key][0]}</small>}
+                        </label>
+                    ))}
+                    <label className="mk-field mk-field--wide">
+                        Пароль от входа — для подтверждения
+                        <input id="mk-r-password" name="password" type="password" autoComplete="current-password" />
+                        {errors.password?.[0] ? <small className="is-error">{errors.password[0]}</small> : <small>Пять неверных паролей подряд закрывают смену реквизитов на сутки.</small>}
+                    </label>
+                    <div className="mk-field--wide" style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                        <button type="submit" className="mk-btn" disabled={busy}>
+                            Сохранить реквизиты
+                        </button>
+                        {editing && (
+                            <button type="button" className="mk-btn mk-btn--ghost" onClick={() => setEditing(false)}>
+                                Отмена
+                            </button>
+                        )}
+                    </div>
+                    <p className="mk-hint mk-field--wide">Выплата на новые реквизиты — не раньше чем через сутки или после проверки кассой. Владельцам компании придёт уведомление о смене.</p>
+                </form>
+            )}
+        </section>
     );
 }
 
