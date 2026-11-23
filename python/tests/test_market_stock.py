@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from itertools import count
 from typing import Any
 
@@ -91,6 +91,23 @@ def test_код_выдачи():
     assert warehouse.code_of(заказ) == код
     assert warehouse.code_of({**заказ, "status": orders.ISSUED}) is None
     assert warehouse.code_of({**заказ, "ready_at": None}) is None
+
+
+def test_заберите_до(monkeypatch):
+    # Дни ожидания — настройка из базы; здесь — без базы
+    monkeypatch.setattr(warehouse, "unclaimed_days", lambda: 7)
+    пришёл = datetime(2026, 11, 23, 10, 0, 0)
+    заказ = {"id": 7, "status": orders.READY, "ready_at": пришёл}
+
+    # Срок — время прихода плюс дни ожидания; только пока заказ в пункте
+    assert warehouse.pickup_until(заказ) == пришёл + timedelta(days=warehouse.unclaimed_days())
+    assert warehouse.pickup_until({**заказ, "status": orders.ISSUED}) is None
+    assert warehouse.pickup_until({**заказ, "ready_at": None}) is None
+    # В уведомлении — день по Ташкенту: 23.11 20:00 UTC — уже 24.11 там
+    поздно = datetime(2026, 11, 23, 20, 0, 0)
+    assert warehouse._until_text(поздно) == (
+        поздно + timedelta(days=warehouse.unclaimed_days(), hours=5)
+    ).strftime("%d.%m")
 
 
 def test_ручные_движения_до_базы():
@@ -520,6 +537,15 @@ def test_отгрузка_и_выдача_по_коду(сайт, место):
     код = заказ["pickupCode"]
     assert re.fullmatch(r"[0-9]{6}", код) and код not in текст
     assert заказ["pickupPoint"]["hours"] == "Пн–Сб 9:00–20:00" and заказ["readyAt"]
+    # «Заберите до» — в заказе, в списке заказов и в уведомлении
+    assert заказ["pickupUntil"] and заказ["pickupUntil"] > заказ["readyAt"]
+    [в_списке] = [
+        z
+        for z in _json(_get_as(сайт, "/market/api/orders", покупатель))["orders"]
+        if z["number"] == number
+    ]
+    assert в_списке["pickupUntil"] == заказ["pickupUntil"]
+    assert "Заберите до" in текст
     # В базе — только отпечаток кода
     [(отпечаток,)] = sql("select pickup_code_hash from market_orders where id = %s", [pk])
     assert отпечаток and код not in отпечаток

@@ -134,6 +134,12 @@ urlpatterns = [
     ),
     re_path(r"^(?:(?:uz|en|zh|tr)/)?market/sell$", market.sell, name="market.sell"),
     re_path(r"^(?:(?:uz|en|zh|tr)/)?market/seller$", market.seller, name="market.seller"),
+    re_path(
+        r"^(?:(?:uz|en|zh|tr)/)?market/warehouse$",
+        market.warehouse_screen,
+        name="market.warehouse",
+    ),
+    re_path(r"^(?:(?:uz|en|zh|tr)/)?market/point$", market.point_screen, name="market.point"),
     re_path(r"^(?:(?:uz|en|zh|tr)/)?reviews$", reviews.index, name="reviews"),
     re_path(r"^(?:(?:uz|en|zh|tr)/)?resumes$", resumes.index, name="resumes"),
     re_path(r"^(?:(?:uz|en|zh|tr)/)?resume/(?P<slug>[^/]+)$", resumes.show, name="resumes.show"),

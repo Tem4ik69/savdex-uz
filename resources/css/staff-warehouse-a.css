@@ -1,0 +1,94 @@
+/* ── Склад: поставки, приёмка, остатки, списания (components/market/staff) ──
+   Планшет 768–1180 px, цели касания ≥ 44 px; на телефоне не ломается. */
+
+/* Отбор поставок: крупные «таблетки» */
+.mk-wh-chips{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.mk-wh-chip{min-height:44px;padding:0 20px;border-radius:999px;border:1.5px solid var(--border-strong);background:#fff;font-size:15px;font-weight:700;color:var(--text)}
+.mk-wh-chip:hover{background:var(--bg)}
+.mk-wh-chip[aria-pressed=true]{background:var(--primary-700);border-color:var(--primary-700);color:#fff}
+
+/* Таблицы склада — крупнее, чем в кабинете продавца */
+.mk-wh-table{font-size:14px}
+.mk-wh-table td{padding:14px}
+.mk-wh-table td .mk-btn{white-space:nowrap}
+.mk-wh-items li{display:flex;flex-wrap:wrap;gap:2px 8px;align-items:baseline;padding:2px 0}
+.mk-wh-items li>span{font-weight:600}
+.mk-wh-mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:13px;white-space:nowrap}
+.mk-wh-bad{color:var(--danger);font-weight:800}
+.mk-wh-reason{max-width:280px}
+.mk-wh-stale{opacity:.6;transition:opacity var(--t-fast)}
+.mk-wh-warn{border:1px solid var(--warning);background:var(--warning-bg);color:var(--gold-text);border-radius:10px;padding:10px 14px;font-weight:600;margin-bottom:12px}
+
+/* Поиск по остаткам */
+.mk-wh-search{display:flex;align-items:center;gap:10px;background:#fff;border:1.5px solid var(--border);border-radius:12px;padding:0 14px;margin-bottom:14px;color:var(--text-muted)}
+.mk-wh-search:focus-within{border-color:var(--primary-700)}
+.mk-wh-search input{flex:1;min-width:0;height:52px;border:0;outline:0;font-size:16px;background:transparent;color:var(--text)}
+
+/* Приёмка: выбор поставки */
+.mk-wh-pick{list-style:none;margin:0;padding:0;display:grid;gap:12px;grid-template-columns:repeat(auto-fill,minmax(280px,1fr))}
+.mk-wh-pick button{width:100%;min-height:96px;text-align:left;background:#fff;border:1.5px solid var(--border);border-radius:14px;padding:16px 18px;display:grid;gap:4px;align-content:start}
+.mk-wh-pick button:hover,.mk-wh-pick button:focus-visible{border-color:var(--primary-700)}
+.mk-wh-pick b{font-size:18px;font-weight:800}
+.mk-wh-pick span{font-weight:600}
+.mk-wh-pick small{color:var(--text-muted);font-size:13px}
+
+/* Приёмка: строки с пересчётом */
+.mk-wh-supply-head{display:flex;flex-wrap:wrap;gap:4px 14px;align-items:baseline;margin-bottom:12px}
+.mk-wh-supply-head .mk-muted{display:inline;font-size:13px}
+.mk-wh-lines{list-style:none;margin:0;padding:0;display:grid;gap:10px}
+.mk-wh-line{background:#fff;border-radius:14px;padding:14px 18px;display:grid;grid-template-columns:minmax(0,1fr) auto auto minmax(120px,auto);gap:12px 20px;align-items:center}
+.mk-wh-line.is-diff{box-shadow:inset 4px 0 0 var(--warning)}
+.mk-wh-line__title{display:grid;gap:2px;min-width:0}
+.mk-wh-line__title b{font-size:16px}
+.mk-wh-line__title span{color:var(--text-muted);font-size:14px}
+.mk-wh-line__title small{font-size:13px;color:var(--text-muted)}
+.mk-wh-line__title small b{font-size:13px;color:var(--text)}
+.mk-wh-diff{font-weight:700;color:var(--success-text);text-align:right}
+.mk-wh-diff.is-bad{color:var(--danger)}
+
+/* Счётчик +/− под палец */
+.mk-wh-stepper{display:grid;gap:4px;font-size:12px;font-weight:700;color:var(--text-muted)}
+.mk-wh-stepper>div{display:flex;align-items:stretch;border:1.5px solid var(--border);border-radius:12px;overflow:hidden;background:#fff}
+.mk-wh-stepper button{width:52px;min-height:52px;display:grid;place-items:center;background:var(--bg);color:var(--text)}
+.mk-wh-stepper button:hover:not([disabled]){background:var(--primary-50);color:var(--primary-700)}
+.mk-wh-stepper button[disabled]{opacity:.35}
+.mk-wh-stepper input{width:72px;border:0;text-align:center;font-size:20px;font-weight:800;color:var(--text);font-variant-numeric:tabular-nums;-moz-appearance:textfield;appearance:textfield}
+.mk-wh-stepper input::-webkit-inner-spin-button,.mk-wh-stepper input::-webkit-outer-spin-button{-webkit-appearance:none;margin:0}
+.mk-wh-stepper input:focus{outline:2px solid var(--primary-700);outline-offset:-2px}
+
+/* Итог приёмки — прилипает к низу экрана */
+.mk-wh-total{position:sticky;bottom:0;z-index:5;margin-top:14px;background:#fff;border:1px solid var(--border);border-radius:14px;padding:12px 16px;display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center;justify-content:space-between;box-shadow:0 -4px 16px rgb(15 23 42/.08)}
+.mk-wh-total__actions{display:flex;gap:10px;flex-wrap:wrap}
+
+/* Окно подтверждения */
+.mk-wh-dialog{position:fixed;inset:0;z-index:60;background:rgb(15 23 42/.5);display:grid;place-items:center;padding:16px}
+.mk-wh-dialog__box{background:#fff;border-radius:18px;padding:22px;width:100%;max-width:540px;max-height:calc(100vh - 32px);overflow:auto;display:grid;gap:12px}
+.mk-wh-dialog__box h3{font-size:20px;font-weight:800}
+.mk-wh-dialog__list{margin:0;padding-left:18px;display:grid;gap:4px}
+.mk-wh-dialog__actions{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap;margin-top:4px}
+.mk-wh-btn--danger{background:var(--danger)}
+.mk-wh-btn--danger:hover{background:var(--danger);filter:brightness(1.08)}
+
+/* Заявка на списание */
+.mk-wh-form{margin:0 0 16px}
+.mk-wh-form h2{margin-bottom:0}
+.mk-wh-form .mk-field{font-size:14px}
+.mk-wh-form .mk-field input,.mk-wh-form .mk-field select{height:48px;font-size:16px}
+.mk-wh-form .mk-field textarea{font-size:16px}
+.mk-wh-note{font-size:13px;color:var(--gold-text);background:var(--warning-bg);border-radius:10px;padding:8px 12px;font-weight:600}
+.mk-wh-form__actions{display:flex;gap:10px;justify-content:flex-end;flex-wrap:wrap}
+
+@media (max-width:900px){
+  .mk-wh-line{grid-template-columns:minmax(0,1fr) auto auto}
+  .mk-wh-line__title{grid-column:1/-1}
+  .mk-wh-diff{text-align:left}
+}
+@media (max-width:560px){
+  .mk-wh-line{grid-template-columns:1fr 1fr;padding:12px}
+  .mk-wh-line .mk-wh-diff{grid-column:1/-1}
+  .mk-wh-stepper button{width:44px}
+  .mk-wh-stepper input{width:100%;min-width:0;flex:1}
+  .mk-wh-total{flex-direction:column;align-items:stretch}
+  .mk-wh-total__actions .mk-btn{flex:1}
+  .mk-wh-dialog__actions .mk-btn{flex:1}
+}

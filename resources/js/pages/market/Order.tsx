@@ -138,6 +138,7 @@ export default function MarketOrder({ number }: { number: string }) {
                         ждёт в пункте; нет кода — заказ находят по номеру */}
                     <span>{order.pickupCode ? L.readyCode(order.pickupPoint.name) : L.readyAt(order.pickupPoint.name)}</span>
                     <b aria-label={order.pickupCode ? L.codeLabel : undefined}>{order.pickupCode ?? order.number}</b>
+                    {order.pickupUntil && <small className="mk-code__until">{L.pickUntil(when(order.pickupUntil))}</small>}
                 </div>
             )}
 

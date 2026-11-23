@@ -202,6 +202,8 @@ export interface OrderSummary {
     count: number;
     pickupPoint: { name: string; address: string };
     createdAt: string | null;
+    /** «Заберите до» — только пока заказ ждёт в пункте; иначе null */
+    pickupUntil?: string | null;
 }
 
 export interface OrderItem {
@@ -224,6 +226,8 @@ export interface OrderDetail {
     pickupPoint: { name: string; address: string; hours?: string | null };
     /** Код выдачи — только покупателю и только пока заказ «можно забрать»; иначе null */
     pickupCode?: string | null;
+    /** «Заберите до» — только пока заказ ждёт в пункте; потом заказ закрывается сам */
+    pickupUntil?: string | null;
     readyAt?: string | null;
     itemsTotal: number;
     delivery: number;

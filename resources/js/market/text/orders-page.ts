@@ -18,6 +18,7 @@ const ru = {
     byCard: 'картой',
     onDelivery: 'при получении',
     currency: 'сум',
+    pickUntil: (until: string) => `Заберите до ${until}`,
 };
 
 const uz: typeof ru = {
@@ -38,6 +39,7 @@ const uz: typeof ru = {
     byCard: 'karta orqali',
     onDelivery: 'qabul qilganda',
     currency: 'so‘m',
+    pickUntil: (until) => `${until} gacha olib keting`,
 };
 
 export const ordersPageText = { ru, uz };

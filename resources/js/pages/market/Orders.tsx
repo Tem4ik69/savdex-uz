@@ -71,6 +71,7 @@ export default function MarketOrders() {
                                     </h2>
                                     <StatusPill status={order.status} />
                                 </div>
+                                {order.pickupUntil && <p className="mk-until">{L.pickUntil(when(order.pickupUntil))}</p>}
                                 <div className="mk-order__foot">
                                     <span className="mk-note">
                                         {L.items(order.count)} · {order.pickupPoint.name} ·{' '}
