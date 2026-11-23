@@ -360,6 +360,18 @@ def expire_market_orders(now: datetime, due: datetime) -> str:
     return f"Отменено незавершённых заказов: {orders.expire()}."
 
 
+def unclaimed_market_orders(now: datetime, due: datetime) -> str:
+    """
+    Каждый час: заказы маркетплейса, не забранные из пункта выдачи за N дней
+    (настройка market_unclaimed_days, по умолчанию 7), — закрыть: картой — к
+    возврату денег (его сделает market_refunds), при получении — отменить;
+    резерв — снять (savdex/market/warehouse.py, expire_unclaimed).
+    """
+    from savdex.market import warehouse
+
+    return f"Закрыто невостребованных заказов: {warehouse.expire_unclaimed()}."
+
+
 def refund_market_orders(now: datetime, due: datetime) -> str:
     """
     Каждый час: заказы маркетплейса в «ожидает возврата» — вернуть деньги
@@ -409,6 +421,8 @@ JOBS: tuple[Job, ...] = (
     # Маркетплейс: резерв неоплаченных картой заказов не держим дольше часа с
     # лишним, не собранных с оплатой при получении — дольше 48 часов
     Job("market_expire_orders", time(0, 25), expire_market_orders, every=1),
+    # Маркетплейс: не забранные из пункта выдачи за N дней — закрыть (до возвратов)
+    Job("market_unclaimed_orders", time(0, 30), unclaimed_market_orders, every=1),
     # Маркетплейс: возвраты по отменённым оплаченным заказам и ночная сверка оплат
     Job("market_refunds", time(0, 35), refund_market_orders, every=1),
     Job("market_reconcile_payments", time(2, 40), reconcile_market_payments),

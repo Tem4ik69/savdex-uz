@@ -52,6 +52,17 @@ def test_демо_маркетплейса(база):  # noqa: F811
     assert товары["kazan-chugunnyj-12l"][1] is None  # без скидки
     assert товары["umnye-chasy-pulse-3"][2] == 0  # нет в наличии
 
+    # Остаток — только приёмкой поставки на демо-склад: склад и варианты сходятся
+    assert sql(
+        "select (select sum(quantity) from market_warehouse_stock), "
+        "(select sum(stock) from market_product_variants), "
+        "(select count(*) from market_stock_movements where kind <> 'receipt'), "
+        "(select count(*) from market_supplies where status = 'received')"
+    ) == [
+        (sum(p["stock"] for p in market_demo.PRODUCTS),) * 2
+        + (0, len({p["seller"] for p in market_demo.PRODUCTS if p["stock"]}))
+    ]
+
     # Варианты — с названиями выбора, как в форме продавца
     [(выбор,)] = sql(
         "select v.options from market_product_variants v join market_products p "
@@ -74,7 +85,12 @@ def test_демо_маркетплейса(база):  # noqa: F811
 
 
 def test_к_уже_наполненной_базе(база):  # noqa: F811
-    # Демо SavdEx уже было (тестовый сейчас), маркетплейса не было
+    # Демо SavdEx уже было (тестовый сейчас), маркетплейса не было. Движения
+    # остатка только дописываются — стереть их можно лишь truncate владельца
+    sql(
+        "truncate market_stock_movements, market_warehouse_stock, market_supply_items, "
+        "market_supplies"
+    )
     sql("delete from market_products")
     sql(
         "delete from market_sellers where company_id in "

@@ -7,15 +7,17 @@
   отклоняет с причиной, может приостановить продажи и вернуть их.
 - **Товары** (market.*): очередь модерации первых товаров новых
   продавцов; одобрить, отклонить с причиной, снять любой товар (ТЗ:
-  «модератор может снять любой товар»). Пока склада BTS в коде нет,
-  остаток вариантов ставят здесь (право market.edit); появится склад —
-  остаток будет приходить с приёмки, а это поле станет только для чтения.
+  «модератор может снять любой товар»). Остаток вариантов — только
+  смотреть: он приходит с приёмки поставок и меняется движениями склада
+  (savdex/market/warehouse.py, раздел «Склад маркетплейса»).
 - **Категории** (market_catalog.*): дерево до трёх уровней,
   характеристики для фильтров. Удалить можно только пустую категорию.
 
 - **Заказы** (market_orders.*): только смотреть — состав, статус,
-  история; суммы — администратору (поддержке не видны). **Пункты
-  выдачи** — заводит администратор.
+  история; суммы — администратору (поддержке не видны). Кнопка — только
+  «в сборку»: дальше заказ ведут отгрузки и выдача по коду
+  (savdex/market/warehouse_admin.py). **Пункты выдачи и склады** —
+  заводит администратор (warehouse_admin.py).
 
 Каждое решение — строка журнала действий и уведомление компании.
 Денег в разделах модератора нет: он их не видит (ТЗ, раздел 9).
@@ -44,13 +46,12 @@ from savdex import audit
 from savdex.accounts.models import User
 from savdex.adminsite import SavdexModelAdmin, _admin_of, register
 from savdex.crm.admin import _badge, when
-from savdex.market import orders, products, sellers
-from savdex.market.common import now, one, som, t, write
+from savdex.market import orders, products, sellers, warehouse
+from savdex.market.common import one, som, t
 from savdex.market.models import (
     Attribute,
     Category,
     Order,
-    PickupPoint,
     Product,
     Seller,
     Variant,
@@ -480,66 +481,18 @@ class ProductStatus(admin.SimpleListFilter):
         return queryset.filter(status=self.value()) if self.value() else queryset
 
 
-#: Остаток варианта. Сводка товара (market_products.stock, integer) — сумма
-#: по вариантам (до 100): предел с запасом, чтобы она не переполнилась
-MAX_STOCK = 1_000_000
-
-
-class VariantForm(forms.ModelForm):  # type: ignore[type-arg]
-    """Остаток варианта: не меньше нуля и не меньше резерва под заказы."""
-
-    class Meta:
-        model = Variant
-        fields = ("stock",)
-
-    def __init__(self, *args: Any, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-
-        if "stock" in self.fields:
-            self.fields["stock"].widget.attrs.update({"min": 0, "max": MAX_STOCK})
-
-    def clean_stock(self) -> int:
-        stock = self.cleaned_data.get("stock")
-
-        if stock is None:
-            raise forms.ValidationError("Укажите остаток.")
-
-        if stock < 0:
-            raise forms.ValidationError("Остаток не может быть меньше нуля.")
-
-        if stock > MAX_STOCK:
-            raise forms.ValidationError(f"Остаток — не больше {MAX_STOCK:,}.".replace(",", " "))
-
-        # Резерв — свежий из базы: заказ мог появиться, пока форма была
-        # открыта (окончательно его сторожит условие UPDATE в save_formset)
-        reserved = (
-            Variant.objects.filter(pk=self.instance.pk).values_list("reserved", flat=True).first()
-            if self.instance.pk
-            else 0
-        ) or 0
-
-        if stock < reserved:
-            raise forms.ValidationError(
-                f"Остаток не меньше резерва: {reserved} шт. уже отложено под заказы."
-            )
-
-        return int(stock)
-
-
 class VariantInline(admin.TabularInline):  # type: ignore[type-arg]
     """
-    Варианты: цена — только смотреть (её задаёт продавец), остаток — до
-    появления склада BTS ставит сотрудник; не меньше резерва под заказы.
-    Записывается только остаток (ProductAdmin.save_formset), а не вся
-    строка варианта.
+    Варианты — только смотреть: цену задаёт продавец, остаток приходит с
+    приёмки поставок и меняется движениями склада (списание, вывоз,
+    инвентаризация — раздел «Склад маркетплейса»); правки руками нет.
     """
 
     model = Variant
-    form = VariantForm
     extra = 0
     can_delete = False
-    fields = ("title", "sku", "price_label", "stock", "reserved", "is_active")
-    readonly_fields = ("title", "sku", "price_label", "reserved", "is_active")
+    fields = ("number", "title", "sku", "price_label", "stock", "reserved", "places", "is_active")
+    readonly_fields = fields
 
     def get_queryset(self, request: HttpRequest) -> QuerySet[Variant]:
         return super().get_queryset(request).exclude(options__has_key="_removed")
@@ -554,14 +507,26 @@ class VariantInline(admin.TabularInline):  # type: ignore[type-arg]
         return _admin_of(request).can("market.view")
 
     def has_change_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
-        return _admin_of(request).can("market.edit")
+        return False
 
     def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
         return False
 
+    @admin.display(description="№")
+    def number(self, obj: Variant) -> int:
+        return int(obj.pk)
+
     @admin.display(description="вариант")
     def title(self, obj: Variant) -> str:
         return str(obj)
+
+    @admin.display(description="по складам")
+    def places(self, obj: Variant) -> str:
+        from savdex.market import warehouse
+
+        found = warehouse.warehouse_stock(obj.pk)
+
+        return ", ".join(f"{r['name']}: {r['quantity']}" for r in found) or "—"
 
     @admin.display(description="цена")
     def price_label(self, obj: Variant) -> str:
@@ -630,89 +595,6 @@ class ProductAdmin(DecisionsMixin, SavdexModelAdmin):
         поверх правки продавца или решения другого модератора.
         """
         return None
-
-    def save_formset(
-        self,
-        request: HttpRequest,
-        form: Any,  # noqa: ANN401
-        formset: Any,  # noqa: ANN401
-        change: bool,
-    ) -> None:
-        """
-        Остаток варианта — точечным UPDATE только остатка и времени правки,
-        при условии, что вариант этого товара и резерв не больше нового
-        остатка. Variant.save() переписал бы всю строку: цену, резерв,
-        включённость и выбор, которые тем временем мог поменять продавец.
-        """
-        # Django берёт отсюда «что изменилось» для своего журнала (он не
-        # ведётся, но списки должны быть)
-        formset.new_objects, formset.changed_objects, formset.deleted_objects = [], [], []
-
-        if formset.model is not Variant or not _admin_of(request).can("market.edit"):
-            return
-
-        # Строка товара — раньше вариантов, как у правки продавцом
-        # (products.save) и у заказа (orders.checkout, release_reserve): без
-        # взаимных блокировок. Держится до конца транзакции карточки
-        # (changeform_view), то есть и через пересчёт сводки в save_related
-        one("select id from market_products where id = %s for update", [form.instance.pk])
-        skipped: list[str] = []
-
-        for variant_form in formset.initial_forms:
-            if not variant_form.has_changed() or "stock" not in variant_form.changed_data:
-                continue
-
-            variant = variant_form.instance
-            stock = variant_form.cleaned_data["stock"]
-            written = write(
-                "update market_product_variants set stock = %s, updated_at = %s "
-                "where id = %s and product_id = %s and reserved <= %s",
-                [stock, now(), variant.pk, form.instance.pk, stock],
-            )
-
-            if written:
-                formset.changed_objects.append((variant, ["stock"]))
-            else:
-                skipped.append(str(variant))
-
-        if skipped:
-            self.message_user(
-                request,
-                "Остаток не сохранён — резерв успел вырасти, обновите страницу: "
-                + "; ".join(skipped),
-                messages.WARNING,
-            )
-
-    def save_related(
-        self,
-        request: HttpRequest,
-        form: Any,  # noqa: ANN401
-        formsets: list[Any],
-        change: bool,
-    ) -> None:
-        """Остатки вариантов сохранены — сводка товара заново, строка журнала."""
-        before = {v.pk: v.stock for v in Variant.objects.filter(product=form.instance)}
-        super().save_related(request, form, formsets, change)
-        products.refresh(form.instance.pk)
-        after = {v.pk: v.stock for v in Variant.objects.filter(product=form.instance)}
-        changed = {str(k): v for k, v in after.items() if before.get(k) != v}
-
-        if changed:
-            audit.record(
-                connection,
-                action="updated",
-                section="market",
-                actor=_admin_of(request),
-                subject_type=self.laravel_model,
-                subject_id=form.instance.pk,
-                subject_label=form.instance.title,
-                changes={
-                    "before": {k: before.get(int(k)) for k in changed},
-                    "after": changed,
-                },
-                note="остаток вариантов",
-                ip=audit.client_ip(request),
-            )
 
     @admin.display(description="товар", ordering="title")
     def name(self, obj: Product) -> str:
@@ -1182,27 +1064,26 @@ class OrderStatus(admin.SimpleListFilter):
         return queryset.filter(status=self.value()) if self.value() else queryset
 
 
-#: Право склада на шаги заказа (в сборку → отгружен → в пункте → выдан);
-#: отменить заказ склад не может — это market_orders.moderate
+#: Право склада на шаг заказа «в сборку» (дальше — отгрузки и выдача по
+#: коду, warehouse_admin.py); отменить заказ склад не может — это
+#: market_orders.moderate
 STOCK_ABILITY = "market_stock.moderate"
 
 #: Кнопки шагов заказа в админке: в коде решения — статус, который видел
 #: сотрудник, чтобы повторный щелчок не продвинул заказ на шаг дальше
 _STEP_LABELS = {
     orders.ASSEMBLING: "В сборку",
-    orders.IN_TRANSIT: "Отгружен со склада",
-    orders.READY: "Прибыл в пункт выдачи",
-    orders.ISSUED: "Выдан покупателю",
 }
 
 
 @register(Order, section="market_orders")
 class OrderAdmin(DecisionsMixin, SavdexModelAdmin):
     """
-    Заказы: поля только смотреть. Статус двигает сотрудник с правом
-    market_orders.moderate (администратор) или market_stock.moderate (склад)
-    кнопками под карточкой: в сборку → отгружен → в пункте → выдан;
-    администратор может ещё и отменить заказ до отгрузки (склад — нет).
+    Заказы: поля только смотреть. «В сборку» ставит сотрудник с правом
+    market_orders.moderate (администратор) или market_stock.moderate
+    (склад) кнопкой под карточкой; дальше заказ ведут отгрузки (в пути, в
+    пункте) и выдача по коду (warehouse_admin.py). Администратор может
+    ещё и отменить заказ до отгрузки (склад — нет).
     Только POST с CSRF, только через orders.advance и
     orders.staff_cancel (условный переход, резерв и обратная проводка),
     каждое действие — строка журнала. Поддержка и склад видят состав и
@@ -1237,6 +1118,11 @@ class OrderAdmin(DecisionsMixin, SavdexModelAdmin):
             )
             found.append((f"cancel:{obj.status}", label, False))
 
+        # Ввод кода выдачи закрыт после неверных попыток — открыть после
+        # звонка покупателю, с пометкой, кто и почему (в журнал)
+        if obj.status == orders.READY and warehouse.code_locked(obj):
+            found.append((f"unlock:{obj.status}", "Открыть ввод кода выдачи", True))
+
         return found
 
     def may_decide(self, request: HttpRequest) -> bool:
@@ -1246,13 +1132,13 @@ class OrderAdmin(DecisionsMixin, SavdexModelAdmin):
         return admin.can(self.decide_ability) or admin.can(STOCK_ABILITY)
 
     def decisions_for(self, request: HttpRequest, obj: Order) -> list[tuple[str, str, bool]]:
-        """Склад двигает заказ по шагам, но не отменяет: отмена — администратору."""
+        """Склад ставит «в сборку», но не отменяет и не открывает ввод кода."""
         found = self.decisions(obj)
 
         if _admin_of(request).can(self.decide_ability):
             return found
 
-        return [item for item in found if not item[0].startswith("cancel:")]
+        return [item for item in found if item[0].startswith("to:")]
 
     def decide(
         self,
@@ -1270,36 +1156,49 @@ class OrderAdmin(DecisionsMixin, SavdexModelAdmin):
         kind, before, *rest = decision.split(":")
         text = note[:500] or None
 
-        try:
+        if kind == "unlock":
             with transaction.atomic():
-                if kind == "cancel":
-                    after = orders.staff_cancel(
-                        obj.pk, before, actor_user_id=admin.id, note=text or "отменён сотрудником"
-                    )
-                else:
-                    moved = orders.advance(obj.pk, before, actor_user_id=admin.id, note=text)
-                    after = rest[0] if moved else None
-
-                if after is None:
-                    raise DecisionRefused("Статус заказа уже изменился — обновите страницу.")
+                if not warehouse.unlock_code(obj.pk, actor_user_id=admin.id):
+                    raise DecisionRefused("Ввод кода уже открыт — обновите страницу.")
 
                 audit.record(
                     connection,
-                    action="cancelled" if kind == "cancel" else "status_changed",
-                    section="market_orders" if admin.can(self.decide_ability) else "market_stock",
+                    action="unblocked",
+                    section="market_orders",
                     actor=admin,
                     subject_type=self.laravel_model,
                     subject_id=obj.pk,
                     subject_label=obj.number,
-                    changes={"before": {"status": before}, "after": {"status": after}},
                     note=text,
                     ip=audit.client_ip(request),
                 )
-        except orders.WriteOffError as error:
-            raise DecisionRefused(
-                "Заказ не выдан: остаток или резерв товара меньше заказанного — "
-                "проверьте остатки в карточке товара."
-            ) from error
+
+            return f"Заказ {obj.number}: ввод кода выдачи открыт."
+
+        with transaction.atomic():
+            if kind == "cancel":
+                after = orders.staff_cancel(
+                    obj.pk, before, actor_user_id=admin.id, note=text or "отменён сотрудником"
+                )
+            else:
+                moved = orders.advance(obj.pk, before, actor_user_id=admin.id, note=text)
+                after = rest[0] if moved else None
+
+            if after is None:
+                raise DecisionRefused("Статус заказа уже изменился — обновите страницу.")
+
+            audit.record(
+                connection,
+                action="cancelled" if kind == "cancel" else "status_changed",
+                section="market_orders" if admin.can(self.decide_ability) else "market_stock",
+                actor=admin,
+                subject_type=self.laravel_model,
+                subject_id=obj.pk,
+                subject_label=obj.number,
+                changes={"before": {"status": before}, "after": {"status": after}},
+                note=text,
+                ip=audit.client_ip(request),
+            )
 
         return f"Заказ {obj.number}: {orders.STATUSES.get(after, after)}."
 
@@ -1487,43 +1386,11 @@ class OrderAdmin(DecisionsMixin, SavdexModelAdmin):
         )
 
 
-class PickupPointForm(forms.ModelForm):  # type: ignore[type-arg]
-    class Meta:
-        model = PickupPoint
-        fields = ("code", "name", "address", "city", "is_active", "sort")
-
-    def clean_code(self) -> str:
-        code = str(self.cleaned_data.get("code") or "").strip().lower()
-
-        if not SLUG.fullmatch(code) or len(code) > 32:
-            raise forms.ValidationError("Только латиница, цифры и дефис: chilonzor-1.")
-
-        return code
-
-
-@register(PickupPoint, section="market_orders")
-class PickupPointAdmin(SavdexModelAdmin):
-    """Пункты выдачи: пока Ташкент; код после создания не меняется — он в заказах."""
-
-    laravel_model = "Savdex\\Market\\PickupPoint"
-    title_list = "Пункты выдачи"
-    title_add = "Новый пункт выдачи"
-    title_change = "Пункт выдачи"
-
-    form = PickupPointForm
-    list_display = ("name", "code", "address", "city", "is_active", "sort")
-    list_filter = ("is_active",)
-    search_fields = ("name", "code", "address")
-    ordering = ("sort", "name")
-
-    def get_readonly_fields(self, request: HttpRequest, obj: Any = None) -> Any:  # noqa: ANN401
-        return ("code",) if obj is not None else ()
-
-    def has_delete_permission(self, request: HttpRequest, obj: Any = None) -> bool:  # noqa: ANN401
-        """Пункт с заказами не удаляется (база держит), выключите его."""
-        return False
-
-
 # Касса маркетплейса (раздел market_cash): балансы, выплаты, реквизиты,
 # ручные возвраты — своим модулем, регистрируется при загрузке админки
-from savdex.market import cash_admin  # noqa: E402, F401
+# Склад и пункты выдачи (разделы market_stock и market_pickup; склады и
+# пункты — market_orders) — своим модулем
+from savdex.market import (  # noqa: E402
+    cash_admin,  # noqa: F401
+    warehouse_admin,  # noqa: F401
+)
