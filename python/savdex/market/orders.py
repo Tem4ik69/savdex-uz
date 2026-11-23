@@ -92,8 +92,9 @@ TRANSITIONS: dict[str, frozenset[str]] = {
     CASH_ON_PICKUP: frozenset({ASSEMBLING, CANCELLED}),
     ASSEMBLING: frozenset({IN_TRANSIT, CANCELLED, REFUND_PENDING}),
     IN_TRANSIT: frozenset({READY}),
-    # Невостребованный заказ и возврат из пункта — этап склада и ПВЗ
-    READY: frozenset({ISSUED}),
+    # Не забрали за N дней — закрывается сам (warehouse.expire_unclaimed):
+    # картой — к возврату денег, при получении — отменён
+    READY: frozenset({ISSUED, CANCELLED, REFUND_PENDING}),
     ISSUED: frozenset(),
     CANCELLED: frozenset(),
     REFUND_PENDING: frozenset({REFUNDED}),
@@ -971,13 +972,13 @@ def expire(
 
 # ── Сотрудник: сборка, отгрузка, выдача ───────────────────────────
 
-#: Следующий шаг заказа, который двигает сотрудник (админка заказов)
+#: Следующий шаг заказа, который двигает сотрудник кнопкой в админке
+#: заказов: только «в сборку». Дальше — отгрузкой (уехала → «в пути»,
+#: принята в пункте → «можно забрать») и выдачей по коду в пункте
+#: (savdex/market/warehouse.py)
 STAFF_STEPS: dict[str, str] = {
     PAID: ASSEMBLING,
     CASH_ON_PICKUP: ASSEMBLING,
-    ASSEMBLING: IN_TRANSIT,
-    IN_TRANSIT: READY,
-    READY: ISSUED,
 }
 
 #: Сотрудник отменяет заказ до отгрузки со склада: при получении — из
@@ -997,14 +998,18 @@ def staff_can_cancel(status: str, payment_method: str) -> bool:
     return status in STAFF_CANCELLABLE.get(payment_method, frozenset())
 
 
-def _write_off(order_id: int) -> bool:
+def _write_off(order_id: int, warehouse_id: int, actor_user_id: int | None) -> bool:
     """
     Выдача: списать остаток — ровно один раз (``stock_written_off_at``,
-    условно). Строки товаров — раньше вариантов; у варианта уходят и
-    остаток, и резерв на количество позиции, у товара растут продажи,
-    сводка — заново. Не хватило остатка или резерва — WriteOffError, вся
-    транзакция (и переход в «выдан») откатывается. False — уже списано.
+    условно). По каждой позиции: сначала снять её резерв, потом движение
+    ``issue`` со склада, откуда заказ приехал (остаток склада и варианта
+    двигает триггер базы — savdex/market/warehouse.py, move). У товара
+    растут продажи, сводка — заново. Не хватило остатка или резерва —
+    WriteOffError, вся транзакция (и переход в «выдан») откатывается.
+    False — уже списано.
     """
+    from savdex.market import warehouse
+
     state = one(
         "select reserve_released_at, stock_written_off_at from market_orders "
         "where id = %s for update",
@@ -1036,16 +1041,36 @@ def _write_off(order_id: int) -> bool:
     for item in items:
         quantity = int(item["quantity"])
 
+        # Резерв — раньше движения: база не даст остатку варианта стать
+        # меньше резерва
         if not write(
-            "update market_product_variants set stock = stock - %s, reserved = reserved - %s "
-            "where id = %s and reserved >= %s and stock >= %s",
-            [quantity, quantity, item["variant_id"], quantity, quantity],
+            "update market_product_variants set reserved = reserved - %s "
+            "where id = %s and reserved >= %s",
+            [quantity, item["variant_id"], quantity],
         ):
             log.error(
                 "market.order.write_off_mismatch order=%s variant=%s", order_id, item["variant_id"]
             )
 
-            raise WriteOffError(f"заказ {order_id}: остаток варианта {item['variant_id']}")
+            raise WriteOffError(f"заказ {order_id}: резерв варианта {item['variant_id']}")
+
+        try:
+            warehouse.move(
+                warehouse_id,
+                int(item["variant_id"]),
+                "issue",
+                -quantity,
+                actor_user_id=actor_user_id,
+                order_id=order_id,
+            )
+        except warehouse.WarehouseError as error:
+            log.error(
+                "market.order.write_off_mismatch order=%s variant=%s", order_id, item["variant_id"]
+            )
+
+            raise WriteOffError(
+                f"заказ {order_id}: остаток варианта {item['variant_id']}"
+            ) from error
 
         sold[int(item["product_id"])] = sold.get(int(item["product_id"]), 0) + quantity
 
@@ -1062,27 +1087,40 @@ def _write_off(order_id: int) -> bool:
 
 def advance(order_id: int, before: str, *, actor_user_id: int, note: str | None = None) -> bool:
     """
-    Сотрудник переводит заказ на следующий шаг (STAFF_STEPS) из статуса,
-    который видел (before). Выдача (→ issued) в той же транзакции списывает
-    остаток (_write_off). False — шага нет или статус уже сменил кто-то
-    другой (повторный щелчок); ничего не записано. WriteOffError —
-    остатка не хватило, всё откатано.
+    Сотрудник переводит заказ на следующий шаг (STAFF_STEPS — «в сборку»)
+    из статуса, который видел (before). False — шага нет или статус уже
+    сменил кто-то другой (повторный щелчок); ничего не записано.
     """
     after = STAFF_STEPS.get(before)
 
     if after is None:
         return False
 
+    return transition(
+        order_id, before, after, actor="staff", actor_user_id=actor_user_id, note=note
+    )
+
+
+def issue(order_id: int, warehouse_id: int, *, actor_user_id: int) -> bool:
+    """
+    Выдача в пункте (код уже проверен — savdex/market/warehouse.py, issue):
+    «можно забрать» → «выдан», кто выдал, остаток — движением ``issue``
+    (_write_off), наличные при получении — в журнал денег. Вызывать в
+    транзакции. False — статус уже другой; WriteOffError — остатка не
+    хватило, всё откатано.
+    """
     with transaction.atomic():
-        if not transition(
-            order_id, before, after, actor="staff", actor_user_id=actor_user_id, note=note
-        ):
+        if not transition(order_id, READY, ISSUED, actor="staff", actor_user_id=actor_user_id):
             return False
 
-        if after == ISSUED:
-            _write_off(order_id)
-            # Один раз: переход в «выдан» условный, повтор сюда не дойдёт
-            _collect_cash(order_id)
+        write(
+            "update market_orders set issued_by = %s, pickup_code_attempts = 0, "
+            "pickup_code_locked_until = null where id = %s",
+            [actor_user_id, order_id],
+        )
+        _write_off(order_id, warehouse_id, actor_user_id)
+        # Один раз: переход в «выдан» условный, повтор сюда не дойдёт
+        _collect_cash(order_id)
 
     return True
 
@@ -1285,14 +1323,18 @@ def _items(where: str, params: list[Any], money: bool = True) -> dict[int, list[
 def detail(user_id: int, number: str, locale: str) -> dict[str, Any] | None:
     """Заказ покупателя по номеру — только свой: чужой и несуществующий — None."""
     order = one(
-        "select id, number, status, payment_method, items_total, delivery_total, total, "
-        "pickup_point_name, pickup_point_address, created_at, paid_at, cancelled_at, issued_at "
-        "from market_orders where number = %s and buyer_user_id = %s",
+        "select o.id, o.number, o.status, o.payment_method, o.items_total, o.delivery_total, "
+        "o.total, o.pickup_point_name, o.pickup_point_address, o.created_at, o.paid_at, "
+        "o.cancelled_at, o.issued_at, o.ready_at, p.hours "
+        "from market_orders o join market_pickup_points p on p.id = o.pickup_point_id "
+        "where o.number = %s and o.buyer_user_id = %s",
         [normalize_number(number), user_id],
     )
 
     if order is None:
         return None
+
+    from savdex.market import warehouse
 
     items = _items("i.order_id = %s", [order["id"]])
     parts = [
@@ -1317,7 +1359,10 @@ def detail(user_id: int, number: str, locale: str) -> dict[str, Any] | None:
         "pickupPoint": {
             "name": order["pickup_point_name"],
             "address": order["pickup_point_address"],
+            "hours": order["hours"],
         },
+        # Код выдачи — только самому покупателю и только пока заказ ждёт в пункте
+        "pickupCode": warehouse.code_of(order),
         "itemsTotal": som(order["items_total"]),
         "delivery": som(order["delivery_total"]),
         "total": som(order["total"]),
@@ -1327,6 +1372,7 @@ def detail(user_id: int, number: str, locale: str) -> dict[str, Any] | None:
         "paidAt": _when(order["paid_at"]),
         "cancelledAt": _when(order["cancelled_at"]),
         "issuedAt": _when(order["issued_at"]),
+        "readyAt": _when(order["ready_at"]),
     }
 
 

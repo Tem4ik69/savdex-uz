@@ -52,6 +52,15 @@ TABLES = (
     "market_seller_requisites",
     "market_seller_requisites_log",
     "market_payouts",
+    # Склад и пункты выдачи (миграция 2026_11_23_100000, savdex/market/warehouse.py)
+    "market_warehouses",
+    "market_warehouse_staff",
+    "market_pickup_point_staff",
+    "market_supplies",
+    "market_supply_items",
+    "market_shipments",
+    "market_shipment_orders",
+    "market_stock_movements",
 )
 
 #: Настройка «сколько первых товаров нового продавца — через модерацию»

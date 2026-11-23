@@ -226,6 +226,14 @@ class PickupPoint(models.Model):
     city = models.CharField("город", max_length=64, default="Ташкент")
     is_active = models.BooleanField("принимает заказы", default=True)
     sort = models.IntegerField("порядок", default=0)
+    #: Склад и пункты выдачи (миграция 2026_11_23_100000): часы и точка на карте
+    hours = models.CharField(
+        "часы работы", max_length=200, null=True, blank=True, help_text="Пн–Сб 9:00–20:00"
+    )
+    latitude = models.DecimalField("широта", max_digits=9, decimal_places=6, null=True, blank=True)
+    longitude = models.DecimalField(
+        "долгота", max_digits=9, decimal_places=6, null=True, blank=True
+    )
     created_at = UTCDateTimeField(auto_now_add=True)
     updated_at = UTCDateTimeField(auto_now=True)
 
@@ -272,6 +280,11 @@ class Order(models.Model):
     cash_reconciled_by = models.BigIntegerField("сверил", null=True)
     cash_reconciled_ref = models.CharField("отчёт BTS", max_length=100, null=True)
     stock_written_off_at = UTCDateTimeField("остаток списан", null=True)
+    #: Пункт выдачи (миграция 2026_11_23_100000, savdex/market/warehouse.py)
+    ready_at = UTCDateTimeField("пришёл в пункт", null=True)
+    issued_by = models.BigIntegerField("выдал", null=True)
+    pickup_code_attempts = models.IntegerField("неверных кодов подряд", default=0)
+    pickup_code_locked_until = UTCDateTimeField("ввод кода закрыт до", null=True)
     created_at = UTCDateTimeField("оформлен", auto_now_add=True)
     updated_at = UTCDateTimeField("изменён", auto_now=True)
 
@@ -401,3 +414,152 @@ class CashOrder(Order):
         proxy = True
         verbose_name = "наличные к сверке"
         verbose_name_plural = "наличные к сверке"
+
+
+# ── Склад и пункты выдачи (миграция 2026_11_23_100000, warehouse.py) ──
+
+
+class Warehouse(models.Model):
+    """Склад маркетплейса: пока один — арендованный у BTS в Ташкенте."""
+
+    code = models.CharField(
+        "код",
+        max_length=32,
+        unique=True,
+        help_text="Латиница, цифры и дефис: bts-tashkent. Попадает в поставки — не меняйте.",
+    )
+    name = models.CharField("название", max_length=200)
+    address = models.CharField("адрес", max_length=500)
+    city = models.CharField("город", max_length=64, default="Ташкент")
+    is_active = models.BooleanField("принимает поставки", default=True)
+    sort = models.IntegerField("порядок", default=0)
+    created_at = UTCDateTimeField(auto_now_add=True)
+    updated_at = UTCDateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "market_warehouses"
+        ordering = ("sort", "name")
+        verbose_name = "склад"
+        verbose_name_plural = "склады"
+
+    def __str__(self) -> str:
+        return self.name if self.pk else "новый склад"
+
+
+class Supply(models.Model):
+    """Поставка продавца на склад: заявка → приёмка или отказ."""
+
+    number = models.CharField("номер", max_length=16, unique=True)
+    seller = models.ForeignKey(
+        Seller, on_delete=models.DO_NOTHING, db_column="seller_id", verbose_name="продавец"
+    )
+    warehouse = models.ForeignKey(
+        Warehouse, on_delete=models.DO_NOTHING, db_column="warehouse_id", verbose_name="склад"
+    )
+    status = models.CharField("статус", max_length=16, default="draft")
+    note = models.CharField("комментарий продавца", max_length=1000, null=True)
+    expected_at = models.DateField("ожидается", null=True)
+    created_by = models.BigIntegerField("завёл", null=True)
+    submitted_at = UTCDateTimeField("отправлена", null=True)
+    received_at = UTCDateTimeField("принята", null=True)
+    received_by = models.BigIntegerField("принял", null=True)
+    cancelled_at = UTCDateTimeField("отменена", null=True)
+    rejected_at = UTCDateTimeField("отказ", null=True)
+    reject_reason = models.CharField("причина отказа", max_length=1000, null=True)
+    created_at = UTCDateTimeField("заведена", auto_now_add=True)
+    updated_at = UTCDateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "market_supplies"
+        ordering = ("-created_at", "-id")
+        verbose_name = "поставка"
+        verbose_name_plural = "поставки"
+
+    def __str__(self) -> str:
+        return f"Поставка {self.number}"
+
+
+class Shipment(models.Model):
+    """Отгрузка склад ↔ пункт выдачи: собирается → в пути → принята."""
+
+    number = models.CharField("номер", max_length=16, unique=True)
+    warehouse = models.ForeignKey(
+        Warehouse, on_delete=models.DO_NOTHING, db_column="warehouse_id", verbose_name="склад"
+    )
+    pickup_point = models.ForeignKey(
+        PickupPoint,
+        on_delete=models.DO_NOTHING,
+        db_column="pickup_point_id",
+        verbose_name="пункт выдачи",
+    )
+    direction = models.CharField("направление", max_length=16)
+    status = models.CharField("статус", max_length=16, default="assembling")
+    created_by = models.BigIntegerField("собрал", null=True)
+    shipped_at = UTCDateTimeField("уехала", null=True)
+    shipped_by = models.BigIntegerField("отправил", null=True)
+    delivered_at = UTCDateTimeField("принята", null=True)
+    delivered_by = models.BigIntegerField("принял", null=True)
+    cancelled_at = UTCDateTimeField("отменена", null=True)
+    created_at = UTCDateTimeField("заведена", auto_now_add=True)
+    updated_at = UTCDateTimeField(auto_now=True)
+
+    class Meta:
+        managed = False
+        db_table = "market_shipments"
+        ordering = ("-created_at", "-id")
+        verbose_name = "отгрузка"
+        verbose_name_plural = "отгрузки"
+
+    def __str__(self) -> str:
+        return f"Отгрузка {self.number}" if self.pk else "новая отгрузка"
+
+
+class StockMovement(models.Model):
+    """Движение остатка — только дописывается (триггер базы двигает остатки)."""
+
+    warehouse = models.ForeignKey(
+        Warehouse, on_delete=models.DO_NOTHING, db_column="warehouse_id", verbose_name="склад"
+    )
+    variant = models.ForeignKey(
+        Variant, on_delete=models.DO_NOTHING, db_column="variant_id", verbose_name="вариант"
+    )
+    product = models.ForeignKey(
+        Product, on_delete=models.DO_NOTHING, db_column="product_id", verbose_name="товар"
+    )
+    kind = models.CharField("движение", max_length=20)
+    quantity = models.IntegerField("штук")
+    supply_item_id = models.BigIntegerField("строка поставки", null=True)
+    order_id = models.BigIntegerField("заказ", null=True)
+    reason = models.CharField("причина", max_length=500, null=True)
+    actor_user_id = models.BigIntegerField("кто", null=True)
+    created_at = UTCDateTimeField("когда", auto_now_add=True)
+
+    class Meta:
+        managed = False
+        db_table = "market_stock_movements"
+        ordering = ("-id",)
+        verbose_name = "движение остатка"
+        verbose_name_plural = "движения остатка"
+
+    def __str__(self) -> str:
+        return f"Движение №{self.pk}" if self.pk else "новое движение"
+
+
+class PointOrder(Order):
+    """Заказы своего пункта выдачи — выдача по коду (раздел market_pickup)."""
+
+    class Meta:
+        proxy = True
+        verbose_name = "заказ в пункте"
+        verbose_name_plural = "заказы в пункте"
+
+
+class PointShipment(Shipment):
+    """Отгрузки своего пункта: принять из склада, отправить невостребованные."""
+
+    class Meta:
+        proxy = True
+        verbose_name = "отгрузка пункта"
+        verbose_name_plural = "отгрузки пункта"

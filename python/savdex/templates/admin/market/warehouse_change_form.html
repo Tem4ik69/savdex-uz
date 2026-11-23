@@ -1,0 +1,43 @@
+{% extends "admin/change_form.html" %}
+{# Склад и пункты выдачи (savdex/market/warehouse_admin.py): карточка и действия — POST с CSRF #}
+{% block content %}
+  {{ block.super }}
+  {% if original %}
+    {% for form in stock_forms %}
+      <form method="post" action="{{ act_url }}" class="module aligned" id="stock-{{ forloop.counter }}">
+        {% csrf_token %}
+        <h2>{{ form.title }}</h2>
+        {% if form.help %}<div class="help">{{ form.help }}</div>{% endif %}
+        {% if form.lines %}
+          <table>
+            <thead><tr><th>Товар</th><th>Заявлено</th><th>Принято</th><th>Брак</th></tr></thead>
+            <tbody>
+              {% for line in form.lines %}
+                <tr>
+                  <td>{{ line.label }}</td>
+                  <td>{{ line.declared }}</td>
+                  <td><input type="number" name="accepted_{{ line.id }}" value="{{ line.declared }}" min="0" max="100000" required></td>
+                  <td><input type="number" name="defect_{{ line.id }}" value="0" min="0" max="100000" required></td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        {% endif %}
+        {% for field in form.fields %}
+          <div class="form-row">
+            <label for="stock-{{ forloop.parentloop.counter }}-{{ field.name }}">{{ field.label }}:</label>
+            {% if field.type == "textarea" %}
+              <textarea name="{{ field.name }}" id="stock-{{ forloop.parentloop.counter }}-{{ field.name }}" rows="2" cols="80"></textarea>
+            {% else %}
+              {# Код выдачи — не запоминать в браузере пункта #}
+              <input type="text" name="{{ field.name }}" id="stock-{{ forloop.parentloop.counter }}-{{ field.name }}" inputmode="numeric" autocomplete="off" maxlength="8" required>
+            {% endif %}
+          </div>
+        {% endfor %}
+        <div class="submit-row">
+          <button type="submit" name="do" value="{{ form.code }}" class="button default">{{ form.button }}</button>
+        </div>
+      </form>
+    {% endfor %}
+  {% endif %}
+{% endblock %}

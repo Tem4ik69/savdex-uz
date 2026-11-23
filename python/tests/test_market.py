@@ -257,11 +257,66 @@ def _товар(
             json.dumps({"Память": "128 ГБ"} if category == "smartphones" else {}),
             price * 100,
             old_price * 100 if old_price else None,
-            stock,
+            0,
         ],
     )
 
+    if stock:
+        _на_склад(seller_id, product, variant, stock)
+
     return product, variant
+
+
+#: Тестовый склад: остаток товаров приходит на него приёмкой поставки
+СКЛАД = "test-sklad"
+
+
+def _склад() -> int:
+    """Тестовый склад и сотрудник, который принимает поставки, — один на базу."""
+    sql(
+        "insert into market_warehouses (code, name, address) "
+        "values (%s, 'Тестовый склад', 'Ташкент') on conflict (code) do nothing",
+        [СКЛАД],
+    )
+    [(склад,)] = sql("select id from market_warehouses where code = %s", [СКЛАД])
+
+    return int(склад)
+
+
+def _приёмщик() -> int:
+    sql(
+        "insert into users (name, email, password, status, created_at, updated_at) "
+        "values ('Приёмщик', 'receiver@stock.example', 'x', 'active', now(), now()) "
+        "on conflict do nothing"
+    )
+    [(uid,)] = sql("select id from users where email = 'receiver@stock.example'")
+
+    return int(uid)
+
+
+def _на_склад(seller_id: int, product: int, variant: int, quantity: int) -> None:
+    """
+    Остаток варианта — как в жизни: принятая поставка на тестовый склад и
+    движение «receipt» (stock варианта двигает триггер базы).
+    """
+    склад, приёмщик = _склад(), _приёмщик()
+    поставка = _id(
+        "insert into market_supplies (number, seller_id, warehouse_id, status, submitted_at, "
+        "received_at, received_by) values (%s, %s, %s, 'received', now(), now(), %s) "
+        "returning id",
+        [secrets.token_hex(6).upper(), seller_id, склад, приёмщик],
+    )
+    строка = _id(
+        "insert into market_supply_items (supply_id, seller_id, product_id, variant_id, "
+        "quantity_declared, quantity_accepted, quantity_defect) "
+        "values (%s, %s, %s, %s, %s, %s, 0) returning id",
+        [поставка, seller_id, product, variant, quantity, quantity],
+    )
+    sql(
+        "insert into market_stock_movements (warehouse_id, variant_id, product_id, kind, "
+        "quantity, supply_item_id, actor_user_id) values (%s, %s, %s, 'receipt', %s, %s, %s)",
+        [склад, variant, product, quantity, строка, приёмщик],
+    )
 
 
 @pytest.fixture(scope="module")
@@ -778,18 +833,20 @@ def test_админка_продавцов(сайт, витрина):
 
 @нужна_база
 def test_остаток_вариантов_в_админке(сайт, витрина):
-    """Модератор видит варианты и правит остаток; поддержка — только смотрит; финансам — нет."""
+    """
+    Модератор и поддержка видят варианты, остаток и остаток по складам —
+    только смотреть: остаток приходит с приёмки и меняется движениями склада
+    (test_market_stock.py). Финансам карточка закрыта.
+    """
     компания = _компания("Stock Admin", "stock-admin")
     товар, вариант = _товар(_продавец(компания), "textile", "Плед", "pled", price=100_000)
     адрес_товара = f"/py/admin/market/product/{товар}/change/"
 
-    _, модератору = django(_сотрудник("moderator"), ("get", адрес_товара, None))
-    assert модератору["status"] == 200
-    assert '-0-stock"' in модератору["body"], "поле остатка у модератора"
-
-    _, поддержке = django(_сотрудник("support"), ("get", адрес_товара, None))
-    assert поддержке["status"] == 200
-    assert "Плед" in поддержке["body"] and '-0-stock"' not in поддержке["body"]
+    for роль in ("moderator", "support"):
+        _, страница = django(_сотрудник(роль), ("get", адрес_товара, None))
+        assert страница["status"] == 200
+        assert "Плед" in страница["body"] and "Тестовый склад: 5" in страница["body"]
+        assert 'name="variants-0-stock"' not in страница["body"], роль
 
     _, финансам = django(_сотрудник("finance"), ("get", адрес_товара, None))
     assert финансам["status"] == 403
@@ -797,11 +854,11 @@ def test_остаток_вариантов_в_админке(сайт, витр�
 
 
 @нужна_база
-def test_остаток_пишется_точечно(сайт, витрина):
+def test_остаток_в_карточке_не_пишется(сайт, витрина):
     """
-    Сохранение карточки товара пишет только остаток варианта: ни строку
-    товара, ни цену, резерв и выбор варианта не переписывает. Меньше нуля и
-    меньше резерва — ошибка формы, а не 500.
+    Правки остатка в карточке товара нет: присланное поле остатка ничего не
+    меняет — ни остаток и резерв варианта, ни строку товара; строки журнала
+    «остаток вариантов» нет.
     """
     компания = _компания("Stock Write", "stock-write")
     товар, вариант = _товар(
@@ -811,62 +868,32 @@ def test_остаток_пишется_точечно(сайт, витрина):
     адрес_товара = f"/py/admin/market/product/{товар}/change/"
     версия = _версия("market_products", товар)
 
-    def форма(stock: int) -> dict[str, str]:
-        return {
-            "variants-TOTAL_FORMS": "1",
-            "variants-INITIAL_FORMS": "1",
-            "variants-MIN_NUM_FORMS": "0",
-            "variants-MAX_NUM_FORMS": "1000",
-            "variants-0-id": str(вариант),
-            "variants-0-product": str(товар),
-            "variants-0-stock": str(stock),
-            "_save": "Сохранить",
-        }
-
-    # Запись столбцов, которых карточка не правит, — сразу ошибка базы:
-    # UPDATE строки целиком их перечисляет, точечный — нет
-    sql(
-        "create or replace function test_full_write() returns trigger language plpgsql "
-        "as $$ begin raise exception 'строка переписана целиком'; end $$"
+    _, ответ = django(
+        _сотрудник("moderator"),
+        (
+            "post",
+            адрес_товара,
+            {
+                "variants-TOTAL_FORMS": "1",
+                "variants-INITIAL_FORMS": "1",
+                "variants-MIN_NUM_FORMS": "0",
+                "variants-MAX_NUM_FORMS": "1000",
+                "variants-0-id": str(вариант),
+                "variants-0-product": str(товар),
+                "variants-0-stock": "9",
+                "_save": "Сохранить",
+            },
+        ),
     )
-    sql(
-        "create trigger test_variant_full_write before update of "
-        "price, old_price, reserved, is_active, options, sku, sort on market_product_variants "
-        f"for each row when (old.product_id = {товар}) execute function test_full_write()"
-    )
-    sql(
-        "create trigger test_product_full_write before update of "
-        "title, description, status, updated_at on market_products "
-        f"for each row when (old.id = {товар}) execute function test_full_write()"
-    )
-
-    try:
-        _, ниже_нуля, ниже_резерва, сохранил = django(
-            _сотрудник("moderator"),
-            ("post", адрес_товара, форма(-1)),
-            ("post", адрес_товара, форма(1)),
-            ("post", адрес_товара, форма(9)),
-        )
-    finally:
-        sql("drop trigger if exists test_variant_full_write on market_product_variants")
-        sql("drop trigger if exists test_product_full_write on market_products")
-        sql("drop function if exists test_full_write()")
-
-    assert ниже_нуля["status"] == 200 and "меньше нуля" in ниже_нуля["body"]
-    assert ниже_резерва["status"] == 200 and "не меньше резерва" in ниже_резерва["body"]
-    assert сохранил["status"] == 302, сохранил["body"][:3000]
+    assert ответ["status"] in (200, 302, 403), ответ["body"][:2000]
     assert sql(
         "select stock, reserved, price from market_product_variants where id = %s", [вариант]
-    ) == [(9, 2, 20_000_000)]
-    # Сводка товара пересчитана (остаток за вычетом резерва), сама строка не тронута
-    assert sql("select stock from market_products where id = %s", [товар]) == [(7,)]
+    ) == [(5, 2, 20_000_000)]
     assert _версия("market_products", товар) == версия
-    [(изменения,)] = sql(
-        "select changes from admin_actions where subject_id = %s and note = 'остаток вариантов'",
+    assert sql(
+        "select count(*) from admin_actions where subject_id = %s and note = 'остаток вариантов'",
         [товар],
-    )
-    правка = json.loads(изменения) if isinstance(изменения, str) else изменения
-    assert правка == {"before": {str(вариант): 5}, "after": {str(вариант): 9}}
+    ) == [(0,)]
 
 
 @нужна_база

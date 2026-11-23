@@ -183,6 +183,12 @@ ICONS = {
     "market.Category": "squares-2x2",
     "market.Order": "shopping-bag",
     "market.PickupPoint": "home",
+    "market.Warehouse": "building-office",
+    "market.Supply": "clipboard-document-list",
+    "market.Shipment": "arrow-path",
+    "market.StockMovement": "document-text",
+    "market.PointOrder": "check-circle",
+    "market.PointShipment": "arrow-path",
     "market.SellerBalance": "banknotes",
     "market.Payout": "paper-airplane",
     "market.SellerRequisites": "identification",
@@ -422,8 +428,17 @@ MENU_GROUPS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
             "market.category",
             "market.order",
             "market.pickuppoint",
+            "market.warehouse",
         ),
     ),
+    # Склад маркетплейса (savdex/market/warehouse_admin.py): роль «Склад маркетплейса»
+    (
+        "market_stock",
+        "Склад маркетплейса",
+        ("market.supply", "market.shipment", "market.stockmovement"),
+    ),
+    # Пункт выдачи (warehouse_admin.py): роль «Пункт выдачи маркетплейса»
+    ("market_pickup", "Пункт выдачи", ("market.pointorder", "market.pointshipment")),
     # Касса маркетплейса (savdex/market/cash_admin.py): роль «Касса маркетплейса»
     (
         "market_cash",

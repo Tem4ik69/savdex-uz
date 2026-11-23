@@ -49,6 +49,24 @@ urlpatterns = [
     re_path(_P + rf"orders/(?P<number>{_NUMBER})/pay$", api.order_pay, name="market.api.order.pay"),
     re_path(_P + r"me/orders$", api.my_seller_orders, name="market.api.me.orders"),
     re_path(_P + r"me/balance$", api.my_balance, name="market.api.me.balance"),
+    re_path(_P + r"me/warehouses$", api.my_warehouses, name="market.api.me.warehouses"),
+    re_path(_P + r"me/supplies$", api.my_supplies, name="market.api.me.supplies"),
+    re_path(
+        _P + r"me/supplies/create$", api.my_supply_create, name="market.api.me.supplies.create"
+    ),
+    re_path(
+        _P + rf"me/supplies/(?P<number>{_NUMBER})$", api.my_supply, name="market.api.me.supply"
+    ),
+    re_path(
+        _P + rf"me/supplies/(?P<number>{_NUMBER})/submit$",
+        api.my_supply_submit,
+        name="market.api.me.supply.submit",
+    ),
+    re_path(
+        _P + rf"me/supplies/(?P<number>{_NUMBER})/cancel$",
+        api.my_supply_cancel,
+        name="market.api.me.supply.cancel",
+    ),
     re_path(_P + r"me/requisites$", api.my_requisites, name="market.api.me.requisites"),
     re_path(_P + r"me/seller$", api.seller_state, name="market.api.me.seller"),
     re_path(_P + r"me/seller/apply$", api.seller_apply, name="market.api.me.seller.apply"),
