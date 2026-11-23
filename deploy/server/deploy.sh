@@ -115,6 +115,16 @@ chmod 644 "$ENV_DIR/auth.caddy"
 # Caddy: иначе Docker создаст его сам, от root, и deploy писать не сможет
 mkdir -p "$ENV_DIR/sites"
 
+# Caddyfile тестового — копия из кода, переписанная на месте. Файл, а не
+# каталог, Docker подключает в контейнер по самому файлу: git при
+# переключении коммита кладёт на его место новый, а Caddy в контейнере так
+# и видел бы старый (`up -d` его не пересоздаёт) — правки Caddyfile не
+# доезжали. Здесь файл тот же, меняется только содержимое; Caddy
+# перечитывает его ниже (caddy reload), без остановки — как на боевом
+# (prod-app.sh). До `up -d`: иначе Docker создаст на этом месте каталог
+cat "$SRC/deploy/staging/Caddyfile" > "$ENV_DIR/Caddyfile"
+chmod 644 "$ENV_DIR/Caddyfile"
+
 # ── Сборка ─────────────────────────────────────────────────────────
 sha=$(git -C "$SRC" rev-parse HEAD)
 tag=${sha:0:12}
@@ -149,6 +159,13 @@ compose "$tag" up -d --remove-orphans
 if wait_healthy "$tag"; then
     echo "$tag" > "$APP_HOME/current-tag"
     echo "$(date -Iseconds) $tag $sha" >> "$APP_HOME/releases.log"
+    # Новый Caddyfile — в работающий Caddy. Не принял — остаётся прежний,
+    # сайт работает; выкладка красная, чтобы это заметили
+    if ! out=$(compose "$tag" exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1); then
+        printf '%s\n' "$out" >&2
+        echo "ОШИБКА: Caddy не принял новый Caddyfile — работает прежний" >&2
+        exit 1
+    fi
     echo "── Готово: https://$SITE_DOMAIN работает на $tag"
 else
     echo "ОШИБКА: savdex:$tag не поднялся. Последние строки журнала:" >&2
