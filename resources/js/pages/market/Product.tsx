@@ -5,9 +5,11 @@ import { MarketPhoto } from '@/components/market/MarketPhoto';
 import { Link } from '@/components/ui/Link';
 import { MarketLayout } from '@/layouts/MarketLayout';
 import { useApi } from '@/market/api';
-import { rating, sum } from '@/market/format';
+import { rating } from '@/market/format';
+import { lang } from '@/market/lang';
 import { addToCart, cartLines, toggleFavorite, useCart, useFavorites } from '@/market/store';
 import type { MarketListing, MarketOffer, MarketProductPage } from '@/market/types';
+import { productText } from '@/market/text/product';
 import { routes } from '@/routes';
 
 /**
@@ -20,6 +22,7 @@ import { routes } from '@/routes';
  * остаток, и в корзину уходит номер варианта.
  */
 export default function MarketProductView({ slug }: { slug: string }) {
+    const L = lang(productText);
     const { data, loading, error, status, reload } = useApi<{ product: MarketProductPage }>(`product/${slug}`);
 
     if (loading) {
@@ -45,19 +48,19 @@ export default function MarketProductView({ slug }: { slug: string }) {
         const missing = status === 404;
 
         return (
-            <MarketLayout title={missing ? 'Товар не найден · SavdEx Market' : 'SavdEx Market'} tab="catalog">
+            <MarketLayout title={missing ? L.notFoundTitle : 'SavdEx Market'} tab="catalog">
                 <div className="mk-in" style={{ paddingTop: 24 }}>
                     <div className="mk-empty">
                         <span aria-hidden>📦</span>
-                        <h2>{missing ? 'Такого товара нет' : 'Товар не загрузился'}</h2>
-                        <p>{missing ? 'Возможно, продавец снял его с продажи или ссылка устарела.' : error}</p>
+                        <h2>{missing ? L.missing : L.failed}</h2>
+                        <p>{missing ? L.missingText : error}</p>
                         {missing ? (
                             <Link href={routes.marketCatalog} className="mk-btn">
-                                Перейти в каталог
+                                {L.toCatalog}
                             </Link>
                         ) : (
                             <button type="button" className="mk-btn" onClick={reload}>
-                                Повторить
+                                {L.retry}
                             </button>
                         )}
                     </div>
@@ -76,6 +79,7 @@ function offerFor(product: MarketProductPage, chosen: Record<string, string>): M
 }
 
 function Loaded({ product }: { product: MarketProductPage }) {
+    const L = lang(productText);
     const cart = useCart();
     const favorites = useFavorites();
     // Сердечко переключают и на других карточках страницы — источник один, общий список;
@@ -117,8 +121,8 @@ function Loaded({ product }: { product: MarketProductPage }) {
     return (
         <MarketLayout title={`${product.title} · SavdEx Market`} tab="catalog">
             <div className="mk-in">
-                <nav className="mk-bc" aria-label="Путь">
-                    <Link href={routes.market}>Главная</Link>
+                <nav className="mk-bc" aria-label={L.breadcrumbs}>
+                    <Link href={routes.market}>{L.home}</Link>
                     {product.categoryPath.map((step) => (
                         <span key={step.slug}>
                             › <Link href={`${routes.marketCatalog}?category=${step.slug}`}>{step.name}</Link>
@@ -132,7 +136,7 @@ function Loaded({ product }: { product: MarketProductPage }) {
                         {images.length > 1 && (
                             <div className="mk-thumbs">
                                 {images.map((image, i) => (
-                                    <button key={image.id} type="button" aria-current={image.id === photo?.id} aria-label={`Фото ${i + 1}`} onClick={() => setShot(i)}>
+                                    <button key={image.id} type="button" aria-current={image.id === photo?.id} aria-label={L.photo(i + 1)} onClick={() => setShot(i)}>
                                         <img src={image.thumb} alt="" loading="lazy" />
                                     </button>
                                 ))}
@@ -148,15 +152,15 @@ function Loaded({ product }: { product: MarketProductPage }) {
                         <div className="mk-info__meta">
                             {product.reviews > 0 && (
                                 <span>
-                                    <b aria-hidden>★</b> {rating(product.rating)} · {sum(product.reviews)} отзывов
+                                    <b aria-hidden>★</b> {rating(product.rating)} · {L.reviews(product.reviews)}
                                 </span>
                             )}
-                            {product.sold > 0 && <span>Продано {sum(product.sold)}+</span>}
+                            {product.sold > 0 && <span>{L.sold(product.sold)}</span>}
                         </div>
 
                         <div className="mk-price">
-                            <b>{sum(price)} сум</b>
-                            {oldPrice && <s>{sum(oldPrice)} сум</s>}
+                            <b>{L.price(price)}</b>
+                            {oldPrice && <s>{L.price(oldPrice)}</s>}
                             {off > 0 && <em>−{off}%</em>}
                         </div>
 
@@ -186,30 +190,30 @@ function Loaded({ product }: { product: MarketProductPage }) {
 
                         <div className={out ? 'mk-stock mk-stock--out' : 'mk-stock'}>
                             {!offer
-                                ? 'Такого сочетания нет — выберите другое'
+                                ? L.noCombination
                                 : out
-                                  ? 'Нет в наличии — добавьте в избранное, чтобы не потерять'
-                                  : `В наличии: ${stock} шт.`}
+                                  ? L.outOfStock
+                                  : L.inStock(stock)}
                         </div>
 
                         <div className="mk-buy">
                             <div className="mk-qty">
-                                <button type="button" aria-label="Меньше" disabled={out || quantity <= 1} onClick={() => setQuantity(quantity - 1)}>
+                                <button type="button" aria-label={L.less} disabled={out || quantity <= 1} onClick={() => setQuantity(quantity - 1)}>
                                     −
                                 </button>
-                                <output aria-label="Количество">{quantity}</output>
-                                <button type="button" aria-label="Больше" disabled={out || quantity >= stock} onClick={() => setQuantity(quantity + 1)}>
+                                <output aria-label={L.quantity}>{quantity}</output>
+                                <button type="button" aria-label={L.more} disabled={out || quantity >= stock} onClick={() => setQuantity(quantity + 1)}>
                                     +
                                 </button>
                             </div>
                             <button type="button" className="mk-btn" disabled={out || busy} onClick={() => void toCart()}>
-                                <ShoppingCart size={18} aria-hidden /> В корзину
+                                <ShoppingCart size={18} aria-hidden /> {L.toCart}
                             </button>
                             <button
                                 type="button"
                                 className="mk-fav"
                                 aria-pressed={liked}
-                                aria-label={liked ? 'Убрать из избранного' : 'В избранное'}
+                                aria-label={liked ? L.favRemove : L.favAdd}
                                 onClick={() => {
                                     // Список мог не успеть прийти: сначала сверяем его с флагом товара
                                     setToggled(true);
@@ -221,19 +225,19 @@ function Loaded({ product }: { product: MarketProductPage }) {
                         </div>
                         {inCart > 0 && (
                             <Link href={routes.marketCart} className="mk-btn mk-btn--ghost">
-                                <Check size={18} aria-hidden /> В корзине {inCart} шт. — перейти
+                                <Check size={18} aria-hidden /> {L.inCart(inCart)}
                             </Link>
                         )}
 
                         <div className="mk-facts">
                             <div>
-                                <MapPin size={16} aria-hidden /> Получение в пункте выдачи BTS в Ташкенте — выберете при оформлении
+                                <MapPin size={16} aria-hidden /> {L.pickup}
                             </div>
                             <div>
-                                <CreditCard size={16} aria-hidden /> Оплата картой онлайн или наличными при получении
+                                <CreditCard size={16} aria-hidden /> {L.payment}
                             </div>
                             <div>
-                                <RotateCcw size={16} aria-hidden /> Отменить заказ можно, пока он не уехал со склада
+                                <RotateCcw size={16} aria-hidden /> {L.cancel}
                             </div>
                         </div>
 
@@ -249,25 +253,25 @@ function Loaded({ product }: { product: MarketProductPage }) {
                                 <b>{product.sellerInfo.name}</b>
                                 <small>
                                     {product.sellerInfo.verified && <BadgeCheck size={14} aria-hidden />}
-                                    {product.sellerInfo.verified ? 'Проверенный продавец' : 'Продавец'}
+                                    {product.sellerInfo.verified ? L.verifiedSeller : L.seller}
                                     {product.sellerInfo.rating > 0 && ` · ★ ${rating(product.sellerInfo.rating)}`}
                                 </small>
                             </span>
-                            <Link href={routes.marketShop(product.sellerInfo.slug)}>Магазин продавца</Link>
+                            <Link href={routes.marketShop(product.sellerInfo.slug)}>{L.shop}</Link>
                         </div>
                     </div>
                 </div>
 
                 {product.description && (
                     <section className="mk-panel">
-                        <h2>О товаре</h2>
+                        <h2>{L.about}</h2>
                         <p style={{ whiteSpace: 'pre-line' }}>{product.description}</p>
                     </section>
                 )}
 
                 {product.specs.length > 0 && (
                     <section className="mk-panel">
-                        <h2>Характеристики</h2>
+                        <h2>{L.specs}</h2>
                         <dl className="mk-specs">
                             {product.specs.map(([name, value]) => (
                                 <div key={name}>
@@ -280,18 +284,18 @@ function Loaded({ product }: { product: MarketProductPage }) {
                 )}
 
                 <section className="mk-panel">
-                    <h2>Отзывы</h2>
+                    <h2>{L.reviewsTitle}</h2>
                     <div className="mk-reviews-empty">
                         <span aria-hidden>💬</span>
-                        <p>Отзывы покупателей появятся здесь после запуска заказов.</p>
+                        <p>{L.reviewsEmpty}</p>
                     </div>
                 </section>
 
                 {others.length > 0 && (
                     <>
                         <div className="mk-sh">
-                            <h2>Похожие товары</h2>
-                            <Link href={`${routes.marketCatalog}?category=${(leaf ?? root)?.slug ?? ''}`}>Смотреть все →</Link>
+                            <h2>{L.similar}</h2>
+                            <Link href={`${routes.marketCatalog}?category=${(leaf ?? root)?.slug ?? ''}`}>{L.seeAll}</Link>
                         </div>
                         <div className="mk-grid">
                             {others.map((p) => (

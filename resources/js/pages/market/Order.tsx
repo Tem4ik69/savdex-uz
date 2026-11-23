@@ -5,8 +5,11 @@ import { Link } from '@/components/ui/Link';
 import { MarketLayout } from '@/layouts/MarketLayout';
 import { api, ApiError, useApi } from '@/market/api';
 import { sum } from '@/market/format';
+import { lang } from '@/market/lang';
 import { payByCard, when } from '@/market/orders';
 import { notify } from '@/market/store';
+import { commonText } from '@/market/text/common';
+import { orderText } from '@/market/text/order';
 import type { OrderDetail } from '@/market/types';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
@@ -19,6 +22,8 @@ import type { SharedProps } from '@/types';
  * обновить.
  */
 export default function MarketOrder({ number }: { number: string }) {
+    const L = lang(orderText);
+    const C = lang(commonText);
     const { auth } = usePage<SharedProps>().props;
     const loaded = useApi<{ order: OrderDetail }>(auth.user ? `orders/${number}` : null);
     const [fresh, setFresh] = useState<OrderDetail | null>(null);
@@ -37,7 +42,7 @@ export default function MarketOrder({ number }: { number: string }) {
             setAsking(false);
             notify(data.message);
         } catch (failure) {
-            notify(failure instanceof ApiError ? failure.message : 'Не получилось отменить заказ.', true);
+            notify(failure instanceof ApiError ? failure.message : L.cancelFailed, true);
         } finally {
             setBusy(false);
         }
@@ -50,10 +55,10 @@ export default function MarketOrder({ number }: { number: string }) {
     }
 
     const shell = (children: React.ReactNode) => (
-        <MarketLayout title={`Заказ ${number} · SavdEx Market`} tab="orders">
+        <MarketLayout title={L.pageTitle(number)} tab="orders">
             <div className="mk-in">
-                <nav className="mk-bc" aria-label="Путь">
-                    <Link href={routes.market}>Главная</Link>›<Link href={routes.marketOrders}>Мои заказы</Link>› {number}
+                <nav className="mk-bc" aria-label={L.breadcrumbs}>
+                    <Link href={routes.market}>{L.home}</Link>›<Link href={routes.marketOrders}>{L.myOrders}</Link>› {number}
                 </nav>
                 {children}
             </div>
@@ -63,9 +68,9 @@ export default function MarketOrder({ number }: { number: string }) {
     if (!auth.user) {
         return shell(
             <div className="mk-gate" style={{ marginTop: 16 }}>
-                <h2>Войдите, чтобы увидеть заказ</h2>
+                <h2>{L.gateTitle}</h2>
                 <Link href={routes.loginBack(routes.marketOrder(number))} className="mk-btn">
-                    Войти
+                    {L.login}
                 </Link>
             </div>,
         );
@@ -77,15 +82,15 @@ export default function MarketOrder({ number }: { number: string }) {
         return shell(
             <div className="mk-empty" style={{ marginTop: 16 }}>
                 <span aria-hidden>📦</span>
-                <h2>{loaded.status === 404 ? 'Такого заказа нет' : 'Заказ не загрузился'}</h2>
-                <p>{loaded.status === 404 ? 'Проверьте номер — или найдите заказ в списке.' : loaded.error}</p>
+                <h2>{loaded.status === 404 ? L.notFound : L.loadFailed}</h2>
+                <p>{loaded.status === 404 ? L.notFoundText : loaded.error}</p>
                 {loaded.status === 404 ? (
                     <Link href={routes.marketOrders} className="mk-btn">
-                        Мои заказы
+                        {L.myOrders}
                     </Link>
                 ) : (
                     <button type="button" className="mk-btn" onClick={loaded.reload}>
-                        Повторить
+                        {L.retry}
                     </button>
                 )}
             </div>,
@@ -98,7 +103,7 @@ export default function MarketOrder({ number }: { number: string }) {
         <article className="mk-order" style={{ marginTop: 12 }}>
             <div className="mk-order__head">
                 <h1 className="mk-order__title">
-                    Заказ {order.number}
+                    {L.title(order.number)}
                     <small>{when(order.createdAt)}</small>
                 </h1>
                 <StatusPill status={order.status} />
@@ -108,10 +113,10 @@ export default function MarketOrder({ number }: { number: string }) {
 
             {unpaidCard && (
                 <div className="mk-code mk-code--pay">
-                    <span>Заказ ждёт оплаты картой. Если вы уже оплатили — статус обновится через минуту.</span>
+                    <span>{L.awaitingCard}</span>
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                         <button type="button" className="mk-btn" disabled={busy} onClick={() => void pay()}>
-                            Оплатить {sum(order.total)} сум
+                            {L.pay} {sum(order.total)} {C.currency}
                         </button>
                         <button
                             type="button"
@@ -121,7 +126,7 @@ export default function MarketOrder({ number }: { number: string }) {
                                 loaded.reload();
                             }}
                         >
-                            Обновить статус
+                            {L.refresh}
                         </button>
                     </div>
                 </div>
@@ -129,7 +134,7 @@ export default function MarketOrder({ number }: { number: string }) {
 
             {order.status.code === 'ready' && (
                 <div className="mk-code">
-                    <span>Заказ ждёт вас в пункте выдачи: {order.pickupPoint.name}. Номер заказа:</span>
+                    <span>{L.readyAt(order.pickupPoint.name)}</span>
                     <b>{order.number}</b>
                 </div>
             )}
@@ -140,7 +145,7 @@ export default function MarketOrder({ number }: { number: string }) {
                         <div key={part.seller.slug}>
                             <div className="mk-part">
                                 <Link href={routes.marketShop(part.seller.slug)}>{part.seller.name}</Link>
-                                <span>{sum(part.total)} сум</span>
+                                <span>{sum(part.total)} {C.currency}</span>
                             </div>
                             {part.items.map((item) => (
                                 <OrderLine key={item.variantId} item={item} />
@@ -150,29 +155,29 @@ export default function MarketOrder({ number }: { number: string }) {
                 </div>
                 <dl className="mk-order__side">
                     <div>
-                        <dt>Пункт выдачи</dt>
+                        <dt>{L.pickupPoint}</dt>
                         <dd>{order.pickupPoint.name}</dd>
                         <dd style={{ fontWeight: 500 }}>{order.pickupPoint.address}</dd>
                     </div>
                     <div>
-                        <dt>Оплата</dt>
+                        <dt>{L.payment}</dt>
                         <dd>
                             {order.paymentMethod === 'card'
                                 ? order.paidAt
-                                    ? `Картой — оплачен ${when(order.paidAt)}`
-                                    : 'Картой онлайн'
-                                : 'Наличными при получении'}
+                                    ? L.paidByCard(when(order.paidAt))
+                                    : L.cardOnline
+                                : L.cashOnReceipt}
                         </dd>
                     </div>
                     {order.cancelledAt && (
                         <div>
-                            <dt>Отменён</dt>
+                            <dt>{L.cancelled}</dt>
                             <dd>{when(order.cancelledAt)}</dd>
                         </div>
                     )}
                     {order.issuedAt && (
                         <div>
-                            <dt>Выдан</dt>
+                            <dt>{L.issued}</dt>
                             <dd>{when(order.issuedAt)}</dd>
                         </div>
                     )}
@@ -180,10 +185,12 @@ export default function MarketOrder({ number }: { number: string }) {
             </div>
 
             <div className="mk-order__foot">
-                <b>Итого: {sum(order.total)} сум</b>
+                <b>
+                    {L.total} {sum(order.total)} {C.currency}
+                </b>
                 {order.canCancel && !asking && (
                     <button type="button" className="mk-link-danger" onClick={() => setAsking(true)}>
-                        Отменить заказ
+                        {L.cancelOrder}
                     </button>
                 )}
             </div>
@@ -191,18 +198,18 @@ export default function MarketOrder({ number }: { number: string }) {
             {asking && (
                 <div className="mk-cancel">
                     <label className="mk-field">
-                        Почему отменяете? (необязательно)
+                        {L.reasonLabel}
                         <input id="mk-cancel-reason" value={reason} maxLength={500} onChange={(e) => setReason(e.target.value)} />
                     </label>
                     <p className="mk-note">
-                        {order.paidAt ? 'Деньги вернутся на карту, с которой платили.' : 'Товары вернутся в продажу.'}
+                        {order.paidAt ? L.refundNote : L.restockNote}
                     </p>
                     <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                         <button type="button" className="mk-btn" style={{ background: 'var(--danger)' }} disabled={busy} onClick={() => void cancel()}>
-                            Да, отменить
+                            {L.confirmCancel}
                         </button>
                         <button type="button" className="mk-btn mk-btn--ghost" onClick={() => setAsking(false)}>
-                            Не отменять
+                            {L.keepOrder}
                         </button>
                     </div>
                 </div>

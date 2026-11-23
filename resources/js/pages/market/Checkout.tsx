@@ -7,8 +7,11 @@ import { MarketLayout } from '@/layouts/MarketLayout';
 import { localize } from '@/lib/locale';
 import { api, ApiError, useApi } from '@/market/api';
 import { sum } from '@/market/format';
+import { lang } from '@/market/lang';
 import { payByCard } from '@/market/orders';
 import { cartLines, notify, putCart, reloadCart, useCart } from '@/market/store';
+import { checkoutText } from '@/market/text/checkout';
+import { commonText } from '@/market/text/common';
 import type { CartSummary, OrderDetail, PickupPoint } from '@/market/types';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
@@ -23,6 +26,8 @@ import type { SharedProps } from '@/types';
  * страница заказа.
  */
 export default function MarketCheckout() {
+    const L = lang(checkoutText);
+    const C = lang(commonText);
     const { auth } = usePage<SharedProps>().props;
     const cart = useCart();
     const points = useApi<{ pickupPoints: PickupPoint[] }>(auth.user ? 'pickup-points' : null);
@@ -41,7 +46,7 @@ export default function MarketCheckout() {
         event.preventDefault();
 
         if (!chosen) {
-            setErrors({ pickupPoint: ['Выберите пункт выдачи'] });
+            setErrors({ pickupPoint: [L.choosePoint] });
 
             return;
         }
@@ -73,13 +78,13 @@ export default function MarketCheckout() {
     }
 
     const shell = (children: React.ReactNode) => (
-        <MarketLayout title="Оформление заказа · SavdEx Market" tab="cart">
+        <MarketLayout title={L.pageTitle} tab="cart">
             <div className="mk-in">
-                <nav className="mk-bc" aria-label="Путь">
-                    <Link href={routes.market}>Главная</Link>›<Link href={routes.marketCart}>Корзина</Link>› Оформление
+                <nav className="mk-bc" aria-label={L.breadcrumbs}>
+                    <Link href={routes.market}>{L.home}</Link>›<Link href={routes.marketCart}>{L.cart}</Link>› {L.crumb}
                 </nav>
                 <div className="mk-title">
-                    <h1>Оформление заказа</h1>
+                    <h1>{L.title}</h1>
                 </div>
                 {children}
             </div>
@@ -89,10 +94,10 @@ export default function MarketCheckout() {
     if (!auth.user) {
         return shell(
             <div className="mk-gate">
-                <h2>Войдите, чтобы оформить заказ</h2>
-                <p>Покупать на SavdEx Market можно только с входом — так мы сообщим, когда заказ приедет в пункт выдачи.</p>
+                <h2>{L.gateTitle}</h2>
+                <p>{L.gateText}</p>
                 <Link href={routes.loginBack(routes.marketCheckout)} className="mk-btn">
-                    Войти или зарегистрироваться
+                    {L.loginOrRegister}
                 </Link>
             </div>,
         );
@@ -104,10 +109,10 @@ export default function MarketCheckout() {
         return shell(
             <div className="mk-empty">
                 <span aria-hidden>🛒</span>
-                <h2>Оформлять пока нечего</h2>
-                <p>В корзине нет товаров, которые есть в наличии.</p>
+                <h2>{L.emptyTitle}</h2>
+                <p>{L.emptyText}</p>
                 <Link href={routes.marketCatalog} className="mk-btn">
-                    Перейти в каталог
+                    {L.toCatalog}
                 </Link>
             </div>,
         );
@@ -118,20 +123,22 @@ export default function MarketCheckout() {
             <div>
                 <section className="mk-panel">
                     <h2 className="mk-step-title">
-                        <i>1</i> Пункт выдачи
+                        <i>1</i> {L.pointTitle}
                     </h2>
                     {points.loading && <div className="mk-skel-block" style={{ height: 180 }} aria-busy />}
                     {points.error && (
                         <div className="mk-failed">
-                            <p>Пункты выдачи не загрузились. {points.error}</p>
+                            <p>
+                                {L.pointsFailed} {points.error}
+                            </p>
                             <button type="button" className="mk-btn" onClick={points.reload}>
-                                Повторить
+                                {L.retry}
                             </button>
                         </div>
                     )}
-                    {points.data && list.length === 0 && <p className="mk-note">Пунктов выдачи пока нет — оформить заказ не получится. Загляните позже.</p>}
+                    {points.data && list.length === 0 && <p className="mk-note">{L.noPoints}</p>}
                     {list.length > 0 && (
-                        <div className="mk-points mk-points--wide" role="radiogroup" aria-label="Пункты выдачи BTS">
+                        <div className="mk-points mk-points--wide" role="radiogroup" aria-label={L.pointsLabel}>
                             {list.map((p) => (
                                 <label key={p.code} className="mk-choice">
                                     <input type="radio" name="point" checked={point === p.code} onChange={() => setPoint(p.code)} />
@@ -146,30 +153,30 @@ export default function MarketCheckout() {
                         </div>
                     )}
                     {errors.pickupPoint?.[0] && <p className="mk-line__warn">{errors.pickupPoint[0]}</p>}
-                    <p className="mk-note">Доставки до двери пока нет — заказ забирают в пункте. Часы работы и карта пунктов появятся позже.</p>
+                    <p className="mk-note">{L.noDelivery}</p>
                 </section>
 
                 <section className="mk-panel">
                     <h2 className="mk-step-title">
-                        <i>2</i> Способ оплаты
+                        <i>2</i> {L.paymentTitle}
                     </h2>
-                    <div className="mk-pay" role="radiogroup" aria-label="Способ оплаты">
+                    <div className="mk-pay" role="radiogroup" aria-label={L.paymentTitle}>
                         <label className="mk-choice">
                             <input type="radio" name="payment" checked={payment === 'card'} onChange={() => setPayment('card')} />
                             <span>
                                 <b>
-                                    <CreditCard size={16} aria-hidden style={{ display: 'inline', verticalAlign: '-3px' }} /> Картой онлайн
+                                    <CreditCard size={16} aria-hidden style={{ display: 'inline', verticalAlign: '-3px' }} /> {L.cardOnline}
                                 </b>
-                                <small>Uzcard, Humo, Visa, Mastercard — на странице платёжной системы</small>
+                                <small>{L.cardHint}</small>
                             </span>
                         </label>
                         <label className="mk-choice">
                             <input type="radio" name="payment" checked={payment === 'cash'} onChange={() => setPayment('cash')} />
                             <span>
                                 <b>
-                                    <Banknote size={16} aria-hidden style={{ display: 'inline', verticalAlign: '-3px' }} /> При получении
+                                    <Banknote size={16} aria-hidden style={{ display: 'inline', verticalAlign: '-3px' }} /> {L.onReceipt}
                                 </b>
-                                <small>Наличными в пункте выдачи</small>
+                                <small>{L.cashHint}</small>
                             </span>
                         </label>
                     </div>
@@ -177,8 +184,8 @@ export default function MarketCheckout() {
                 </section>
             </div>
 
-            <aside className="mk-sum" aria-label="Ваш заказ">
-                <h2>Ваш заказ</h2>
+            <aside className="mk-sum" aria-label={L.yourOrder}>
+                <h2>{L.yourOrder}</h2>
                 {lines.map((line) => (
                     <div key={line.variantId} className="mk-mini">
                         <span>
@@ -190,20 +197,20 @@ export default function MarketCheckout() {
                 ))}
                 <dl>
                     <div>
-                        <dt>{chosen ? `Выдача: ${chosen.name}` : 'Выдача в пункте BTS'}</dt>
-                        <dd>0 сум</dd>
+                        <dt>{chosen ? L.pickupAt(chosen.name) : L.pickupBts}</dt>
+                        <dd>0 {C.currency}</dd>
                     </div>
                     <div className="is-total">
-                        <dt>Итого</dt>
-                        <dd>{sum(total)} сум</dd>
+                        <dt>{L.total}</dt>
+                        <dd>{sum(total)} {C.currency}</dd>
                     </div>
                 </dl>
                 <button type="submit" className="mk-btn mk-btn--block" disabled={sending || list.length === 0}>
-                    {payment === 'card' ? 'Оформить и оплатить' : 'Оформить заказ'}
+                    {payment === 'card' ? L.orderAndPay : L.placeOrder}
                 </button>
                 <p className="mk-note">
-                    Получатель — владелец аккаунта: имя и телефон берём из него. Статус заказа — в «Моих заказах».
-                    {left > 0 && ' Товары без наличия останутся в корзине.'}
+                    {L.recipientNote}
+                    {left > 0 && L.leftNote}
                 </p>
             </aside>
         </form>,

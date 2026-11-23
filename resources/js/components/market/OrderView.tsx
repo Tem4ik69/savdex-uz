@@ -2,7 +2,10 @@ import { MarketPhoto } from '@/components/market/MarketPhoto';
 import { Link } from '@/components/ui/Link';
 import { cn } from '@/lib/cn';
 import { sum } from '@/market/format';
-import { STEPS, stepIndex, statusTone } from '@/market/orders';
+import { lang } from '@/market/lang';
+import { stepIndex, statusTone, steps } from '@/market/orders';
+import { commonText } from '@/market/text/common';
+import { orderText } from '@/market/text/order';
 import type { OrderItem, OrderStatusView } from '@/market/types';
 import { routes } from '@/routes';
 
@@ -13,13 +16,14 @@ export function StatusPill({ status }: { status: OrderStatusView }) {
 
 /** Полоса шагов заказа; у отменённого и возвращённого её нет. */
 export function OrderSteps({ status }: { status: OrderStatusView }) {
+    const L = lang(orderText);
     const step = stepIndex(status.code);
 
     if (step < 0) return null;
 
     return (
-        <ol className="mk-steps" aria-label="Путь заказа">
-            {STEPS.map((s, i) => (
+        <ol className="mk-steps" aria-label={L.stepsLabel}>
+            {steps().map((s, i) => (
                 <li key={s.label} className={cn(i <= step && 'is-done', i === step && 'is-now')} aria-current={i === step ? 'step' : undefined}>
                     {s.label}
                 </li>
@@ -30,6 +34,7 @@ export function OrderSteps({ status }: { status: OrderStatusView }) {
 
 /** Позиция заказа: фото, название с вариантом, количество, сумма. */
 export function OrderLine({ item }: { item: OrderItem }) {
+    const C = lang(commonText);
     const variant = Object.entries(item.options)
         .map(([name, value]) => `${name}: ${value}`)
         .join(' · ');
@@ -44,7 +49,7 @@ export function OrderLine({ item }: { item: OrderItem }) {
                 {variant && <small>{variant}</small>}
             </span>
             × {item.quantity}
-            {item.total !== undefined && <b>{sum(item.total)} сум</b>}
+            {item.total !== undefined && <b>{sum(item.total)} {C.currency}</b>}
         </div>
     );
 }
