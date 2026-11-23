@@ -112,29 +112,33 @@ class Report:
         return "общее" if self.provider == COMMON else self.provider
 
 
-def _setting(key: str, default: int) -> int:
-    """Целая настройка не меньше 1; не число или меньше 1 — default."""
+def _setting(key: str, default: int, most: int) -> int:
+    """
+    Целая настройка от 1 до most; не число или меньше 1 — default, больше
+    most — most: опечатка в настройке не роняет сверку (переполнение даты)
+    и не глушит тревогу навсегда.
+    """
     try:
         value = int(str(settings_values().get(key, default)))
     except (TypeError, ValueError):
         return default
 
-    return value if value >= 1 else default
+    return min(value, most) if value >= 1 else default
 
 
 def refund_alert_hours() -> int:
-    """Часов ожидания возврата до тревоги: настройка; не число или меньше 1 — 24."""
-    return _setting(REFUND_HOURS_KEY, REFUND_HOURS_DEFAULT)
+    """Часов ожидания возврата до тревоги: настройка, не больше 30 суток; иначе — 24."""
+    return _setting(REFUND_HOURS_KEY, REFUND_HOURS_DEFAULT, 24 * 30)
 
 
 def cash_alert_days() -> int:
-    """Дней до тревоги о несверенных наличных: настройка; не число или меньше 1 — 3."""
-    return _setting(CASH_DAYS_KEY, CASH_DAYS_DEFAULT)
+    """Дней до тревоги о несверенных наличных: настройка, не больше 30; иначе — 3."""
+    return _setting(CASH_DAYS_KEY, CASH_DAYS_DEFAULT, 30)
 
 
 def payout_alert_days() -> int:
-    """Дней до тревоги о невыплаченной подтверждённой выплате: не число или меньше 1 — 3."""
-    return _setting(PAYOUT_DAYS_KEY, PAYOUT_DAYS_DEFAULT)
+    """Дней до тревоги о невыплаченной подтверждённой выплате: не больше 30; иначе — 3."""
+    return _setting(PAYOUT_DAYS_KEY, PAYOUT_DAYS_DEFAULT, 30)
 
 
 def _bounds(day: date) -> tuple[str, str]:
@@ -275,7 +279,9 @@ def check_cash(day: date, moment: datetime | None = None) -> Report:
         )
 
     # Наличные в журнале — ровно сумма выданного заказа «при получении»; у
-    # остальных заказов cash_collected нет
+    # остальных заказов cash_collected нет. Когда появится проводка
+    # поступления денег от BTS (cash_collected минус), эту проверку
+    # переделать вместе с ней — иначе каждый такой заказ станет тревогой.
     for order in rows(
         "with touched as ("
         " select order_id as id from market_ledger where account = 'cash_collected' "
@@ -290,12 +296,22 @@ def check_cash(day: date, moment: datetime | None = None) -> Report:
     ):
         report.problems.append(f"{order['number']}: наличные в журнале не равны сумме заказа")
 
-    # Выплата «выплачено» — её группа журнала закрывает долг этому продавцу
-    # ровно на сумму выплаты
+    # Наличные без заказа — им неоткуда взяться
+    for group in rows(
+        "select distinct entry_group from market_ledger where account = 'cash_collected' "
+        "and order_id is null and created_at >= %s and created_at < %s order by entry_group",
+        [start, end],
+    ):
+        report.problems.append(f"группа журнала {group['entry_group']}: наличные без заказа")
+
+    # Выплата «выплачено» — её группа журнала ровно из двух строк этого
+    # продавца: долг закрыт (seller_payable +сумма), деньги ушли
+    # (payout_clearing −сумма); чужая строка в группе — тоже расхождение
     for payout in rows(
         "select p.id from market_payouts p where p.status = 'paid' "
         "and p.paid_at >= %s and p.paid_at < %s and ("
-        " (select coalesce(sum(l.amount), 0) from market_ledger l "
+        " (select count(*) from market_ledger l where l.entry_group = p.ledger_group) <> 2 "
+        " or (select coalesce(sum(l.amount), 0) from market_ledger l "
         "  where l.entry_group = p.ledger_group and l.account = 'seller_payable' "
         "  and l.seller_id = p.seller_id) <> p.amount "
         " or (select coalesce(sum(l.amount), 0) from market_ledger l "
@@ -306,10 +322,14 @@ def check_cash(day: date, moment: datetime | None = None) -> Report:
         report.problems.append(f"выплата {payout['id']}: журнал денег не равен сумме выплаты")
 
     # Деньги ушли со счёта выплат — только выплатой с отметкой «выплачено»
+    # тому же продавцу (строка, дописанная в группу старой выплаты или с
+    # чужим продавцом, — расхождение)
     for group in rows(
         "select distinct l.entry_group from market_ledger l where l.account = 'payout_clearing' "
         "and l.created_at >= %s and l.created_at < %s and not exists (select 1 from "
-        "market_payouts p where p.ledger_group = l.entry_group and p.status = 'paid') "
+        "market_payouts p where p.ledger_group = l.entry_group and p.status = 'paid' "
+        "and p.seller_id = l.seller_id and (select count(*) from market_ledger g "
+        "where g.entry_group = l.entry_group) = 2) "
         "order by l.entry_group",
         [start, end],
     ):
@@ -330,8 +350,8 @@ def check_cash(day: date, moment: datetime | None = None) -> Report:
 
 def run(day: date) -> list[Report]:
     """
-    Сверка за сутки: каждый провайдер, у которого есть ключи или оплаты, и
-    общая часть. Расхождение — ERROR в журнале со счётчиками.
+    Сверка за сутки: каждый провайдер, у которого есть ключи или оплаты,
+    общая часть и касса. Расхождение — ERROR в журнале со счётчиками.
     """
     start, end = _bounds(day)
     active = {

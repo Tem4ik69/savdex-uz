@@ -28,7 +28,6 @@ docs/marketplace-security.md, разделы 3 и 4.
 from __future__ import annotations
 
 from collections.abc import Iterator
-from datetime import UTC, datetime
 from itertools import count
 from typing import Any
 
@@ -1024,10 +1023,10 @@ def test_ночная_сверка_кассы(сайт):
     Сверка (reconcile.check_cash): несверенные наличные дольше 3 дней,
     наличные в журнале ≠ сумме заказа, журнал выплаты ≠ её сумме, деньги
     со счёта выплат без выплаты, подтверждённая выплата без «выплачено»
-    дольше 3 дней. Сверка — за сегодня: честные заказы и выплаты прочих
-    проверок файла расхождений не дают.
+    дольше 3 дней, чужая строка в группе выплаты, наличные без заказа.
+    Сверка — за сегодня: честные выплаты прочих проверок файла расхождений
+    не дают.
     """
-    сегодня = str(datetime.now(UTC).date())
     данные = _продавец_с_товаром()
     вариант = данные["вариант"]
 
@@ -1061,6 +1060,31 @@ def test_ночная_сверка_кассы(сайт):
         == 302
     )
 
+    # В группу честной выплаты дописана пара другому продавцу — расхождение
+    # и выплаты, и счёта выплат
+    с_чужой = _готовая(сайт)
+    assert (
+        _выплата(_кассир(1), с_чужой["выплата"], "paid", bank_reference="ПП-СВ-3")["status"] == 302
+    )
+    [(чужая_группа,)] = sql(
+        "select ledger_group from market_payouts where id = %s", [с_чужой["выплата"]]
+    )
+    sql(
+        "insert into market_ledger (entry_group, account, seller_id, amount, memo) "
+        "select %s, v.a, %s, v.s, 'тест сверки' "
+        "from (values ('seller_payable', 700), ('payout_clearing', -700)) v(a, s)",
+        [чужая_группа, данные["продавец"]],
+    )
+
+    # Наличные без заказа
+    [(без_заказа,)] = sql(
+        "with g as (select gen_random_uuid() as id), ins as ("
+        "insert into market_ledger (entry_group, account, amount, memo) "
+        "select g.id, v.a, v.s, 'тест сверки' from g, "
+        "(values ('cash_collected', 300), ('buyer_receivable', -300)) v(a, s)) "
+        "select id from g"
+    )
+
     # Деньги ушли со счёта выплат без выплаты
     [(группа,)] = sql(
         "with g as (select gen_random_uuid() as id), ins as ("
@@ -1090,6 +1114,8 @@ def test_ночная_сверка_кассы(сайт):
         sql("alter table market_payouts enable trigger market_payouts_guard")
 
     try:
+        # День — из базы, после всех записей: тест мог пересечь полночь UTC
+        [(сегодня,)] = sql("select ((now() at time zone 'utc')::date)::text")
         сверка = _manage("market_reconcile_payments", "--day", сегодня)
         вывод = сверка.stdout
         assert сверка.returncode == 1, вывод + сверка.stderr
@@ -1100,6 +1126,9 @@ def test_ночная_сверка_кассы(сайт):
         assert f"выплата {подменённая['выплата']}: журнал денег не равен сумме выплаты" in вывод
         assert f"выплата {честная['выплата']}:" not in вывод
         assert f"группа журнала {группа}: выплата без отметки" in вывод
+        assert f"выплата {с_чужой['выплата']}: журнал денег не равен сумме выплаты" in вывод
+        assert f"группа журнала {чужая_группа}: выплата без отметки" in вывод
+        assert f"группа журнала {без_заказа}: наличные без заказа" in вывод
         assert (
             f"выплата {зависшая['выплата']} подтверждена, «выплачено» не отмечено дольше 3 дн."
             in вывод
@@ -1107,8 +1136,8 @@ def test_ночная_сверка_кассы(сайт):
         assert f"выплата {свежая['выплата']} " not in вывод
         # Честные выплаты прочих проверок файла (сегодня) — без расхождений
         for (pk_,) in sql(
-            "select id from market_payouts where status = 'paid' and id <> %s",
-            [подменённая["выплата"]],
+            "select id from market_payouts where status = 'paid' and id <> all(%s)",
+            [[подменённая["выплата"], с_чужой["выплата"]]],
         ):
             assert f"выплата {pk_}:" not in вывод
 
