@@ -19,7 +19,10 @@ from savdex.market.payments import reconcile
 
 
 class Command(BaseCommand):
-    help = "Маркетплейс: сверить оплаты Uzum, Payme и Click с журналом денег за сутки"
+    help = (
+        "Маркетплейс: сверить оплаты Uzum, Payme и Click, наличные BTS и выплаты "
+        "с журналом денег за сутки"
+    )
 
     def add_arguments(self, parser: CommandParser) -> None:
         parser.add_argument(
@@ -42,9 +45,10 @@ class Command(BaseCommand):
         total = 0
 
         for report in reports:
-            name = "общее" if report.provider == "*" else report.provider
+            # У кассы оплат провайдеров нет — только расхождения
+            payments = "" if report.provider == reconcile.CASH else f"оплат {report.payments}, "
             self.stdout.write(
-                f"{name}: оплат {report.payments}, расхождений {len(report.problems)}"
+                f"{report.label}: {payments}расхождений {len(report.problems)}"
                 + (", выписка сверена" if report.statement else "")
             )
 

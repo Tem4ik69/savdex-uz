@@ -28,6 +28,7 @@ docs/marketplace-security.md, разделы 3 и 4.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from itertools import count
 from typing import Any
 
@@ -39,7 +40,15 @@ from savdex.market import cash
 
 from .pg_admin import django, sql, журнал, нужна_база, свежая_база
 from .test_market import _get_as, _json, _post, _компания, _продавец, _сотрудник, _товар, _человек
-from .test_market_orders import _id, _python, _в_корзину, _оформить, _покупатель, _статус
+from .test_market_orders import (
+    _id,
+    _manage,
+    _python,
+    _в_корзину,
+    _оформить,
+    _покупатель,
+    _статус,
+)
 from .web_site import адрес
 
 # ── Без базы ────────────────────────────────────────────────────────
@@ -1004,3 +1013,115 @@ def test_ждущий_возврата_не_в_доступном_и_ручно�
         "and amount > 0",
         [pk],
     ) == [(1,)]
+
+
+# ── Ночная сверка кассы ─────────────────────────────────────────────
+
+
+@нужна_база
+def test_ночная_сверка_кассы(сайт):
+    """
+    Сверка (reconcile.check_cash): несверенные наличные дольше 3 дней,
+    наличные в журнале ≠ сумме заказа, журнал выплаты ≠ её сумме, деньги
+    со счёта выплат без выплаты, подтверждённая выплата без «выплачено»
+    дольше 3 дней. Сверка — за сегодня: честные заказы и выплаты прочих
+    проверок файла расхождений не дают.
+    """
+    сегодня = str(datetime.now(UTC).date())
+    данные = _продавец_с_товаром()
+    вариант = данные["вариант"]
+
+    # Наличные: не сверены 5 дней — тревога; 1 день — рано; сверены — нет
+    _, долгий, долгий_pk = _заказ(сайт, вариант)
+    _выдать(долгий_pk, дней_назад=5, сверить=False)
+    _, свежий, свежий_pk = _заказ(сайт, вариант)
+    _выдать(свежий_pk, дней_назад=1, сверить=False)
+    _, сверен, сверен_pk = _заказ(сайт, вариант)
+    _выдать(сверен_pk, дней_назад=8)
+
+    # Наличные в журнале у заказа картой — не равны сумме (картой — ноль)
+    _, картой, картой_pk = _заказ(сайт, вариант, method="card")
+    sql(
+        "with g as (select gen_random_uuid() as id) "
+        "insert into market_ledger (entry_group, account, order_id, amount, memo) "
+        "select g.id, v.a, %s, v.s, 'тест сверки' from g, "
+        "(values ('cash_collected', 100), ('buyer_receivable', -100)) v(a, s)",
+        [картой_pk],
+    )
+
+    # Честная выплата — без расхождения; выплата, чью сумму подменили мимо
+    # кода, — расхождение журнала
+    честная = _готовая(сайт)
+    assert (
+        _выплата(_кассир(1), честная["выплата"], "paid", bank_reference="ПП-СВ-1")["status"] == 302
+    )
+    подменённая = _готовая(сайт)
+    assert (
+        _выплата(_кассир(1), подменённая["выплата"], "paid", bank_reference="ПП-СВ-2")["status"]
+        == 302
+    )
+
+    # Деньги ушли со счёта выплат без выплаты
+    [(группа,)] = sql(
+        "with g as (select gen_random_uuid() as id), ins as ("
+        "insert into market_ledger (entry_group, account, seller_id, amount, memo) "
+        "select g.id, v.a, %s, v.s, 'тест сверки' from g, "
+        "(values ('seller_payable', 500), ('payout_clearing', -500)) v(a, s)) "
+        "select id from g",
+        [данные["продавец"]],
+    )
+
+    # Подтверждена 4 дня назад, «выплачено» не отмечено; подтверждена
+    # сегодня — рано
+    зависшая = _готовая(сайт)
+    свежая = _готовая(сайт)
+
+    sql("alter table market_payouts disable trigger market_payouts_guard")
+    try:
+        sql(
+            "update market_payouts set approved_at = approved_at - interval '4 days' where id = %s",
+            [зависшая["выплата"]],
+        )
+        sql(
+            "update market_payouts set amount = amount + 1 where id = %s",
+            [подменённая["выплата"]],
+        )
+    finally:
+        sql("alter table market_payouts enable trigger market_payouts_guard")
+
+    try:
+        сверка = _manage("market_reconcile_payments", "--day", сегодня)
+        вывод = сверка.stdout
+        assert сверка.returncode == 1, вывод + сверка.stderr
+
+        assert f"{долгий}: наличные не сверены с отчётом BTS дольше 3 дн." in вывод
+        assert свежий not in вывод and сверен not in вывод
+        assert f"{картой}: наличные в журнале не равны сумме заказа" in вывод
+        assert f"выплата {подменённая['выплата']}: журнал денег не равен сумме выплаты" in вывод
+        assert f"выплата {честная['выплата']}:" not in вывод
+        assert f"группа журнала {группа}: выплата без отметки" in вывод
+        assert (
+            f"выплата {зависшая['выплата']} подтверждена, «выплачено» не отмечено дольше 3 дн."
+            in вывод
+        )
+        assert f"выплата {свежая['выплата']} " not in вывод
+        # Честные выплаты прочих проверок файла (сегодня) — без расхождений
+        for (pk_,) in sql(
+            "select id from market_payouts where status = 'paid' and id <> %s",
+            [подменённая["выплата"]],
+        ):
+            assert f"выплата {pk_}:" not in вывод
+
+        # В журнал приложения — только счётчики, без номеров заказов
+        for номер in (долгий, картой):
+            assert номер not in сверка.stderr
+    finally:
+        # Вернуть сумму, чтобы прочие проверки видели честную выплату
+        sql("alter table market_payouts disable trigger market_payouts_guard")
+        try:
+            sql(
+                "update market_payouts set amount = amount - 1 where id = %s",
+                [подменённая["выплата"]],
+            )
+        finally:
+            sql("alter table market_payouts enable trigger market_payouts_guard")
