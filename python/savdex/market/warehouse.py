@@ -49,6 +49,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.db import DatabaseError, transaction
@@ -1051,6 +1052,28 @@ def code_of(order: Mapping[str, Any]) -> str | None:
     return pickup_code(int(order["id"]), order["ready_at"])
 
 
+def pickup_until(order: Mapping[str, Any]) -> datetime | None:
+    """
+    До какого момента заказ ждёт покупателя в пункте (время прихода плюс
+    market_unclaimed_days) — только пока «можно забрать»; позже его
+    закрывает expire_unclaimed.
+    """
+    ready = order.get("ready_at")
+
+    if order.get("status") != orders.READY or not isinstance(ready, datetime):
+        return None
+
+    return ready + timedelta(days=unclaimed_days())
+
+
+def _until_text(ready: datetime) -> str:
+    """Срок «заберите до» для уведомления: «30.11» по времени Ташкента — понятно на любом языке."""
+    moment = ready if ready.tzinfo else ready.replace(tzinfo=UTC)
+    until = moment + timedelta(days=unclaimed_days())
+
+    return until.astimezone(ZoneInfo("Asia/Tashkent")).strftime("%d.%m")
+
+
 def _stamp(value: Any) -> str:  # noqa: ANN401
     """Время прихода тем же видом, каким его пишет now(): «ГГГГ-ММ-ДД ЧЧ:ММ:СС»."""
     if isinstance(value, datetime):
@@ -1238,7 +1261,7 @@ def _notify_ready(order_id: int) -> None:
 
     found = one(
         "select o.number, o.buyer_user_id, o.pickup_point_name, o.pickup_point_address, "
-        "p.hours, u.locale from market_orders o join users u on u.id = o.buyer_user_id "
+        "o.ready_at, p.hours, u.locale from market_orders o join users u on u.id = o.buyer_user_id "
         "join market_pickup_points p on p.id = o.pickup_point_id where o.id = %s",
         [order_id],
     )
@@ -1267,6 +1290,9 @@ def _notify_ready(order_id: int) -> None:
                     address=found["pickup_point_address"],
                     hours=found["hours"] or "—",
                     days=days,
+                    until=_until_text(found["ready_at"])
+                    if isinstance(found["ready_at"], datetime)
+                    else "—",
                 ),
             )
     except Exception:

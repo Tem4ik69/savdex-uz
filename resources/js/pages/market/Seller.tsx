@@ -694,7 +694,10 @@ function Supplies({ products }: { products: MyProduct[] }) {
                                         <b>{supply.number}</b>
                                         {supply.createdAt && <div className="mk-muted">{when(supply.createdAt)}</div>}
                                     </td>
-                                    <td>{supply.warehouse.name}</td>
+                                    <td>
+                                        {supply.warehouse.name}
+                                        <small className="mk-muted">{supply.warehouse.address}</small>
+                                    </td>
                                     <td>{supply.expectedAt ? day(supply.expectedAt) : L.supplies.noDate}</td>
                                     <td>
                                         <ul className="mk-supply-items">
@@ -759,6 +762,7 @@ function SupplyForm({ products, onClose, onCreated }: { products: MyProduct[]; o
     const [productId, setProductId] = useState<number | null>(null);
     const detail = useApi<{ product: MyProductDetail }>(productId === null ? null : `me/products/${productId}`);
     const [variantId, setVariantId] = useState<number | null>(null);
+    const [warehouseCode, setWarehouseCode] = useState('');
     const [quantity, setQuantity] = useState('');
     const [lines, setLines] = useState<SupplyLine[]>([]);
     const [errors, setErrors] = useState<Record<string, string[]>>({});
@@ -820,6 +824,7 @@ function SupplyForm({ products, onClose, onCreated }: { products: MyProduct[]; o
     }
 
     const warehouses = places.data?.warehouses ?? [];
+    const place = warehouses.find((w) => w.code === warehouseCode) ?? warehouses[0];
 
     return (
         <section className="mk-panel">
@@ -843,14 +848,18 @@ function SupplyForm({ products, onClose, onCreated }: { products: MyProduct[]; o
                 >
                     <label className="mk-field">
                         {L.supplies.warehouse}
-                        <select name="warehouse" defaultValue={warehouses[0].code}>
+                        <select name="warehouse" value={place.code} onChange={(event) => setWarehouseCode(event.target.value)}>
                             {warehouses.map((w) => (
                                 <option key={w.code} value={w.code}>
-                                    {w.name} — {w.address}
+                                    {w.name}
                                 </option>
                             ))}
                         </select>
-                        {errors.warehouse?.[0] && <small className="is-error">{errors.warehouse[0]}</small>}
+                        {errors.warehouse?.[0] ? (
+                            <small className="is-error">{errors.warehouse[0]}</small>
+                        ) : (
+                            <small className="mk-where">{L.supplies.bringTo(`${place.address}${place.city && !place.address.includes(place.city) ? `, ${place.city}` : ''}`)}</small>
+                        )}
                     </label>
                     <label className="mk-field">
                         {L.supplies.expected}

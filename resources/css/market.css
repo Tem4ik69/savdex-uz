@@ -675,3 +675,6 @@ img.mk-seller__logo,img.mk-shop__logo{object-fit:cover}
 .mk-supply-pick select,.mk-supply-pick input{width:100%}
 .mk-icon-btn{display:grid;place-items:center;width:32px;height:32px;border-radius:8px;color:var(--text-muted);transition:background var(--t-fast),color var(--t-fast)}
 .mk-icon-btn:hover{background:var(--danger-bg,#fee2e2);color:var(--danger)}
+.mk-until{margin:6px 0 0;font-size:13px;font-weight:700;color:var(--success-text)}
+.mk-code__until{flex-basis:100%;font-size:12px;font-weight:600;color:var(--success-text)}
+.mk-where{font-weight:600;color:var(--text)}

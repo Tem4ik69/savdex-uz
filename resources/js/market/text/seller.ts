@@ -132,6 +132,7 @@ const ru = {
         formTitle: 'Новая поставка',
         close: 'Закрыть',
         warehouse: 'Склад',
+        bringTo: (address: string) => `Куда везти: ${address}`,
         warehouseNone: 'Складов для поставки пока нет — их заводит администратор SavdEx.',
         expected: 'Когда привезёте',
         expectedHint: 'Необязательно, не позже чем через 90 дней.',
@@ -149,7 +150,7 @@ const ru = {
         loadingVariants: 'Загружаем варианты…',
         saveDraft: 'Сохранить черновик',
         sendNow: 'Сразу отправить на склад',
-        hint: 'Черновик можно поправить и отправить позже. Отправленную поставку склад ждёт: при приёмке он считает принятое и брак — расхождение вы увидите здесь. Отменить можно до приёмки.',
+        hint: 'Черновик можно поправить и отправить позже. Отправленную поставку склад ждёт: при приёмке он считает принятое и брак — расхождение вы увидите здесь. Отменить можно до приёмки. Хранение на складе и доставка в пункты выдачи — за счёт SavdEx.',
     },
     orders: {
         title: 'Заказы с вашими товарами',
@@ -333,6 +334,7 @@ const uz: typeof ru = {
         formTitle: 'Yangi yetkazib berish',
         close: 'Yopish',
         warehouse: 'Ombor',
+        bringTo: (address) => `Qayerga olib borish: ${address}`,
         warehouseNone: 'Hozircha yetkazib berish uchun omborlar yo‘q — ularni SavdEx administratori qo‘shadi.',
         expected: 'Qachon olib kelasiz',
         expectedHint: 'Majburiy emas, 90 kundan kechiktirmay.',
@@ -350,7 +352,7 @@ const uz: typeof ru = {
         loadingVariants: 'Variantlar yuklanmoqda…',
         saveDraft: 'Qoralamani saqlash',
         sendNow: 'Darhol omborga yuborish',
-        hint: 'Qoralamani tuzatib, keyinroq yuborish mumkin. Yuborilgan yetkazib berishni ombor kutadi: qabul qilishda qabul qilingan va nuqsonli mahsulot sanaladi — farqni shu yerda ko‘rasiz. Qabul qilinguncha bekor qilish mumkin.',
+        hint: 'Qoralamani tuzatib, keyinroq yuborish mumkin. Yuborilgan yetkazib berishni ombor kutadi: qabul qilishda qabul qilingan va nuqsonli mahsulot sanaladi — farqni shu yerda ko‘rasiz. Qabul qilinguncha bekor qilish mumkin. Omborda saqlash va topshirish punktlariga yetkazish — SavdEx hisobidan.',
     },
     orders: {
         title: 'Mahsulotlaringiz bilan buyurtmalar',

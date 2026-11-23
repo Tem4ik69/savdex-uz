@@ -1268,6 +1268,8 @@ def pickup_points() -> list[dict[str, Any]]:
 
 def mine(user_id: int, locale: str) -> list[dict[str, Any]]:
     """Заказы покупателя — только свои, новые сверху."""
+    from savdex.market import warehouse
+
     return [
         {
             "number": r["number"],
@@ -1277,10 +1279,11 @@ def mine(user_id: int, locale: str) -> list[dict[str, Any]]:
             "count": int(r["count"] or 0),
             "pickupPoint": {"name": r["pickup_point_name"], "address": r["pickup_point_address"]},
             "createdAt": _when(r["created_at"]),
+            "pickupUntil": _when(warehouse.pickup_until(r)),
         }
         for r in rows(
             "select o.number, o.status, o.payment_method, o.total, o.pickup_point_name, "
-            "o.pickup_point_address, o.created_at, "
+            "o.pickup_point_address, o.created_at, o.ready_at, "
             "(select sum(i.quantity) from market_order_items i where i.order_id = o.id) as count "
             "from market_orders o where o.buyer_user_id = %s "
             "order by o.created_at desc, o.id desc limit 200",
@@ -1363,6 +1366,8 @@ def detail(user_id: int, number: str, locale: str) -> dict[str, Any] | None:
         },
         # Код выдачи — только самому покупателю и только пока заказ ждёт в пункте
         "pickupCode": warehouse.code_of(order),
+        # «Заберите до»: только пока заказ ждёт в пункте
+        "pickupUntil": _when(warehouse.pickup_until(order)),
         "itemsTotal": som(order["items_total"]),
         "delivery": som(order["delivery_total"]),
         "total": som(order["total"]),
