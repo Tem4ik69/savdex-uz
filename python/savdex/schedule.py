@@ -376,8 +376,9 @@ def refund_market_orders(now: datetime, due: datetime) -> str:
 
 def reconcile_market_payments(now: datetime, due: datetime) -> str:
     """
-    Каждую ночь: оплаты маркетплейса за вчерашние сутки (UTC) — против
-    журнала денег (savdex/market/payments/reconcile.py). Расхождение —
+    Каждую ночь: оплаты маркетплейса за вчерашние сутки (UTC), наличные BTS
+    и выплаты продавцам — против журнала денег
+    (savdex/market/payments/reconcile.py). Расхождение —
     ERROR в журнале приложения, только счётчики, и сигнал «сбой» в
     Healthchecks (MARKET_HC_PING_PAYMENTS) — тревога в Telegram.
     """
