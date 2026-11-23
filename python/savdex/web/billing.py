@@ -181,6 +181,7 @@ def _empty() -> dict[str, Any]:
         "invoices": [],
         "requisites": [],
         "checkout": False,
+        "providers": [],
         "promoAllowed": False,
         "selected": None,
     }
@@ -337,6 +338,8 @@ def props(ctx: Context) -> dict[str, Any]:
         # Тариф со страницы тарифов (?plan=business) — сразу к оплате
         "selected": selected if isinstance(selected, str) and selected != "" else None,
         "checkout": checkout_enabled(),
+        # Способы онлайн-оплаты: покупатель выбирает, умолчание — первым
+        "providers": checkout.available(),
         "promoAllowed": promo_allowed(cid),
     }
 

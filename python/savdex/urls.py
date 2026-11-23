@@ -32,6 +32,7 @@ from savdex.web import (
     card_actions,
     catalog,
     chat_actions,
+    click_callbacks,
     companies,
     company,
     company_contact_actions,
@@ -55,6 +56,7 @@ from savdex.web import (
     news,
     og_image,
     onboarding_actions,
+    payme_callbacks,
     payment_callbacks,
     pricing,
     promo_actions,
@@ -707,6 +709,23 @@ urlpatterns = [
         r"^(?:(?:uz|en|zh|tr)/)?payments/uzum/callback/(?P<operation>[a-z]+)$",
         payment_callbacks.merchant,
         name="payments.uzum.operation",
+    ),
+    # Payme (Merchant API) и Click (SHOP API) — тоже раньше общего вебхука:
+    # иначе он принял бы их за кассу Uzum
+    re_path(
+        r"^(?:(?:uz|en|zh|tr)/)?payments/payme/callback$",
+        payme_callbacks.endpoint,
+        name="payments.payme",
+    ),
+    re_path(
+        r"^(?:(?:uz|en|zh|tr)/)?payments/click/callback/prepare$",
+        click_callbacks.prepare,
+        name="payments.click.prepare",
+    ),
+    re_path(
+        r"^(?:(?:uz|en|zh|tr)/)?payments/click/callback/complete$",
+        click_callbacks.complete,
+        name="payments.click.complete",
     ),
     re_path(
         r"^(?:(?:uz|en|zh|tr)/)?payments/(?P<provider>[a-z]+)/callback(?:/(?P<operation>[a-z]+))?$",

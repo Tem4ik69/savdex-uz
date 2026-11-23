@@ -97,7 +97,52 @@ function useOneAtATime() {
  * приходит с сервера на поле — причин отказа несколько (код погашен,
  * просрочен, не тот вид), и человек должен видеть свою.
  */
-function PromoCodeForm() {
+/** Названия провайдеров онлайн-оплаты: торговые марки, не переводятся */
+const PROVIDER_NAMES: Record<string, string> = { uzum: 'Uzum', payme: 'Payme', click: 'Click' };
+
+/**
+ * Выбор способа онлайн-оплаты: Uzum, Payme или Click. Показывается,
+ * только когда включено больше одного; выбранный уходит полем provider
+ * с каждой кнопкой «Оплатить» — заказ, счёт и скидочный промокод.
+ */
+function ProviderPicker({
+    providers,
+    value,
+    onChange,
+}: {
+    providers: string[];
+    value: string;
+    onChange: (provider: string) => void;
+}) {
+    return (
+        <Panel title={t('cabinet.billing.method_title')}>
+            <p className="t-sm muted" style={{ marginBottom: 12 }}>
+                {t('cabinet.billing.method_text')}
+            </p>
+            <div role="radiogroup" aria-label={t('cabinet.billing.method_title')} className="row wrap" style={{ gap: 8 }}>
+                {providers.map((key) => {
+                    const selected = value === key;
+
+                    return (
+                        <button
+                            key={key}
+                            type="button"
+                            role="radio"
+                            aria-checked={selected}
+                            onClick={() => onChange(key)}
+                            className={selected ? 'btn btn-primary btn-sm' : 'btn btn-secondary btn-sm'}
+                        >
+                            {selected && <Check aria-hidden className="size-4" />}
+                            {PROVIDER_NAMES[key] ?? key}
+                        </button>
+                    );
+                })}
+            </div>
+        </Panel>
+    );
+}
+
+function PromoCodeForm({ provider }: { provider: string }) {
     // Со страницы тарифов приходят с кодом в адресе (?promo=…):
     // поле уже заполнено, остаётся нажать «Применить»
     const form = useForm({
@@ -109,6 +154,8 @@ function PromoCodeForm() {
 
     function submit(e: FormEvent) {
         e.preventDefault();
+        // Скидочный код уводит на оплату — выбранным провайдером
+        form.transform((data) => ({ ...data, provider }));
         form.post('/cabinet/billing/promo', {
             preserveScroll: true,
             onSuccess: () => form.reset('promo_code'),
@@ -163,6 +210,7 @@ export function BillingStore({
     invoices,
     requisites,
     checkout,
+    providers = [],
     promoAllowed = false,
 }: {
     plans: PlanOffer[];
@@ -172,18 +220,27 @@ export function BillingStore({
     requisites: Record<string, string>;
     /** Онлайн-касса включена: кнопки ведут на страницу оплаты */
     checkout: boolean;
+    /** Включённые способы онлайн-оплаты; умолчание — первым */
+    providers?: string[];
     /** Показывать форму промокода: код не активирован либо скидочный ещё не оплачен */
     promoAllowed?: boolean;
 }) {
     const orderLabel = checkout ? t('cabinet.billing.pay') : t('cabinet.billing.invoice_me');
     const { confirm, dialog } = useConfirm();
     const { busy, post } = useOneAtATime();
+    const [provider, setProvider] = useState(providers[0] ?? '');
     const order = (kind: 'plan' | 'credits', id: number) =>
-        post(`${kind}:${id}`, '/cabinet/billing/order', { kind, id });
+        post(`${kind}:${id}`, '/cabinet/billing/order', { kind, id, provider });
 
     return (
         <>
             {dialog}
+
+            {checkout && providers.length > 1 && (
+                <div style={{ marginBottom: 24 }}>
+                    <ProviderPicker providers={providers} value={provider} onChange={setProvider} />
+                </div>
+            )}
 
             {invoices.length > 0 && (
                 <Panel title={t('cabinet.billing.due_title')}>
@@ -213,7 +270,7 @@ export function BillingStore({
                                                 className="btn btn-primary btn-sm"
                                                 disabled={busy !== null}
                                                 aria-busy={busy === `pay:${inv.id}`}
-                                                onClick={() => post(`pay:${inv.id}`, `/cabinet/billing/invoice/${inv.id}/pay`)}
+                                                onClick={() => post(`pay:${inv.id}`, `/cabinet/billing/invoice/${inv.id}/pay`, { provider })}
                                             >
                                                 {t('cabinet.billing.pay')}
                                             </button>
@@ -275,7 +332,7 @@ export function BillingStore({
                 форму прячет только уже погашенный промокод */}
             {promoAllowed && (
                 <div className="mt-24">
-                    <PromoCodeForm />
+                    <PromoCodeForm provider={provider} />
                 </div>
             )}
 

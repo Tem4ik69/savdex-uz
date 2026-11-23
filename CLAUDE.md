@@ -65,13 +65,13 @@
 
 | Путь | Что |
 |---|---|
-| `python/savdex/` | Django 5.2: сайт, кабинет, админка (`/py/admin/`), расписание, оплата (Uzum), CRM, поддержка — [python/README.md](python/README.md) |
+| `python/savdex/` | Django 5.2: сайт, кабинет, админка (`/py/admin/`), расписание, оплата (Uzum, Payme, Click), CRM, поддержка — [python/README.md](python/README.md) |
 | `resources/js/` | React 19 + Inertia, TypeScript strict, Vite, Tailwind 4 |
 | `python/tests/` | pytest на настоящем PostgreSQL |
 | `deploy/` | машины, compose, скрипты выкладки и копий — [deploy/README.md](deploy/README.md) |
 | `deploy/monitoring/` | агент Grafana Alloy, правила тревог `alerts.yaml` |
 | `.github/workflows/` | CI, staging, preview, prod, alerts |
-| `docs/` | документация: [backlog](docs/backlog.md) — что осталось сделать; [мониторинг](docs/monitoring.md); [резервные копии](docs/backups.md); роли админки, CRM, MEYOS, мини-сайты, почта поддержки |
+| `docs/` | документация: [backlog](docs/backlog.md) — что осталось сделать; [мониторинг](docs/monitoring.md); [резервные копии](docs/backups.md); [оплата Uzum, Payme, Click](docs/payments.md); роли админки, CRM, MEYOS, мини-сайты, почта поддержки |
 
 ## Как код попадает на сайт
 

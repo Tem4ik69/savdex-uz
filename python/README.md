@@ -65,7 +65,7 @@ Telegram-бот у себя без настоящего бота: `TELEGRAM_BOT_
 | `savdex/settings.py`, `savdex/urls.py` | Настройки; все адреса сайта, 404 на остальном (`savdex/web/fallback.py`) |
 | `savdex/web/` | Страницы и формы сайта и кабинета: каркас и объект страницы Inertia, общие данные, язык, SEO, сессия, проверка ввода, ограничение частоты |
 | `savdex/locale/ui/` | Словарь интерфейса на пяти языках — тексты правятся здесь |
-| `savdex/payments/`, `savdex/finance/` | Касса и шлюз Uzum; счета, подписки, промокоды, возвраты, отчёты и сверки в админке |
+| `savdex/payments/`, `savdex/finance/` | Онлайн-оплата Uzum, Payme и Click ([docs/payments.md](../docs/payments.md)); счета, подписки, промокоды, возвраты, отчёты и сверки в админке |
 | `savdex/adminsite.py`, `savdex/access.py`, `savdex/audit.py` | Админка: вход, права по ролям, журнал действий |
 | `savdex/accounts/`, `savdex/data/`, `savdex/moderation/`, `savdex/crm/`, `savdex/support/`, `savdex/site/`, `savdex/catalogs/`, `savdex/geo/`, `savdex/billing/`, `savdex/tenders/`, `savdex/system/`, `savdex/dashboard/` | Разделы админки |
 | `savdex/bootstrap/` | Снимок схемы, права роли `savdex_django`, справочники, миграции SQL |

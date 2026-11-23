@@ -1,6 +1,8 @@
 """
 Онлайн-касса: регистрация платежа в Uzum и ссылка на платёжную
-страницу (этап 7, шаг 53). Копия PaymentGatewayManager::default и
+страницу (этап 7, шаг 53), выбор провайдера — Uzum, Payme или Click
+(available, choose; ссылки Payme и Click — savdex/payments/payme.py и
+click.py). Копия PaymentGatewayManager::default и
 UzumGateway::createCheckout — без записи в базу: номер заказа Uzum
 счёту дописывает вызывающий.
 
@@ -28,8 +30,8 @@ SESSION_TIMEOUT_SECS = 1800
 #: UzumGateway::PAY_URL_KEYS
 PAY_URL_KEYS = ("paymentRedirectUrl", "redirectUrl", "paymentUrl", "payUrl", "formUrl", "url")
 
-#: PaymentGatewayManager::GATEWAYS
-GATEWAYS = ("uzum",)
+#: Провайдеры онлайн-оплаты счетов сайта — в этом порядке на странице
+GATEWAYS = ("uzum", "payme", "click")
 
 
 class GatewayError(Exception):
@@ -60,28 +62,57 @@ def default_provider() -> str:
 
 
 def enabled(provider: str) -> bool:
-    """PaymentGatewayManager::enabled."""
+    """
+    PaymentGatewayManager::enabled — только Uzum: по нему решает вебхук
+    кассы Uzum (payments/<провайдер>/callback). У Payme и Click свои
+    колбэки и своя проверка (payme.enabled, click.enabled).
+    """
     return provider == "uzum" and env_flag("PAYMENTS_UZUM_ENABLED")
 
 
-def checkout_enabled() -> bool:
-    """BillingController::checkoutEnabled: касса открыта и провайдер включён."""
-    provider = default_provider()
+def ready(provider: str) -> bool:
+    """Провайдером можно оплатить счёт: включён, ключи заданы, касса открыта."""
+    from savdex.payments import click, payme
 
-    return provider == "uzum" and env_flag("PAYMENTS_UZUM_CHECKOUT_ENABLED") and enabled(provider)
+    if provider == "uzum":
+        return env_flag("PAYMENTS_UZUM_CHECKOUT_ENABLED") and enabled("uzum")
+
+    if provider == "payme":
+        return payme.enabled()
+
+    if provider == "click":
+        return click.enabled()
+
+    return False
+
+
+def available() -> list[str]:
+    """Провайдеры для оплаты счёта; провайдер по умолчанию (PAYMENTS_DEFAULT) — первым."""
+    found = [provider for provider in GATEWAYS if ready(provider)]
+    default = default_provider()
+
+    return sorted(found, key=lambda provider: provider != default)
+
+
+def choose(requested: object) -> str | None:
+    """Выбранный покупателем провайдер, если им можно платить; иначе — первый доступный."""
+    found = available()
+
+    if isinstance(requested, str) and requested in found:
+        return requested
+
+    return found[0] if found else None
+
+
+def checkout_enabled() -> bool:
+    """BillingController::checkoutEnabled: открыта касса хотя бы одного провайдера."""
+    return bool(available())
 
 
 def gateway() -> UzumConfig:
-    """PaymentGatewayManager::default: неизвестный или выключенный — отказ."""
-    provider = default_provider()
-
-    if provider not in GATEWAYS:
-        raise GatewayError(f"Неизвестный платёжный провайдер: {provider}")
-
-    if not enabled(provider):
-        raise GatewayError(
-            f"Провайдер {provider} выключен — включите его в конфигурации и задайте ключи"
-        )
+    """Настройки Uzum; выключенный — отказ."""
+    if not enabled("uzum"):
+        raise GatewayError("Провайдер uzum выключен — включите его в конфигурации и задайте ключи")
 
     return UzumConfig.from_env()
 

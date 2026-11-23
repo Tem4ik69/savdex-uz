@@ -38,6 +38,8 @@ interface Props {
     requisites: Record<string, string>;
     /** Онлайн-касса включена: кнопки покупки ведут на страницу оплаты */
     checkout: boolean;
+    /** Включённые способы онлайн-оплаты (uzum, payme, click); умолчание — первым */
+    providers: string[];
     /** Компания подходит под акцию с промокодом — показывать форму ввода */
     promoAllowed: boolean;
     /** Код тарифа, выбранного на странице тарифов: сразу предложить оплату */
@@ -63,6 +65,7 @@ export default function Billing({
     invoices,
     requisites,
     checkout,
+    providers,
     promoAllowed,
     selected,
 }: Props) {
@@ -96,7 +99,11 @@ export default function Billing({
                 : t('cabinet.billing.checkout_text_invoice', { amount }),
             confirmLabel: checkout ? t('cabinet.billing.pay') : t('cabinet.billing.invoice_me'),
             onConfirm: () =>
-                router.post('/cabinet/billing/order', { kind: 'plan', id: offer.id }, { preserveScroll: true }),
+                router.post(
+                    '/cabinet/billing/order',
+                    { kind: 'plan', id: offer.id, provider: providers[0] ?? '' },
+                    { preserveScroll: true },
+                ),
         });
         // Один раз при открытии страницы
     }, []);
@@ -227,6 +234,7 @@ export default function Billing({
                     invoices={invoices}
                     requisites={requisites}
                     checkout={checkout}
+                    providers={providers}
                     promoAllowed={promoAllowed}
                 />
             </div>

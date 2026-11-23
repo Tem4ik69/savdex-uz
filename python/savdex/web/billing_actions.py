@@ -6,8 +6,9 @@ Cabinet\\BillingController (сервисы — savdex/web/orders.py, касса 
 savdex/payments/checkout.py).
 
 Счёт выставляется сразу, доступ — только после оплаты. При включённой
-онлайн-кассе покупатель уходит на платёжную страницу Uzum
-(Inertia::location); отказ кассы оставляет счёт для оплаты переводом.
+онлайн-кассе покупатель уходит на платёжную страницу выбранного
+провайдера — Uzum, Payme или Click (Inertia::location); отказ кассы
+оставляет счёт для оплаты переводом.
 Незакрытый счёт на то же самое повторно не выставляется.
 
 Подписка при отмене автопродления не обрывается — оплаченный период
@@ -267,6 +268,55 @@ def _paid_elsewhere(ctx: Context, payment: dict[str, Any]) -> bool:
 
 
 def _checkout(ctx: Context, payment: dict[str, Any]) -> HttpResponse:
+    """
+    Уход на оплату выбранным провайдером (поле формы provider: uzum, payme
+    или click; не выбран или выключен — первый доступный).
+    """
+    provider = cashier.choose(input_of(ctx.request).get("provider"))
+
+    if provider in ("payme", "click"):
+        return _redirect_checkout(ctx, payment, provider)
+
+    return _uzum_checkout(ctx, payment)
+
+
+def _redirect_checkout(ctx: Context, payment: dict[str, Any], provider: str) -> HttpResponse:
+    """
+    Payme и Click: ссылка на их страницу оплаты собирается без обращения к
+    провайдеру и без записи в базу — транзакцию заводит он сам колбэком
+    (Payme CreateTransaction, Click Prepare) по номеру счёта.
+    """
+    from savdex.payments import click, payme
+
+    # Прежний заказ Uzum по этому счёту уже оплачен, а подтверждение не
+    # дошло: засчитать его, а не брать деньги второй раз
+    if payment.get("provider") == "uzum" and cashier.enabled("uzum"):
+        try:
+            if _paid_elsewhere(ctx, payment):
+                flash(
+                    ctx, "success", ctx.t("messages.billing.paid_title", number=payment["number"])
+                )
+
+                return HttpResponseRedirect(
+                    locales.url(ctx.root, "/cabinet/billing", ctx.locale), status=303
+                )
+        except cashier.GatewayError:
+            pass
+
+    back_url = locales.url(ctx.root, "/cabinet/billing", ctx.locale)
+    url = (
+        payme.checkout_url(payment, ctx.locale, back_url)
+        if provider == "payme"
+        else click.pay_url(payment, back_url)
+    )
+    log.info(
+        "payment.checkout.redirect", extra={"provider": provider, "payment": payment["number"]}
+    )
+
+    return _location(ctx, url)
+
+
+def _uzum_checkout(ctx: Context, payment: dict[str, Any]) -> HttpResponse:
     """
     BillingController::checkout: регистрация в Uzum и уход на его форму.
     Отказ кассы не роняет покупку — счёт остаётся для оплаты переводом.
