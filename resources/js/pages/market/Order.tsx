@@ -134,8 +134,10 @@ export default function MarketOrder({ number }: { number: string }) {
 
             {order.status.code === 'ready' && (
                 <div className="mk-code">
-                    <span>{L.readyAt(order.pickupPoint.name)}</span>
-                    <b>{order.number}</b>
+                    {/* Код выдачи сервер отдаёт только покупателю и только пока заказ
+                        ждёт в пункте; нет кода — заказ находят по номеру */}
+                    <span>{order.pickupCode ? L.readyCode(order.pickupPoint.name) : L.readyAt(order.pickupPoint.name)}</span>
+                    <b aria-label={order.pickupCode ? L.codeLabel : undefined}>{order.pickupCode ?? order.number}</b>
                 </div>
             )}
 
@@ -158,6 +160,7 @@ export default function MarketOrder({ number }: { number: string }) {
                         <dt>{L.pickupPoint}</dt>
                         <dd>{order.pickupPoint.name}</dd>
                         <dd style={{ fontWeight: 500 }}>{order.pickupPoint.address}</dd>
+                        {order.pickupPoint.hours && <dd style={{ fontWeight: 500 }}>{L.hours(order.pickupPoint.hours)}</dd>}
                     </div>
                     <div>
                         <dt>{L.payment}</dt>

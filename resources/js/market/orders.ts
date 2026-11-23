@@ -1,5 +1,6 @@
 import { api, ApiError } from '@/market/api';
-import { lang, marketLocale } from '@/market/lang';
+import { dateText } from '@/market/format';
+import { lang } from '@/market/lang';
 import { notify } from '@/market/store';
 import { commonText } from '@/market/text/common';
 import { orderText } from '@/market/text/order';
@@ -71,9 +72,9 @@ export async function payByCard(number: string): Promise<boolean> {
     return false;
 }
 
-/** «18 ноября, 14:05» по времени Ташкента — даты с сервера в UTC; по-узбекски — «18-noyabr, 14:05». */
+/** «18 ноября, 14:05» по времени Ташкента — даты с сервера в UTC; по-узбекски — «18-noyabr, 14:05» (format.ts, dateText). */
 export function when(iso: string | null): string {
     if (!iso) return '';
 
-    return new Date(iso).toLocaleString(marketLocale() === 'uz' ? 'uz-Latn-UZ' : 'ru-RU', { day: 'numeric', month: 'long', hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Tashkent' });
+    return dateText(new Date(iso), true);
 }

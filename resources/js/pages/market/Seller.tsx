@@ -1,19 +1,18 @@
 import { usePage } from '@inertiajs/react';
 import { Plus, Trash2, X } from 'lucide-react';
-import { useState, type ChangeEvent, type FormEvent, type ReactNode } from 'react';
+import { useState, type ChangeEvent, type FormEvent } from 'react';
 import { MarketPhoto } from '@/components/market/MarketPhoto';
 import { StatusPill } from '@/components/market/OrderView';
 import { Link } from '@/components/ui/Link';
 import { cn } from '@/lib/cn';
 import { MarketLayout } from '@/layouts/MarketLayout';
 import { api, ApiError, useApi } from '@/market/api';
-import { sum } from '@/market/format';
+import { dateText, sum } from '@/market/format';
 import { when } from '@/market/orders';
-import { lang, marketLocale } from '@/market/lang';
-import { SAMPLE_SUPPLIES } from '@/market/seller';
+import { lang } from '@/market/lang';
 import { notify, useCategories } from '@/market/store';
 import { sellerText } from '@/market/text/seller';
-import type { MarketCategory, MyProduct, MyProductDetail, MyVariant, ProductStatus, SellerBalance, SellerOrder } from '@/market/types';
+import type { MarketCategory, MyProduct, MyProductDetail, MyVariant, ProductStatus, SellerBalance, SellerOrder, Supply, Warehouse } from '@/market/types';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
 
@@ -29,7 +28,8 @@ const STATUS: Record<ProductStatus, string> = {
     blocked: 'mk-pill--warn',
 };
 
-const day = (iso: string) => new Date(`${iso}T12:00:00`).toLocaleDateString(marketLocale() === 'uz' ? 'uz-Latn-UZ' : 'ru-RU', { day: 'numeric', month: 'long' });
+/** «ГГГГ-ММ-ДД» без времени: полдень по Ташкенту, чтобы день не сдвинулся. */
+const day = (iso: string) => dateText(new Date(`${iso}T12:00:00+05:00`), false);
 
 /**
  * Кабинет продавца. «Мои товары» и «Остатки» — с сервера
@@ -78,8 +78,8 @@ export default function MarketSeller({ tab }: { tab: string }) {
                     ))}
                 </nav>
 
-                {(tab === 'products' || tab === 'stock') && list.loading && <div className="mk-skel-block" style={{ height: 240 }} aria-busy />}
-                {(tab === 'products' || tab === 'stock') && list.error && (
+                {(tab === 'products' || tab === 'stock' || tab === 'supplies') && list.loading && <div className="mk-skel-block" style={{ height: 240 }} aria-busy />}
+                {(tab === 'products' || tab === 'stock' || tab === 'supplies') && list.error && (
                     <div className="mk-failed">
                         <h2>{L.products.failed}</h2>
                         <p>{list.error}</p>
@@ -90,7 +90,7 @@ export default function MarketSeller({ tab }: { tab: string }) {
                 )}
                 {tab === 'products' && list.data && <Products products={list.data.products} needsReview={list.data.needsReview} reload={list.reload} />}
                 {tab === 'stock' && list.data && <Stock products={list.data.products} />}
-                {tab === 'supplies' && <Supplies />}
+                {tab === 'supplies' && list.data && <Supplies products={list.data.products} />}
                 {tab === 'orders' && <Orders />}
                 {tab === 'payouts' && <Payouts />}
             </div>
@@ -600,56 +600,341 @@ function Stock({ products }: { products: MyProduct[] }) {
     );
 }
 
-function Sample({ children }: { children: ReactNode }) {
-    const L = lang(sellerText);
+const SUPPLY_TONE: Record<Supply['status']['code'], string> = {
+    draft: '',
+    submitted: 'mk-pill--warn',
+    received: 'mk-pill--ok',
+    rejected: 'mk-pill--off',
+    cancelled: 'mk-pill--off',
+};
 
-    return (
-        <p className="mk-sample">
-            {L.supplies.sample} {children}
-        </p>
-    );
-}
+/** Подпись варианта: «Синий, XL»; у товара без вариантов — пусто. */
+const optionsText = (options: Record<string, string>): string => Object.values(options).filter(Boolean).join(', ');
 
-function Supplies() {
+/**
+ * Поставки на склад (/market/api/me/supplies, склад — PR #33): список
+ * своих поставок с приёмкой и браком, новая поставка (черновик или сразу на
+ * склад), «Отправить» черновик и «Отменить» до приёмки. Остаток ставит
+ * склад при приёмке — продавец его не правит.
+ */
+function Supplies({ products }: { products: MyProduct[] }) {
     const L = lang(sellerText);
+    const { data, loading, error, reload } = useApi<{ supplies: Supply[] }>('me/supplies');
+    const [creating, setCreating] = useState(false);
+    const [busy, setBusy] = useState<string | null>(null);
+
+    async function act(supply: Supply, action: 'submit' | 'cancel') {
+        if (action === 'cancel' && !window.confirm(L.supplies.confirmCancel(supply.number))) return;
+
+        setBusy(supply.number);
+
+        try {
+            const result = await api<{ message?: string }>(`me/supplies/${supply.number}/${action}`, { post: true });
+
+            if (result.message) notify(result.message);
+            reload();
+        } catch (failure) {
+            if (failure instanceof ApiError) notify(failure.message, true);
+            reload();
+        } finally {
+            setBusy(null);
+        }
+    }
 
     return (
         <>
             <div className="mk-bar">
                 <h2>{L.supplies.title}</h2>
+                {!creating && products.length > 0 && (
+                    <button type="button" className="mk-btn" onClick={() => setCreating(true)}>
+                        <Plus size={16} aria-hidden /> {L.supplies.add}
+                    </button>
+                )}
             </div>
-            <Sample>{L.supplies.note}</Sample>
-            <div className="mk-table-wrap">
-                <table className="mk-table">
-                    <thead>
-                        <tr>
-                            <th>{L.supplies.colSupply}</th>
-                            <th>{L.supplies.colDate}</th>
-                            <th>{L.supplies.colProduct}</th>
-                            <th className="is-num">{L.supplies.colQuantity}</th>
-                            <th className="is-num">{L.supplies.colAccepted}</th>
-                            <th>{L.supplies.colStatus}</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {SAMPLE_SUPPLIES.map((s) => (
-                            <tr key={s.id}>
-                                <td>{L.supplies.number(s.id)}</td>
-                                <td>{day(s.date)}</td>
-                                <td>{L.supplies.items[s.item]}</td>
-                                <td className="is-num">{s.quantity}</td>
-                                <td className="is-num">{s.accepted ?? '—'}</td>
-                                <td>
-                                    {s.status === 'planned' && <span className="mk-pill mk-pill--warn">{L.supplies.planned}</span>}
-                                    {s.status === 'accepted' && <span className="mk-pill mk-pill--ok">{L.supplies.accepted}</span>}
-                                    {s.status === 'partial' && <span className="mk-pill">{L.supplies.partial(s.quantity - (s.accepted ?? 0))}</span>}
-                                </td>
+            {creating && (
+                <SupplyForm
+                    products={products}
+                    onClose={() => setCreating(false)}
+                    onCreated={() => {
+                        setCreating(false);
+                        reload();
+                    }}
+                />
+            )}
+            <Loading loading={loading} error={error} reload={reload} />
+            {data && data.supplies.length === 0 && !creating && (
+                <div className="mk-empty">
+                    <span aria-hidden>🚚</span>
+                    <h2>{L.supplies.emptyTitle}</h2>
+                    <p>{products.length > 0 ? L.supplies.emptyText : L.supplies.noProducts}</p>
+                    {products.length > 0 && (
+                        <button type="button" className="mk-btn" onClick={() => setCreating(true)}>
+                            {L.supplies.add}
+                        </button>
+                    )}
+                </div>
+            )}
+            {data && data.supplies.length > 0 && (
+                <div className="mk-table-wrap">
+                    <table className="mk-table">
+                        <thead>
+                            <tr>
+                                <th>{L.supplies.colSupply}</th>
+                                <th>{L.supplies.colWarehouse}</th>
+                                <th>{L.supplies.colExpected}</th>
+                                <th>{L.supplies.colItems}</th>
+                                <th>{L.supplies.colStatus}</th>
+                                <th />
                             </tr>
-                        ))}
-                    </tbody>
-                </table>
-            </div>
+                        </thead>
+                        <tbody>
+                            {data.supplies.map((supply) => (
+                                <tr key={supply.number}>
+                                    <td>
+                                        <b>{supply.number}</b>
+                                        {supply.createdAt && <div className="mk-muted">{when(supply.createdAt)}</div>}
+                                    </td>
+                                    <td>{supply.warehouse.name}</td>
+                                    <td>{supply.expectedAt ? day(supply.expectedAt) : L.supplies.noDate}</td>
+                                    <td>
+                                        <ul className="mk-supply-items">
+                                            {supply.items.map((item) => {
+                                                const options = optionsText(item.options);
+
+                                                return (
+                                                    <li key={item.variantId}>
+                                                        {L.supplies.line(options ? `${item.title} (${options})` : item.title, item.declared)}
+                                                        {item.accepted !== null && (
+                                                            <small className={cn(item.defect ? 'mk-low' : undefined)}> · {L.supplies.accepted(item.accepted, item.defect ?? 0)}</small>
+                                                        )}
+                                                    </li>
+                                                );
+                                            })}
+                                        </ul>
+                                        {supply.status.code === 'rejected' && supply.rejectReason && <small className="is-error">{L.supplies.rejected(supply.rejectReason)}</small>}
+                                        {supply.note && <small className="mk-muted">{supply.note}</small>}
+                                    </td>
+                                    <td>
+                                        <span className={cn('mk-pill', SUPPLY_TONE[supply.status.code])}>{supply.status.text}</span>
+                                    </td>
+                                    <td>
+                                        <div className="mk-row-actions">
+                                            {supply.canSubmit && (
+                                                <button type="button" className="mk-btn" disabled={busy !== null} onClick={() => void act(supply, 'submit')}>
+                                                    {L.supplies.submit}
+                                                </button>
+                                            )}
+                                            {supply.canCancel && (
+                                                <button type="button" className="mk-btn mk-btn--ghost" disabled={busy !== null} onClick={() => void act(supply, 'cancel')}>
+                                                    {L.supplies.cancel}
+                                                </button>
+                                            )}
+                                        </div>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+            <p className="mk-hint">{L.supplies.hint}</p>
         </>
+    );
+}
+
+interface SupplyLine {
+    variantId: number;
+    title: string;
+    quantity: number;
+}
+
+/**
+ * Новая поставка: склад, дата, комментарий и строки «товар — вариант —
+ * сколько». Варианты товара берутся из его карточки (me/products/<id>);
+ * у товара с одним вариантом выбирать нечего.
+ */
+function SupplyForm({ products, onClose, onCreated }: { products: MyProduct[]; onClose: () => void; onCreated: () => void }) {
+    const L = lang(sellerText);
+    const places = useApi<{ warehouses: Warehouse[] }>('me/warehouses');
+    const [productId, setProductId] = useState<number | null>(null);
+    const detail = useApi<{ product: MyProductDetail }>(productId === null ? null : `me/products/${productId}`);
+    const [variantId, setVariantId] = useState<number | null>(null);
+    const [quantity, setQuantity] = useState('');
+    const [lines, setLines] = useState<SupplyLine[]>([]);
+    const [errors, setErrors] = useState<Record<string, string[]>>({});
+    const [busy, setBusy] = useState(false);
+    const today = new Date().toISOString().slice(0, 10);
+    const variants = (detail.data?.product.variants ?? []).filter((v) => v.id !== undefined && v.active !== false && !lines.some((line) => line.variantId === v.id));
+    const chosen = variants.length === 1 ? variants[0].id ?? null : variantId;
+    const count = Number(quantity);
+
+    function addLine() {
+        const product = detail.data?.product;
+        const variant = variants.find((v) => v.id === chosen);
+
+        if (!product || !variant?.id || !Number.isInteger(count) || count < 1) return;
+
+        const options = optionsText(variant.options);
+
+        setLines([...lines, { variantId: variant.id, title: options ? `${product.title} (${options})` : product.title, quantity: count }]);
+        setProductId(null);
+        setVariantId(null);
+        setQuantity('');
+    }
+
+    async function save(event: FormEvent<HTMLFormElement>, submit: boolean) {
+        event.preventDefault();
+
+        if (lines.length === 0) {
+            setErrors({ items: [L.supplies.noLines] });
+
+            return;
+        }
+
+        const form = new FormData(event.currentTarget);
+
+        setBusy(true);
+        setErrors({});
+
+        try {
+            const data = await api<{ message: string }>('me/supplies/create', {
+                body: {
+                    warehouse: String(form.get('warehouse') ?? ''),
+                    expectedAt: String(form.get('expectedAt') ?? '') || null,
+                    note: String(form.get('note') ?? '').trim() || null,
+                    items: lines.map((line) => ({ variantId: line.variantId, quantity: line.quantity })),
+                    submit,
+                },
+            });
+
+            notify(data.message);
+            onCreated();
+        } catch (failure) {
+            if (failure instanceof ApiError) {
+                setErrors(failure.errors);
+                notify(failure.message, true);
+            }
+        } finally {
+            setBusy(false);
+        }
+    }
+
+    const warehouses = places.data?.warehouses ?? [];
+
+    return (
+        <section className="mk-panel">
+            <div className="mk-bar">
+                <h2>{L.supplies.formTitle}</h2>
+                <button type="button" className="mk-btn mk-btn--ghost" onClick={onClose} aria-label={L.supplies.close}>
+                    <X size={16} aria-hidden />
+                </button>
+            </div>
+            <Loading loading={places.loading} error={places.error} reload={places.reload} />
+            {places.data && warehouses.length === 0 && <p className="mk-hint">{L.supplies.warehouseNone}</p>}
+            {places.data && warehouses.length > 0 && (
+                <form
+                    className="mk-form mk-form--2"
+                    noValidate
+                    onSubmit={(event) => {
+                        const submitter = (event.nativeEvent as SubmitEvent).submitter as HTMLButtonElement | null;
+
+                        void save(event, submitter?.value === 'send');
+                    }}
+                >
+                    <label className="mk-field">
+                        {L.supplies.warehouse}
+                        <select name="warehouse" defaultValue={warehouses[0].code}>
+                            {warehouses.map((w) => (
+                                <option key={w.code} value={w.code}>
+                                    {w.name} — {w.address}
+                                </option>
+                            ))}
+                        </select>
+                        {errors.warehouse?.[0] && <small className="is-error">{errors.warehouse[0]}</small>}
+                    </label>
+                    <label className="mk-field">
+                        {L.supplies.expected}
+                        <input type="date" name="expectedAt" min={today} />
+                        {errors.expectedAt?.[0] ? <small className="is-error">{errors.expectedAt[0]}</small> : <small>{L.supplies.expectedHint}</small>}
+                    </label>
+                    <label className="mk-field mk-field--wide">
+                        {L.supplies.note}
+                        <input name="note" maxLength={1000} placeholder={L.supplies.notePlaceholder} />
+                    </label>
+
+                    <fieldset className="mk-field mk-field--wide mk-supply-lines">
+                        <legend>{L.supplies.items}</legend>
+                        {lines.length > 0 && (
+                            <ul>
+                                {lines.map((line) => (
+                                    <li key={line.variantId}>
+                                        <span>{L.supplies.line(line.title, line.quantity)}</span>
+                                        <button
+                                            type="button"
+                                            className="mk-icon-btn"
+                                            aria-label={L.supplies.removeLine(line.title)}
+                                            onClick={() => setLines(lines.filter((l) => l.variantId !== line.variantId))}
+                                        >
+                                            <Trash2 size={16} aria-hidden />
+                                        </button>
+                                    </li>
+                                ))}
+                            </ul>
+                        )}
+                        <div className="mk-supply-pick">
+                            <label>
+                                {L.supplies.product}
+                                <select
+                                    value={productId ?? ''}
+                                    onChange={(event) => {
+                                        setProductId(event.target.value ? Number(event.target.value) : null);
+                                        setVariantId(null);
+                                    }}
+                                >
+                                    <option value="">{L.supplies.choose}</option>
+                                    {products.map((p) => (
+                                        <option key={p.id} value={p.id}>
+                                            {p.title}
+                                        </option>
+                                    ))}
+                                </select>
+                            </label>
+                            {productId !== null && detail.loading && <small>{L.supplies.loadingVariants}</small>}
+                            {productId !== null && detail.data && variants.length > 1 && (
+                                <label>
+                                    {L.supplies.variant}
+                                    <select value={variantId ?? ''} onChange={(event) => setVariantId(event.target.value ? Number(event.target.value) : null)}>
+                                        <option value="">—</option>
+                                        {variants.map((v) => (
+                                            <option key={v.id} value={v.id}>
+                                                {optionsText(v.options) || L.supplies.oneVariant}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </label>
+                            )}
+                            <label>
+                                {L.supplies.quantity}
+                                <input type="number" inputMode="numeric" min={1} max={100000} value={quantity} onChange={(event) => setQuantity(event.target.value)} />
+                            </label>
+                            <button type="button" className="mk-btn mk-btn--ghost" disabled={chosen === null || !Number.isInteger(count) || count < 1} onClick={addLine}>
+                                <Plus size={16} aria-hidden /> {L.supplies.addLine}
+                            </button>
+                        </div>
+                        {errors.items?.[0] && <small className="is-error">{errors.items[0]}</small>}
+                    </fieldset>
+
+                    <div className="mk-field--wide" style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                        <button type="submit" value="send" className="mk-btn" disabled={busy}>
+                            {L.supplies.sendNow}
+                        </button>
+                        <button type="submit" value="draft" className="mk-btn mk-btn--ghost" disabled={busy}>
+                            {L.supplies.saveDraft}
+                        </button>
+                    </div>
+                </form>
+            )}
+        </section>
     );
 }
 

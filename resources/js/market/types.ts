@@ -220,7 +220,11 @@ export interface OrderDetail {
     number: string;
     status: OrderStatusView;
     paymentMethod: 'card' | 'cash';
-    pickupPoint: { name: string; address: string };
+    /** hours — часы работы пункта, если склад их завёл */
+    pickupPoint: { name: string; address: string; hours?: string | null };
+    /** Код выдачи — только покупателю и только пока заказ «можно забрать»; иначе null */
+    pickupCode?: string | null;
+    readyAt?: string | null;
     itemsTotal: number;
     delivery: number;
     total: number;
@@ -253,4 +257,29 @@ export interface SellerBalance {
     paid: number;
     holdDays: number;
     payouts: { id: number; amount: number; status: { code: string; text: string }; bankReference: string | null; createdAt: string | null; paidAt: string | null }[];
+}
+
+/** Склад, куда продавец везёт поставку (/market/api/me/warehouses). */
+export interface Warehouse {
+    code: string;
+    name: string;
+    address: string;
+    city: string;
+}
+
+/** Поставка продавца на склад (/market/api/me/supplies). */
+export interface Supply {
+    number: string;
+    status: { code: 'draft' | 'submitted' | 'received' | 'rejected' | 'cancelled'; text: string };
+    warehouse: { code: string; name: string; address: string };
+    note: string | null;
+    /** Дата «ГГГГ-ММ-ДД» или null */
+    expectedAt: string | null;
+    rejectReason: string | null;
+    items: { variantId: number; title: string; options: Record<string, string>; declared: number; accepted: number | null; defect: number | null }[];
+    canSubmit: boolean;
+    canCancel: boolean;
+    createdAt: string | null;
+    submittedAt: string | null;
+    receivedAt: string | null;
 }
