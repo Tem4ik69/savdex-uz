@@ -95,3 +95,26 @@ def test_своя_роль_python_важнее_общего_адреса():
 
 def test_без_своей_роли_общий_адрес():
     assert _пользователь_базы(DATABASE_URL="postgres://laravel:x@db/savdex") == "laravel"
+
+
+def test_httpx_не_пишет_адреса_запросов():
+    """Токен бота Telegram — в адресе запроса: INFO httpx его бы записал."""
+    код = (
+        "import django, logging; django.setup(); "
+        "print(*(logging.getLogger(n).getEffectiveLevel() for n in ('httpx', 'httpcore')))"
+    )
+    итог = subprocess.run(
+        [sys.executable, "-c", код],
+        cwd=КОРЕНЬ,
+        env={
+            **os.environ,
+            "DJANGO_SETTINGS_MODULE": "savdex.settings",
+            "DATABASE_URL": "sqlite://:memory:",
+            "PYTHONPATH": str(КОРЕНЬ),
+            "LOG_LEVEL": "debug",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert итог.returncode == 0, итог.stderr
+    assert итог.stdout.split() == ["30", "30"]
