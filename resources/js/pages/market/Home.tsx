@@ -7,8 +7,10 @@ import { MarketLayout } from '@/layouts/MarketLayout';
 import { api, useApi } from '@/market/api';
 import { BANNERS, COUPONS, STORIES, type ServerBanner } from '@/market/content';
 import { sum } from '@/market/format';
+import { lang } from '@/market/lang';
 import { useCategories } from '@/market/store';
 import type { MarketListing, MarketProduct } from '@/market/types';
+import { homeText } from '@/market/text/home';
 import { routes } from '@/routes';
 
 const catalog = (query: string) => (query ? `${routes.marketCatalog}?${query}` : routes.marketCatalog);
@@ -24,6 +26,7 @@ const discount = (p: MarketProduct) => (p.oldPrice ? Math.round((1 - p.price / p
  * статичные (market/content.ts): на сервере их нет.
  */
 export default function MarketHome() {
+    const L = lang(homeText);
     const categories = useCategories();
     const sale = useApi<MarketListing>('catalog?only=sale');
     const deals = [...(sale.data?.items ?? [])].sort((a, b) => discount(b) - discount(a)).slice(0, 3);
@@ -31,8 +34,8 @@ export default function MarketHome() {
     return (
         <MarketLayout title="SavdEx Market" tab="home">
             <div className="mk-in">
-                <Row className="mk-stories" label="Подборки">
-                    {STORIES.map((story) => (
+                <Row className="mk-stories" label={L.stories}>
+                    {lang(STORIES).map((story) => (
                         <Link key={story.label} href={catalog(story.query)} className="mk-story">
                             <span aria-hidden>{story.emoji}</span>
                             {story.label}
@@ -41,9 +44,9 @@ export default function MarketHome() {
                 </Row>
 
                 <div className="mk-deal">
-                    <section className="mk-flash" aria-label="Скидки дня" aria-busy={sale.loading}>
+                    <section className="mk-flash" aria-label={L.deals} aria-busy={sale.loading}>
                         <h2>
-                            Скидки дня <Countdown />
+                            {L.deals} <Countdown />
                         </h2>
                         <div className="mk-flash-items">
                             {deals.map((p) => (
@@ -53,7 +56,7 @@ export default function MarketHome() {
                                     <em>−{discount(p)}%</em>
                                 </Link>
                             ))}
-                            {!sale.loading && deals.length === 0 && <p className="mk-flash-empty">Сегодня без скидок дня — загляните завтра.</p>}
+                            {!sale.loading && deals.length === 0 && <p className="mk-flash-empty">{L.dealsEmpty}</p>}
                         </div>
                     </section>
                     <Banners />
@@ -62,7 +65,7 @@ export default function MarketHome() {
                 <Coupons />
 
                 {categories !== null && categories.length > 0 && (
-                    <Row className="mk-cats" label="Категории">
+                    <Row className="mk-cats" label={L.categories}>
                         {categories.slice(0, 11).map((c) => (
                             <Link key={c.slug} href={catalog(`category=${c.slug}`)} className="mk-cat">
                                 <span aria-hidden>{c.emoji}</span>
@@ -72,19 +75,19 @@ export default function MarketHome() {
                     </Row>
                 )}
 
-                <Shelf title="Хиты продаж" query="only=hit" />
+                <Shelf title={L.hits} query="only=hit" />
                 <Strip />
-                <Shelf title="Распродажа" query="only=sale" sale preloaded={sale} />
-                <Shelf title="Новинки" query="only=new" />
+                <Shelf title={L.sale} query="only=sale" sale preloaded={sale} />
+                <Shelf title={L.novelties} query="only=new" />
 
                 <Feed />
 
                 <aside className="mk-strip">
                     <span>
-                        Продавайте на SavdEx Market
-                        <small>Привезите товар на склад — хранение, выдача и оплата на нас</small>
+                        {L.sellTitle}
+                        <small>{L.sellText}</small>
                     </span>
-                    <Link href={routes.marketSell}>Стать продавцом</Link>
+                    <Link href={routes.marketSell}>{L.sellCta}</Link>
                 </aside>
             </div>
         </MarketLayout>
@@ -100,6 +103,7 @@ export default function MarketHome() {
  * стрелки скрыты стилями — там ряд листают пальцем.
  */
 function Row({ className, label, children }: { className: string; label: string; children: ReactNode }) {
+    const L = lang(homeText);
     const track = useRef<HTMLElement>(null);
     const [can, setCan] = useState({ back: false, forward: false });
 
@@ -138,7 +142,7 @@ function Row({ className, label, children }: { className: string; label: string;
     return (
         <div className={`mk-row mk-row--${className.replace('mk-', '')}`}>
             {can.back && (
-                <button type="button" className="mk-row__arrow mk-row__arrow--back" aria-label={`${label}: назад`} onClick={() => scroll(-1)}>
+                <button type="button" className="mk-row__arrow mk-row__arrow--back" aria-label={L.back(label)} onClick={() => scroll(-1)}>
                     <ChevronLeft size={20} aria-hidden />
                 </button>
             )}
@@ -146,7 +150,7 @@ function Row({ className, label, children }: { className: string; label: string;
                 {children}
             </nav>
             {can.forward && (
-                <button type="button" className="mk-row__arrow mk-row__arrow--forward" aria-label={`${label}: вперёд`} onClick={() => scroll(1)}>
+                <button type="button" className="mk-row__arrow mk-row__arrow--forward" aria-label={L.forward(label)} onClick={() => scroll(1)}>
                     <ChevronRight size={20} aria-hidden />
                 </button>
             )}
@@ -171,6 +175,7 @@ function Shelf({
     /** Уже запрошенный список — чтобы не спрашивать сервер дважды */
     preloaded?: { data: MarketListing | null; loading: boolean; error: string | null };
 }) {
+    const L = lang(homeText);
     const own = useApi<MarketListing>(preloaded ? null : `catalog?${query}`);
     const { data, loading } = preloaded ?? own;
     const products = data?.items.slice(0, 5) ?? [];
@@ -181,7 +186,7 @@ function Shelf({
         <section aria-busy={loading}>
             <div className={sale ? 'mk-sh mk-sh--sale' : 'mk-sh'}>
                 <h2>{title}</h2>
-                <Link href={catalog(query)}>Смотреть все →</Link>
+                <Link href={catalog(query)}>{L.seeAll}</Link>
             </div>
             <div className="mk-grid mk-shelf">
                 {loading ? <MarketGridSkeleton /> : products.map((p) => <MarketCard key={p.id} product={p} />)}
@@ -221,6 +226,7 @@ function Strip() {
  * «Показать ещё».
  */
 function Feed() {
+    const L = lang(homeText);
     const [items, setItems] = useState<MarketProduct[]>([]);
     const [page, setPage] = useState(0);
     const [pages, setPages] = useState<number | null>(null);
@@ -243,7 +249,7 @@ function Feed() {
                 setPage(data.page);
                 setPages(data.pages);
             })
-            .catch((failure: unknown) => setError(failure instanceof Error ? failure.message : 'Не получилось загрузить товары.'))
+            .catch((failure: unknown) => setError(failure instanceof Error ? failure.message : L.loadFailed))
             .finally(() => {
                 busy.current = false;
                 setLoading(false);
@@ -275,8 +281,8 @@ function Feed() {
     return (
         <section aria-busy={loading}>
             <div className="mk-sh">
-                <h2>Все товары</h2>
-                <Link href={routes.marketCatalog}>В каталог →</Link>
+                <h2>{L.allProducts}</h2>
+                <Link href={routes.marketCatalog}>{L.toCatalog}</Link>
             </div>
             <div className="mk-grid">
                 {items.map((p) => (
@@ -288,17 +294,17 @@ function Feed() {
                 <div className="mk-failed" style={{ marginTop: 16 }}>
                     <p>{error}</p>
                     <button type="button" className="mk-btn" onClick={more}>
-                        Повторить
+                        {L.retry}
                     </button>
                 </div>
             )}
             {done ? (
-                <p className="mk-feed-end">Вы посмотрели все товары</p>
+                <p className="mk-feed-end">{L.feedEnd}</p>
             ) : (
                 <div ref={sentinel} className="mk-feed-more">
                     {!loading && !error && page > 0 && (
                         <button type="button" className="mk-btn mk-btn--ghost" onClick={more}>
-                            Показать ещё
+                            {L.showMore}
                         </button>
                     )}
                 </div>
@@ -312,6 +318,7 @@ function Feed() {
  * и браузера разное, и разметка иначе не сошлась бы.
  */
 function Countdown() {
+    const L = lang(homeText);
     const [left, setLeft] = useState<number | null>(null);
 
     useEffect(() => {
@@ -332,7 +339,7 @@ function Countdown() {
     const parts = left === null ? ['––', '––', '––'] : [part(Math.floor(left / 3600)), part(Math.floor(left / 60) % 60), part(left % 60)];
 
     return (
-        <span className="mk-timer" aria-label="До конца акции">
+        <span className="mk-timer" aria-label={L.timer}>
             <i>{parts[0]}</i>:<i>{parts[1]}</i>:<i>{parts[2]}</i>
         </span>
     );
@@ -344,9 +351,11 @@ function Countdown() {
  * вёрстки, чтобы первый экран не оставался без баннера.
  */
 function Banners() {
+    const L = lang(homeText);
+    const fallback = lang(BANNERS);
     const { data } = useApi<{ banners: ServerBanner[] }>('banners?place=slider');
     const server = data?.banners ?? [];
-    const count = server.length || BANNERS.length;
+    const count = server.length || fallback.length;
     const [index, setIndex] = useState(0);
     const [paused, setPaused] = useState(false);
 
@@ -362,7 +371,7 @@ function Banners() {
     const dots = count > 1 && (
         <div className="mk-dots">
             {Array.from({ length: count }, (_, i) => (
-                <button key={i} type="button" aria-current={i === at} aria-label={`Баннер ${i + 1} из ${count}`} onClick={() => setIndex(i)} />
+                <button key={i} type="button" aria-current={i === at} aria-label={L.bannerDot(i + 1, count)} onClick={() => setIndex(i)} />
             ))}
         </div>
     );
@@ -383,17 +392,17 @@ function Banners() {
         );
 
         return (
-            <section className="mk-banner mk-banner--image" aria-roledescription="карусель" aria-label="Акции" {...hold}>
+            <section className="mk-banner mk-banner--image" aria-roledescription={L.carousel} aria-label={L.promos} {...hold}>
                 {banner.url ? <a href={banner.url}>{picture}</a> : picture}
                 {dots}
             </section>
         );
     }
 
-    const banner = BANNERS[at];
+    const banner = fallback[at];
 
     return (
-        <section className="mk-banner" aria-roledescription="карусель" aria-label="Акции" {...hold}>
+        <section className="mk-banner" aria-roledescription={L.carousel} aria-label={L.promos} {...hold}>
             <div>
                 <small>{banner.eyebrow}</small>
                 <h2>{banner.title}</h2>
@@ -412,11 +421,12 @@ function Banners() {
 
 /** Купоны: «Взять» отмечает купон взятым — применять их пока некуда. */
 function Coupons() {
+    const L = lang(homeText);
     const [taken, setTaken] = useState<string[]>([]);
 
     return (
         <div className="mk-coupons">
-            {COUPONS.map((c) => {
+            {lang(COUPONS).map((c) => {
                 const done = taken.includes(c.value);
 
                 return (
@@ -426,7 +436,7 @@ function Coupons() {
                             <small>{c.text}</small>
                         </span>
                         <button type="button" disabled={done} onClick={() => setTaken([...taken, c.value])}>
-                            {done ? 'Взят' : c.cta}
+                            {done ? L.couponTaken : c.cta}
                         </button>
                     </div>
                 );

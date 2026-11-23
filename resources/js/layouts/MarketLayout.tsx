@@ -7,7 +7,9 @@ import { Link } from '@/components/ui/Link';
 import { cn } from '@/lib/cn';
 import { localize } from '@/lib/locale';
 import { api } from '@/market/api';
+import { lang } from '@/market/lang';
 import { cartCount, startSession, useCart, useCategories, useFavorites, useNotice } from '@/market/store';
+import { layoutText } from '@/market/text/layout';
 import type { MarketCategory } from '@/market/types';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
@@ -19,10 +21,8 @@ import type { SharedProps } from '@/types';
  * Данные — с сервера (/market/api/…): категории, подсказки поиска,
  * корзина и избранное вошедшего покупателя (market/store.ts).
  *
- * Тексты интерфейса пока по-русски прямо в разметке: формулировки ещё
- * меняются. Устоятся — переедут в словари на пять языков, как у
- * остальной площадки. Названия категорий и сообщения сервера уже
- * приходят на языке страницы.
+ * Тексты интерфейса — по-русски и по-узбекски, в market/text/layout.ts.
+ * Названия категорий и сообщения сервера приходят на языке страницы.
  */
 export function MarketLayout({
     title,
@@ -37,6 +37,7 @@ export function MarketLayout({
     search?: string;
     children: ReactNode;
 }) {
+    const L = lang(layoutText);
     const { auth, marketLinks } = usePage<SharedProps>().props;
     // На своём адресе маркетплейса «/» — его главная: на основной сайт —
     // полным адресом и обычной ссылкой (другой домен, не переход Inertia)
@@ -53,25 +54,25 @@ export function MarketLayout({
         <div className="mk">
             <Head title={title} />
             <a href="#main" className="skip-link">
-                Перейти к содержимому
+                {L.skip}
             </a>
 
             <div className="mk-util">
                 <div className="mk-in">
                     <span>
-                        <MapPin size={13} aria-hidden /> Ташкент · выдача в пунктах BTS
+                        <MapPin size={13} aria-hidden /> {L.pickupNote}
                     </span>
-                    <nav aria-label="Служебное меню">
-                        <Link href={routes.marketSell}>Стать продавцом</Link>
+                    <nav aria-label={L.utilityMenu}>
+                        <Link href={routes.marketSell}>{L.becomeSeller}</Link>
                         {site ? <a href={`${site}${localize('/')}`}>savdex.uz</a> : <Link href={routes.home}>savdex.uz</Link>}
-                        <Link href={routes.help}>Помощь</Link>
+                        <Link href={routes.help}>{L.help}</Link>
                     </nav>
                 </div>
             </div>
 
             <header className="mk-hd">
                 <div className="mk-in">
-                    <Link href={routes.market} className="mk-logo notranslate" translate="no" aria-label="SavdEx Market — на главную">
+                    <Link href={routes.market} className="mk-logo notranslate" translate="no" aria-label={L.logoLabel}>
                         <span>
                             Savd<b>Ex</b>
                         </span>
@@ -79,24 +80,24 @@ export function MarketLayout({
                     </Link>
                     <CatalogMenu />
                     <SearchBox key={search} initial={search} />
-                    <nav className="mk-nav" aria-label="Покупателю">
+                    <nav className="mk-nav" aria-label={L.buyerMenu}>
                         <Link href={`${routes.marketCatalog}?only=fav`}>
                             <Heart size={20} aria-hidden />
-                            Избранное
+                            {L.favorites}
                             {liked > 0 && <span className="mk-count">{liked}</span>}
                         </Link>
                         <Link href={routes.marketOrders}>
                             <Package size={20} aria-hidden />
-                            Заказы
+                            {L.orders}
                         </Link>
                         <Link href={routes.marketCart}>
                             <ShoppingCart size={20} aria-hidden />
-                            Корзина
+                            {L.cart}
                             {inCart > 0 && <span className="mk-count">{inCart}</span>}
                         </Link>
                         <Link href={account}>
                             <User size={20} aria-hidden />
-                            {auth.user ? 'Кабинет' : 'Войти'}
+                            {auth.user ? L.cabinet : L.login}
                         </Link>
                     </nav>
                 </div>
@@ -114,27 +115,27 @@ export function MarketLayout({
             )}
             <SiteFooter />
 
-            <nav className="mk-tab" aria-label="Разделы маркетплейса">
+            <nav className="mk-tab" aria-label={L.sections}>
                 <Link href={routes.market} aria-current={tab === 'home' ? 'page' : undefined}>
                     <Home size={20} aria-hidden />
-                    Главная
+                    {L.home}
                 </Link>
                 <Link href={routes.marketCatalog} aria-current={tab === 'catalog' ? 'page' : undefined}>
                     <LayoutGrid size={20} aria-hidden />
-                    Каталог
+                    {L.catalog}
                 </Link>
                 <Link href={routes.marketCart} aria-current={tab === 'cart' ? 'page' : undefined}>
                     <ShoppingCart size={20} aria-hidden />
-                    Корзина
+                    {L.cart}
                     {inCart > 0 && <span className="mk-count">{inCart}</span>}
                 </Link>
                 <Link href={routes.marketOrders} aria-current={tab === 'orders' ? 'page' : undefined}>
                     <Package size={20} aria-hidden />
-                    Заказы
+                    {L.orders}
                 </Link>
                 <Link href={account}>
                     <User size={20} aria-hidden />
-                    {auth.user ? 'Кабинет' : 'Войти'}
+                    {auth.user ? L.cabinet : L.login}
                 </Link>
             </nav>
         </div>
@@ -153,6 +154,7 @@ interface Suggestions {
  * Enter — в каталог.
  */
 function SearchBox({ initial }: { initial: string }) {
+    const L = lang(layoutText);
     const [text, setText] = useState(initial);
     const [open, setOpen] = useState(false);
     const [found, setFound] = useState<{ for: string; data: Suggestions } | null>(null);
@@ -201,22 +203,22 @@ function SearchBox({ initial }: { initial: string }) {
                         setOpen(true);
                     }}
                     onFocus={() => setOpen(true)}
-                    placeholder="Искать товары и категории"
-                    aria-label="Поиск по маркетплейсу"
+                    placeholder={L.searchPlaceholder}
+                    aria-label={L.searchLabel}
                     autoComplete="off"
                 />
-                <button type="submit">Найти</button>
+                <button type="submit">{L.find}</button>
             </form>
             {open && needle.length >= 2 && data !== null && (
                 <div className="mk-sug">
-                    {empty && <p>Ничего не нашли по «{needle}». Попробуйте короче или другое слово.</p>}
+                    {empty && <p>{L.nothingFound(needle)}</p>}
                     {data.categories.map((c) => (
                         <Link key={c.slug} href={`${routes.marketCatalog}?category=${c.slug}`}>
                             <span aria-hidden>
                                 <LayoutGrid size={18} />
                             </span>
                             {c.name}
-                            <em>категория</em>
+                            <em>{L.category}</em>
                         </Link>
                     ))}
                     {data.products.map((p) => (
@@ -242,6 +244,7 @@ function SearchBox({ initial }: { initial: string }) {
  * после перехода.
  */
 function CatalogMenu() {
+    const L = lang(layoutText);
     const categories = useCategories();
     const [open, setOpen] = useState(false);
     const [active, setActive] = useState<string | null>(null);
@@ -272,16 +275,16 @@ function CatalogMenu() {
     return (
         <div className="mk-catmenu" ref={box}>
             <button type="button" className="mk-catbtn" aria-expanded={open} aria-controls="mk-catalog-panel" onClick={() => setOpen(!open)}>
-                {open ? <X size={20} aria-hidden /> : <LayoutGrid size={20} aria-hidden />} Каталог
+                {open ? <X size={20} aria-hidden /> : <LayoutGrid size={20} aria-hidden />} {L.catalog}
             </button>
             {open && (
                 <div className="mk-catpanel" id="mk-catalog-panel">
-                    {categories === null && <p className="mk-catpanel__note">Загружаем категории…</p>}
+                    {categories === null && <p className="mk-catpanel__note">{L.loadingCategories}</p>}
                     {categories !== null && categories.length === 0 && (
                         <p className="mk-catpanel__note">
-                            Категории не загрузились.{' '}
+                            {L.categoriesFailed}{' '}
                             <Link href={routes.marketCatalog} onClick={close}>
-                                Открыть каталог целиком
+                                {L.openCatalog}
                             </Link>
                         </p>
                     )}
@@ -341,7 +344,7 @@ function CatalogMenu() {
                                     </ul>
                                 )}
                                 <Link href={href(current.slug)} className="mk-catpanel__all" onClick={close}>
-                                    Все товары раздела →
+                                    {L.allInSection}
                                 </Link>
                             </div>
                         </>
