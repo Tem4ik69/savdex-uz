@@ -200,7 +200,8 @@ Settings → Rules → Rulesets → New ruleset → New branch ruleset:
 тестового (заведены 20.11).
 
 - **Тестовый:** `deploy/staging/Caddyfile` — тот же сайт и тот же пароль на
-  обоих адресах; `deploy.sh` пишет адрес в `MARKET_DOMAIN` (сайту и Caddy)
+  обоих адресах (`deploy.sh` при каждой выкладке переписывает его копию
+  `/opt/savdex/env/Caddyfile` и делает `caddy reload`, как на боевом); `deploy.sh` пишет адрес в `MARKET_DOMAIN` (сайту и Caddy)
   и в `DJANGO_ALLOWED_HOSTS`. Какие страницы показать на поддомене, сайт
   решает сам по `MARKET_DOMAIN`.
 - **Боевой:** пока маркетплейс не запущен (страницы `/market` отвечают

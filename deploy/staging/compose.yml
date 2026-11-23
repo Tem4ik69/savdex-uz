@@ -34,7 +34,10 @@ services:
       # Адрес маркетплейса на тестовом (ТЗ 18.11) — пишет deploy.sh
       MARKET_DOMAIN: ${MARKET_DOMAIN:-market.staging.savdex.uz}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Копия deploy/staging/Caddyfile, которую deploy.sh переписывает на
+      # месте и перечитывает (caddy reload): ./Caddyfile из кода git
+      # заменяет новым файлом, и контейнер видел бы старый
+      - ${SAVDEX_HOME:-/opt/savdex}/env/Caddyfile:/etc/caddy/Caddyfile:ro
       # Пароль сайта (basic_auth с хешем) — файл, который пишет deploy.sh
       - ${SAVDEX_HOME:-/opt/savdex}/env/auth.caddy:/etc/caddy/auth.caddy:ro
       # Сайт превью ветки (preview.caddy) — пока превью включено; пишет

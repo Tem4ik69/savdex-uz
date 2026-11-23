@@ -390,4 +390,11 @@ LOGGING = {
     "disable_existing_loggers": False,
     "handlers": {"stderr": {"class": "logging.StreamHandler"}},
     "root": {"handlers": ["stderr"], "level": _log_level()},
+    # httpx на уровне INFO пишет каждый запрос с полным адресом, а у
+    # Telegram токен бота — в самом адресе (api.telegram.org/bot<токен>/…):
+    # журнал контейнера собирал бы токен. Ошибки и предупреждения — пишутся
+    "loggers": {
+        "httpx": {"level": "WARNING"},
+        "httpcore": {"level": "WARNING"},
+    },
 }
