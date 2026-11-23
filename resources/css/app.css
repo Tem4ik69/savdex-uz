@@ -19,6 +19,11 @@
 @import './microsite.css' layer(components);
 /* Маркетплейс: классы с префиксом mk- */
 @import './market.css' layer(components);
+/* Экраны склада и пункта выдачи маркетплейса: mk-staff, mk-wh-*, mk-pt-* */
+@import './staff.css' layer(components);
+@import './staff-point.css' layer(components);
+@import './staff-warehouse-a.css' layer(components);
+@import './staff-warehouse-b.css' layer(components);
 
 /* ============================================================
    SAVDEX — дизайн-токены

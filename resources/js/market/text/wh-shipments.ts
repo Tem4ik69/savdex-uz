@@ -1,0 +1,68 @@
+import { plural } from '@/market/format';
+
+/** Склад, вкладка «Отгрузки» (components/market/staff/Shipments.tsx). */
+const ru = {
+    title: 'Отгрузки в пункты',
+    readyTitle: 'Собрано и ждёт отгрузки',
+    readyEmpty: 'Собранных заказов, ждущих отгрузки, нет.',
+    readyOrders: (n: number) => `${n} ${plural(n, ['собранный заказ', 'собранных заказа', 'собранных заказов'])}`,
+    create: 'Сформировать партию',
+    listTitle: 'Партии',
+    listEmpty: 'Партий пока нет: сформируйте первую из собранных заказов.',
+    status: {
+        draft: 'Черновик',
+        sent: 'В пути',
+        delivered: 'Доставлена',
+    },
+    ordersPlaces: (orders: number, places: number) => `Заказов: ${orders} · мест: ${places}`,
+    sentAt: (at: string) => `Уехала ${at}`,
+    deliveredAt: (at: string) => `Доставлена ${at}`,
+    send: 'Отправить',
+    confirmSend: (number: string, point: string) => `Партия ${number} уезжает в «${point}»? После отправки состав не меняется.`,
+    print: 'Печать',
+    showOrders: 'Заказы партии',
+    sheetTitle: (number: string) => `Партия ${number}`,
+    sheetTo: 'Куда',
+    sheetOrder: 'Заказ',
+    sheetPlaces: 'Мест',
+    sheetCheck: 'Принято',
+    sheetTotal: (orders: number, places: number) => `Итого: заказов ${orders}, мест ${places}`,
+    sheetGave: 'Отдал (склад)',
+    sheetTook: 'Принял (пункт)',
+    sheetPrinted: (at: string) => `Распечатано ${at}`,
+    hint: 'Партия берёт все собранные заказы пункта. Распечатайте лист на обычном принтере и положите в машину: пункт сверит по нему заказы и места.',
+};
+
+const uz: typeof ru = {
+    title: 'Punktlarga jo‘natmalar',
+    readyTitle: 'Yig‘ilgan va jo‘natishni kutmoqda',
+    readyEmpty: 'Jo‘natishni kutayotgan yig‘ilgan buyurtmalar yo‘q.',
+    readyOrders: (n) => `${n} ta yig‘ilgan buyurtma`,
+    create: 'Partiya tuzish',
+    listTitle: 'Partiyalar',
+    listEmpty: 'Hozircha partiyalar yo‘q: birinchisini yig‘ilgan buyurtmalardan tuzing.',
+    status: {
+        draft: 'Qoralama',
+        sent: 'Yo‘lda',
+        delivered: 'Yetkazildi',
+    },
+    ordersPlaces: (orders, places) => `Buyurtmalar: ${orders} · joylar: ${places}`,
+    sentAt: (at) => `Jo‘natildi: ${at}`,
+    deliveredAt: (at) => `Yetkazildi: ${at}`,
+    send: 'Jo‘natish',
+    confirmSend: (number, point) => `${number} partiyasi «${point}» punktiga jo‘natilsinmi? Jo‘natilgandan keyin tarkibi o‘zgarmaydi.`,
+    print: 'Chop etish',
+    showOrders: 'Partiya buyurtmalari',
+    sheetTitle: (number) => `${number} partiyasi`,
+    sheetTo: 'Qayerga',
+    sheetOrder: 'Buyurtma',
+    sheetPlaces: 'Joylar',
+    sheetCheck: 'Qabul qilindi',
+    sheetTotal: (orders, places) => `Jami: buyurtmalar ${orders}, joylar ${places}`,
+    sheetGave: 'Topshirdi (ombor)',
+    sheetTook: 'Qabul qildi (punkt)',
+    sheetPrinted: (at) => `Chop etildi: ${at}`,
+    hint: 'Partiyaga punktning barcha yig‘ilgan buyurtmalari kiradi. Varaqni oddiy printerda chop eting va mashinaga qo‘ying: punkt buyurtmalar va joylarni shu bo‘yicha tekshiradi.',
+};
+
+export const shipmentsText = { ru, uz };

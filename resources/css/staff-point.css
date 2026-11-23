@@ -1,0 +1,116 @@
+/* ── Экраны пункта выдачи (components/market/staff: Issue, Batches,
+   Unclaimed, Cash). Телефон: одна колонка, цели касания от 48px. ── */
+.mk-pt{display:grid;gap:14px}
+.mk-pt__title{font-size:22px;font-weight:800;letter-spacing:-.01em}
+.mk-pt-hint{font-size:14px;color:var(--text-muted);line-height:1.5}
+.mk-pt-link{justify-self:start;min-height:48px;padding:0 4px;font-weight:700;font-size:15px;color:var(--primary-700);text-decoration:underline;text-underline-offset:3px}
+.mk-pt .mk-btn{min-height:52px;font-size:16px}
+.mk-pt .mk-btn--big{min-height:60px;font-size:18px}
+.mk-pt-tall{min-height:52px}
+.mk-pt-step{display:grid;gap:12px}
+
+/* Крупное поле: номер с наклейки и код */
+.mk-pt-big{display:grid;gap:6px;font-size:14px;font-weight:700}
+.mk-pt-big input{height:64px;border:2px solid var(--border-strong);border-radius:14px;padding:0 16px;font-size:26px;font-weight:800;letter-spacing:.06em;font-variant-numeric:tabular-nums;background:#fff;width:100%;min-width:0;text-transform:uppercase}
+.mk-pt-big input::placeholder{color:#cbd5e1;font-weight:600}
+.mk-pt-big input:focus{border-color:var(--primary-700);outline:0;box-shadow:0 0 0 3px var(--primary-100)}
+.mk-pt-big input[aria-invalid=true]{border-color:var(--danger)}
+.mk-pt-big small{font-weight:500;color:var(--text-muted);font-size:13px}
+.mk-pt-big small.is-error{color:var(--danger);font-weight:700;font-size:15px}
+.mk-pt-big--code input{font-size:34px;letter-spacing:.4em;text-align:center;padding:0 8px 0 calc(8px + .4em)}
+
+/* Сообщение: не найден, пауза */
+.mk-pt-alert{display:grid;gap:4px;padding:14px 16px;border-radius:14px;background:var(--danger-bg);color:var(--danger);font-size:14px;line-height:1.45}
+.mk-pt-alert b{display:flex;align-items:center;gap:8px;font-size:17px}
+.mk-pt-alert span{color:var(--text)}
+
+/* Карточка заказа */
+.mk-pt-order{display:grid;gap:14px;background:#fff;border-radius:18px;padding:18px 16px;border:1px solid var(--border)}
+.mk-pt-order__hd{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.mk-pt-order__number{font-size:24px;font-weight:800;letter-spacing:.04em;font-variant-numeric:tabular-nums}
+.mk-pt-order__facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px}
+.mk-pt-order__facts div{background:var(--bg);border-radius:12px;padding:10px 12px}
+.mk-pt-order__facts dt{font-size:12px;color:var(--text-muted);font-weight:600}
+.mk-pt-order__facts dd{font-size:17px;font-weight:800}
+.mk-pt-order__pay{display:grid;gap:2px;padding:12px 14px;border-radius:12px;background:var(--warning-bg);color:var(--gold-text)}
+.mk-pt-order__pay span{font-size:13px;font-weight:700}
+.mk-pt-order__pay b{font-size:28px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--text)}
+.mk-pt-order__paid{padding:12px 14px;border-radius:12px;background:var(--success-bg);color:var(--success-text);font-weight:700}
+.mk-pt-refuse{border-top:1px solid var(--border);padding-top:14px}
+.mk-pt-refuse h3{font-size:18px;font-weight:800}
+.mk-pt-refuse p{font-size:14px;color:var(--text-muted);line-height:1.5}
+.mk-pt-refuse .mk-field textarea{font-size:16px}
+.mk-pt .mk-btn.mk-pt-danger{background:var(--danger)}
+.mk-pt .mk-btn.mk-pt-danger:hover{filter:brightness(.94)}
+
+/* Итог выдачи: на весь экран, видно с расстояния вытянутой руки */
+.mk-pt-done{display:flex;flex-direction:column;align-items:center;text-align:center;gap:12px;background:var(--success-bg);color:var(--success-text);border-radius:20px;padding:28px 18px}
+.mk-pt-done .mk-sample{align-self:stretch;text-align:left}
+.mk-pt-done svg{color:var(--success)}
+.mk-pt-done h2{font-size:40px;font-weight:900;letter-spacing:-.02em}
+.mk-pt-done p{font-size:16px;color:var(--text);max-width:40ch}
+.mk-pt-done .mk-pt-done__number{font-size:20px;font-weight:800;letter-spacing:.05em;font-variant-numeric:tabular-nums}
+.mk-pt-done .mk-pt-done__cash{font-size:22px;font-weight:900;color:var(--gold-text);background:var(--warning-bg);border-radius:14px;padding:12px 16px}
+.mk-pt-done--refused{background:#f1f5f9;color:var(--text)}
+.mk-pt-done--refused svg{color:var(--text-muted)}
+.mk-pt-done--refused h2{font-size:30px}
+
+/* Партии */
+.mk-pt-card{background:#fff;border-radius:18px;border:1px solid var(--border);overflow:hidden}
+.mk-pt-card.is-open{border-color:var(--primary-700)}
+.mk-pt-card__hd{display:flex;align-items:center;justify-content:space-between;gap:12px;width:100%;min-height:72px;padding:12px 16px;text-align:left}
+.mk-pt-card__hd>span:first-child{display:grid;gap:2px;min-width:0}
+.mk-pt-card__hd b{font-size:17px}
+.mk-pt-card__hd small{font-size:13px;color:var(--text-muted)}
+.mk-pt-card__go{display:inline-flex;align-items:center;gap:4px;font-weight:700;color:var(--primary-700);white-space:nowrap}
+.mk-pt-card__body{display:grid;gap:12px;padding:0 16px 16px}
+.mk-pt-checklist{display:grid;gap:8px}
+.mk-pt-checklist li{display:grid;gap:10px;padding:10px 12px;border-radius:12px;background:var(--bg)}
+.mk-pt-checklist li.is-problem{background:var(--danger-bg)}
+.mk-pt-checklist__row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.mk-pt-checklist__row>span{display:grid}
+.mk-pt-checklist__row b{font-size:17px;letter-spacing:.03em;font-variant-numeric:tabular-nums}
+.mk-pt-checklist__row small{font-size:13px;color:var(--text-muted)}
+.mk-pt-checklist .mk-field input{height:48px;font-size:16px}
+.mk-pt-toggle{display:inline-flex;align-items:center;gap:6px;min-height:48px;padding:0 14px;border-radius:12px;border:1.5px solid var(--border-strong);background:#fff;font-weight:700;font-size:14px;color:var(--success-text)}
+.mk-pt-toggle.is-on{border-color:var(--danger);color:var(--danger)}
+.mk-pt-history{background:#fff;border-radius:16px;border:1px solid var(--border)}
+.mk-pt-history summary{min-height:56px;display:flex;align-items:center;padding:0 16px;font-weight:700;cursor:pointer}
+.mk-pt-history ul{display:grid;gap:0;padding:0 16px 8px}
+.mk-pt-history li{display:grid;gap:4px;padding:10px 0;border-top:1px solid var(--border)}
+.mk-pt-history li>div{display:grid}
+.mk-pt-history li small{font-size:13px}
+.mk-pt-history li>div small{color:var(--text-muted)}
+.mk-pt-history .mk-pill{justify-self:start}
+
+/* Списки: невостребованные, наличные */
+.mk-pt-list{display:grid;gap:8px}
+.mk-pt-list li{background:#fff;border-radius:14px;border:1px solid var(--border)}
+.mk-pt-list li.is-done{background:var(--bg)}
+.mk-pt-list__row{display:flex;align-items:center;gap:12px;flex-wrap:wrap;min-height:64px;padding:10px 14px}
+label.mk-pt-list__row{cursor:pointer}
+.mk-pt-list__row input[type=checkbox]{width:26px;height:26px;flex-shrink:0;accent-color:var(--primary-700)}
+.mk-pt-list__main{display:grid;flex:1;min-width:140px}
+.mk-pt-list__main b{font-size:17px;letter-spacing:.03em;font-variant-numeric:tabular-nums}
+.mk-pt-list__main small{font-size:13px;color:var(--text-muted)}
+.mk-pt-list__batch{flex-basis:100%;font-size:13px;font-weight:700;color:var(--primary-700)}
+.mk-pt-sticky{position:sticky;bottom:12px;display:grid;gap:6px;background:var(--mk-bg);padding-top:6px}
+.mk-pt-cash__amount{font-size:18px;font-variant-numeric:tabular-nums;white-space:nowrap}
+
+/* Наличные: выбор дня и итог */
+.mk-pt-day{display:flex;align-items:stretch;gap:8px}
+.mk-pt-day__arrow{width:56px;min-height:56px;flex-shrink:0;display:grid;place-items:center;border-radius:14px;background:#fff;border:1.5px solid var(--border-strong)}
+.mk-pt-day__arrow[disabled]{opacity:.35;cursor:not-allowed}
+.mk-pt-day__pick{position:relative;flex:1;display:grid;place-items:center;min-height:56px;border-radius:14px;background:#fff;border:1.5px solid var(--border-strong);font-size:17px;font-weight:800;cursor:pointer}
+.mk-pt-day__pick input{position:absolute;inset:0;width:100%;height:100%;opacity:0;cursor:pointer}
+.mk-pt-day__pick:focus-within{border-color:var(--primary-700);box-shadow:0 0 0 3px var(--primary-100)}
+.mk-pt-total{display:grid;gap:2px;text-align:center;background:var(--navy-900);color:#fff;border-radius:18px;padding:20px 16px}
+.mk-pt-total span{font-size:14px;font-weight:600;opacity:.8}
+.mk-pt-total b{font-size:36px;font-weight:900;letter-spacing:-.01em;font-variant-numeric:tabular-nums}
+.mk-pt-total small{font-size:14px;opacity:.8}
+
+@media (max-width:640px){
+  /* Нижние вкладки пункта (staff.css) — кнопку партии держим над ними */
+  .mk-pt-sticky{bottom:72px}
+  .mk-pt-done h2{font-size:34px}
+}

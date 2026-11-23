@@ -6,17 +6,22 @@ import { StatusPill } from '@/components/market/OrderView';
 import { Link } from '@/components/ui/Link';
 import { cn } from '@/lib/cn';
 import { MarketLayout } from '@/layouts/MarketLayout';
+import { SampleNote } from '@/layouts/StaffLayout';
 import { api, ApiError, useApi } from '@/market/api';
 import { dateText, sum } from '@/market/format';
 import { when } from '@/market/orders';
 import { lang } from '@/market/lang';
+import type { RemovalAvailable, SellerRemoval, StockLine } from '@/market/staff/contract';
+import { staffAction, useStaffData } from '@/market/staff/data';
+import { hoursAgo } from '@/market/staff/samples';
 import { notify, useCategories } from '@/market/store';
 import { sellerText } from '@/market/text/seller';
+import { staffText } from '@/market/text/staff';
 import type { MarketCategory, MyProduct, MyProductDetail, MyVariant, ProductStatus, SellerBalance, SellerOrder, Supply, Warehouse } from '@/market/types';
 import { routes } from '@/routes';
 import type { SharedProps } from '@/types';
 
-const TABS = ['products', 'stock', 'supplies', 'orders', 'payouts'] as const;
+const TABS = ['products', 'stock', 'supplies', 'removals', 'orders', 'payouts'] as const;
 
 // Подпись статуса — из text/seller.ts (status), здесь только цвет
 const STATUS: Record<ProductStatus, string> = {
@@ -91,6 +96,7 @@ export default function MarketSeller({ tab }: { tab: string }) {
                 {tab === 'products' && list.data && <Products products={list.data.products} needsReview={list.data.needsReview} reload={list.reload} />}
                 {tab === 'stock' && list.data && <Stock products={list.data.products} />}
                 {tab === 'supplies' && list.data && <Supplies products={list.data.products} />}
+                {tab === 'removals' && <SellerRemovals />}
                 {tab === 'orders' && <Orders />}
                 {tab === 'payouts' && <Payouts />}
             </div>
@@ -950,6 +956,411 @@ function SupplyForm({ products, onClose, onCreated }: { products: MyProduct[]; o
                     </div>
                 </form>
             )}
+        </section>
+    );
+}
+
+type RemovalKind = SellerRemoval['items'][number]['kind'];
+type RemovalCode = SellerRemoval['status']['code'];
+
+const REMOVAL_TONE: Record<RemovalCode, string> = { requested: 'mk-pill--warn', ready: 'mk-pill--ok', done: 'mk-pill--off', cancelled: 'mk-pill--off' };
+
+const removalStatus = (code: RemovalCode): SellerRemoval['status'] => ({ code, text: lang(sellerText).removals.status[code] });
+
+const SAMPLE_TASHKENT = { code: 'bts-tashkent', name: 'Склад BTS, Ташкент', address: 'Сергелийский район, ул. Янги Сергели, 15' };
+const SAMPLE_SAMARKAND = { code: 'bts-samarkand', name: 'Склад BTS, Самарканд', address: 'г. Самарканд, ул. Гагарина, 80' };
+
+/** Образец GET me/removals — пока адреса нет. */
+const sampleSellerRemovals = (): { removals: SellerRemoval[] } => ({
+    removals: [
+        {
+            number: 'W-0033',
+            status: removalStatus('requested'),
+            warehouse: { name: SAMPLE_TASHKENT.name, address: SAMPLE_TASHKENT.address },
+            items: [{ variantId: 101, title: 'Плед флисовый 150×200', options: 'Бежевый', sku: 'ST-PLD-150-BG', quantity: 1, kind: 'defect' }],
+            requestedAt: hoursAgo(3),
+            doneAt: null,
+            canCancel: true,
+        },
+        {
+            number: 'W-0029',
+            status: removalStatus('ready'),
+            warehouse: { name: SAMPLE_TASHKENT.name, address: SAMPLE_TASHKENT.address },
+            items: [{ variantId: 140, title: 'Рюкзак городской 25 л', options: 'Серый', sku: 'ST-BP-25-GR', quantity: 1, kind: 'defect' }],
+            requestedAt: hoursAgo(26),
+            doneAt: null,
+            canCancel: false,
+        },
+        {
+            number: 'W-0017',
+            status: removalStatus('done'),
+            warehouse: { name: SAMPLE_TASHKENT.name, address: SAMPLE_TASHKENT.address },
+            items: [{ variantId: 102, title: 'Плед флисовый 150×200', options: 'Синий', sku: 'ST-PLD-150-BL', quantity: 6, kind: 'good' }],
+            requestedAt: hoursAgo(220),
+            doneAt: hoursAgo(190),
+            canCancel: false,
+        },
+    ],
+});
+
+/** Образец GET me/removals/available. */
+const sampleRemovalAvailable = (): { warehouses: RemovalAvailable[] } => ({
+    warehouses: [
+        {
+            warehouse: SAMPLE_TASHKENT,
+            items: [
+                { variantId: 101, title: 'Плед флисовый 150×200', options: 'Бежевый', sku: 'ST-PLD-150-BG', quantity: 15, good: 14, defect: 1 },
+                { variantId: 102, title: 'Плед флисовый 150×200', options: 'Синий', sku: 'ST-PLD-150-BL', quantity: 8, good: 8, defect: 0 },
+                { variantId: 140, title: 'Рюкзак городской 25 л', options: 'Серый', sku: 'ST-BP-25-GR', quantity: 7, good: 5, defect: 2 },
+            ],
+        },
+        {
+            warehouse: SAMPLE_SAMARKAND,
+            items: [{ variantId: 141, title: 'Рюкзак городской 25 л', options: 'Чёрный', sku: 'ST-BP-25-BK', quantity: 3, good: 3, defect: 0 }],
+        },
+    ],
+});
+
+/** Подпись строки склада: «Плед (Бежевый)». */
+const stockTitle = (line: StockLine): string => (line.options ? `${line.title} (${line.options})` : line.title);
+
+/**
+ * «Вывоз» (/market/api/me/removals, контракт — market/staff/contract.ts):
+ * свои заявки забрать со склада годный остаток или брак (брак ждёт вывоза
+ * на складе — решение 23.11, хранение бесплатное), «Отменить», пока склад
+ * не собрал, и новая заявка. Пока адреса нет — образец с пометкой.
+ */
+function SellerRemovals() {
+    const L = lang(sellerText);
+    const S = lang(staffText);
+    const removals = useStaffData<{ removals: SellerRemoval[] }>('me/removals', sampleSellerRemovals);
+    const available = useStaffData<{ warehouses: RemovalAvailable[] }>('me/removals/available', sampleRemovalAvailable);
+    const [creating, setCreating] = useState(false);
+    const [busy, setBusy] = useState<string | null>(null);
+    const canCreate = (available.data?.warehouses ?? []).some((w) => w.items.some((item) => item.good + item.defect > 0));
+
+    async function cancel(removal: SellerRemoval) {
+        if (!window.confirm(L.removals.confirmCancel(removal.number))) return;
+
+        setBusy(removal.number);
+
+        const result = await staffAction(`me/removals/${removal.number}/cancel`, {}, removals.sample, S.sampleDone);
+
+        setBusy(null);
+
+        if (result === null) return;
+
+        removals.patch((d) => ({ removals: d.removals.map((r) => (r.number === removal.number ? { ...r, status: removalStatus('cancelled'), canCancel: false } : r)) }));
+        available.patch((d) => d);
+    }
+
+    return (
+        <>
+            <SampleNote show={removals.sample || available.sample} />
+            <div className="mk-bar">
+                <h2>{L.removals.title}</h2>
+                {!creating && canCreate && (
+                    <button type="button" className="mk-btn" onClick={() => setCreating(true)}>
+                        <Plus size={16} aria-hidden /> {L.removals.add}
+                    </button>
+                )}
+            </div>
+            {creating && available.data && (
+                <RemovalForm
+                    warehouses={available.data.warehouses}
+                    sample={available.sample}
+                    onClose={() => setCreating(false)}
+                    onCreated={(removal, warehouse) => {
+                        setCreating(false);
+                        removals.patch((d) => ({ removals: [removal, ...d.removals] }));
+                        available.patch((d) => ({
+                            warehouses: d.warehouses.map((w) =>
+                                w.warehouse.code !== warehouse
+                                    ? w
+                                    : {
+                                          ...w,
+                                          items: w.items.map((item) => {
+                                              const taken = (kind: RemovalKind) => removal.items.filter((l) => l.variantId === item.variantId && l.kind === kind).reduce((total, l) => total + l.quantity, 0);
+
+                                              return { ...item, good: item.good - taken('good'), defect: item.defect - taken('defect') };
+                                          }),
+                                      },
+                            ),
+                        }));
+                    }}
+                />
+            )}
+            <Loading loading={removals.loading && !removals.data} error={removals.error} reload={removals.reload} />
+            {removals.data && removals.data.removals.length === 0 && !creating && (
+                <div className="mk-empty">
+                    <span aria-hidden>📦</span>
+                    <h2>{L.removals.emptyTitle}</h2>
+                    <p>{canCreate ? L.removals.emptyText : L.removals.nothing}</p>
+                    {canCreate && (
+                        <button type="button" className="mk-btn" onClick={() => setCreating(true)}>
+                            {L.removals.add}
+                        </button>
+                    )}
+                </div>
+            )}
+            {removals.data && removals.data.removals.length > 0 && (
+                <div className="mk-table-wrap">
+                    <table className="mk-table">
+                        <thead>
+                            <tr>
+                                <th>{L.removals.colRemoval}</th>
+                                <th>{L.removals.colWarehouse}</th>
+                                <th>{L.removals.colItems}</th>
+                                <th>{L.removals.colStatus}</th>
+                                <th />
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {removals.data.removals.map((removal) => (
+                                <tr key={removal.number}>
+                                    <td>
+                                        <b>{removal.number}</b>
+                                        <div className="mk-muted">{when(removal.requestedAt)}</div>
+                                    </td>
+                                    <td>
+                                        {removal.warehouse.name}
+                                        <small className="mk-muted">{removal.warehouse.address}</small>
+                                    </td>
+                                    <td>
+                                        <ul className="mk-supply-items">
+                                            {removal.items.map((item) => (
+                                                <li key={`${item.variantId}:${item.kind}`} className={cn(item.kind === 'defect' && 'mk-low')}>
+                                                    {L.removals.line(stockTitle(item), L.removals.kind[item.kind], item.quantity)}
+                                                </li>
+                                            ))}
+                                        </ul>
+                                        {removal.doneAt && <small className="mk-muted">{L.removals.doneAt(when(removal.doneAt))}</small>}
+                                    </td>
+                                    <td>
+                                        <span className={cn('mk-pill', REMOVAL_TONE[removal.status.code])}>{removal.status.text}</span>
+                                    </td>
+                                    <td>
+                                        <div className="mk-row-actions">
+                                            {removal.canCancel && removal.status.code === 'requested' && (
+                                                <button type="button" className="mk-btn mk-btn--ghost" disabled={busy !== null} onClick={() => void cancel(removal)}>
+                                                    {L.removals.cancel}
+                                                </button>
+                                            )}
+                                        </div>
+                                    </td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </table>
+                </div>
+            )}
+            <p className="mk-hint">{L.removals.hint}</p>
+        </>
+    );
+}
+
+interface RemovalLine {
+    variantId: number;
+    kind: RemovalKind;
+    quantity: number;
+}
+
+/**
+ * Новая заявка на вывоз: склад и строки «товар — годное или брак — сколько»,
+ * не больше, чем лежит на складе. Склад сменили — строки сбрасываются.
+ */
+function RemovalForm({
+    warehouses,
+    sample,
+    onClose,
+    onCreated,
+}: {
+    warehouses: RemovalAvailable[];
+    sample: boolean;
+    onClose: () => void;
+    onCreated: (removal: SellerRemoval, warehouse: string) => void;
+}) {
+    const L = lang(sellerText);
+    const S = lang(staffText);
+    const usable = warehouses.filter((w) => w.items.some((item) => item.good + item.defect > 0));
+    const [warehouseCode, setWarehouseCode] = useState(usable[0]?.warehouse.code ?? '');
+    const [variantId, setVariantId] = useState<number | null>(null);
+    const [kind, setKind] = useState<RemovalKind>('defect');
+    const [quantity, setQuantity] = useState('');
+    const [lines, setLines] = useState<RemovalLine[]>([]);
+    const [errors, setErrors] = useState<Record<string, string[]>>({});
+    const [busy, setBusy] = useState(false);
+    const place = usable.find((w) => w.warehouse.code === warehouseCode) ?? usable[0];
+
+    if (!place) return null;
+
+    // Сколько ещё можно добавить: на складе минус уже в строках заявки
+    const left = (id: number, k: RemovalKind): number => {
+        const item = place.items.find((i) => i.variantId === id);
+
+        return (item ? item[k] : 0) - lines.filter((l) => l.variantId === id && l.kind === k).reduce((total, l) => total + l.quantity, 0);
+    };
+    const choices = place.items.filter((item) => left(item.variantId, 'good') + left(item.variantId, 'defect') > 0);
+    const chosen = choices.find((item) => item.variantId === variantId) ?? null;
+    const kinds = chosen ? (['defect', 'good'] as RemovalKind[]).filter((k) => left(chosen.variantId, k) > 0) : [];
+    const chosenKind = kinds.includes(kind) ? kind : kinds[0];
+    const max = chosen && chosenKind ? left(chosen.variantId, chosenKind) : 0;
+    const count = Number(quantity);
+    const valid = chosen !== null && chosenKind !== undefined && Number.isInteger(count) && count >= 1 && count <= max;
+    const titleOf = (id: number) => {
+        const item = place.items.find((i) => i.variantId === id);
+
+        return item ? stockTitle(item) : String(id);
+    };
+
+    function addLine() {
+        if (!valid || !chosen || !chosenKind) return;
+
+        const same = lines.find((l) => l.variantId === chosen.variantId && l.kind === chosenKind);
+
+        setLines(same ? lines.map((l) => (l === same ? { ...l, quantity: l.quantity + count } : l)) : [...lines, { variantId: chosen.variantId, kind: chosenKind, quantity: count }]);
+        setVariantId(null);
+        setQuantity('');
+    }
+
+    async function save(event: FormEvent<HTMLFormElement>) {
+        event.preventDefault();
+
+        if (lines.length === 0) {
+            setErrors({ items: [L.removals.noLines] });
+
+            return;
+        }
+
+        setBusy(true);
+        setErrors({});
+
+        const result = await staffAction<{ message?: string; removal?: SellerRemoval }>(
+            'me/removals/create',
+            { warehouse: place.warehouse.code, items: lines.map((l) => ({ variantId: l.variantId, kind: l.kind, quantity: l.quantity })) },
+            sample,
+            S.sampleDone,
+            setErrors,
+        );
+
+        setBusy(false);
+
+        if (result === null) return;
+
+        // В образце заявку собираем сами; с сервера — его ответ (а список всё равно перечитается)
+        const removal: SellerRemoval =
+            result !== 'sample' && result.removal
+                ? result.removal
+                : {
+                      number: `W-${String(Date.now() % 10000).padStart(4, '0')}`,
+                      status: removalStatus('requested'),
+                      warehouse: { name: place.warehouse.name, address: place.warehouse.address },
+                      items: lines.map((l) => {
+                          const item = place.items.find((i) => i.variantId === l.variantId);
+
+                          return { variantId: l.variantId, title: item?.title ?? '', options: item?.options ?? '', sku: item?.sku ?? null, quantity: l.quantity, kind: l.kind };
+                      }),
+                      requestedAt: new Date().toISOString(),
+                      doneAt: null,
+                      canCancel: true,
+                  };
+
+        onCreated(removal, place.warehouse.code);
+    }
+
+    return (
+        <section className="mk-panel">
+            <div className="mk-bar">
+                <h2>{L.removals.formTitle}</h2>
+                <button type="button" className="mk-btn mk-btn--ghost" onClick={onClose} aria-label={L.removals.close}>
+                    <X size={16} aria-hidden />
+                </button>
+            </div>
+            <form className="mk-form mk-form--2" noValidate onSubmit={(event) => void save(event)}>
+                <label className="mk-field mk-field--wide">
+                    {L.removals.warehouse}
+                    <select
+                        name="warehouse"
+                        value={place.warehouse.code}
+                        onChange={(event) => {
+                            setWarehouseCode(event.target.value);
+                            setLines([]);
+                            setVariantId(null);
+                        }}
+                    >
+                        {usable.map((w) => (
+                            <option key={w.warehouse.code} value={w.warehouse.code}>
+                                {w.warehouse.name}
+                            </option>
+                        ))}
+                    </select>
+                    {errors.warehouse?.[0] ? <small className="is-error">{errors.warehouse[0]}</small> : <small className="mk-where">{L.removals.pickupFrom(place.warehouse.address)}</small>}
+                </label>
+
+                <fieldset className="mk-field mk-field--wide mk-supply-lines">
+                    <legend>{L.removals.items}</legend>
+                    {lines.length > 0 && (
+                        <ul>
+                            {lines.map((line) => (
+                                <li key={`${line.variantId}:${line.kind}`}>
+                                    <span className={cn(line.kind === 'defect' && 'mk-low')}>{L.removals.line(titleOf(line.variantId), L.removals.kind[line.kind], line.quantity)}</span>
+                                    <button
+                                        type="button"
+                                        className="mk-icon-btn"
+                                        aria-label={L.removals.removeLine(titleOf(line.variantId))}
+                                        onClick={() => setLines(lines.filter((l) => l !== line))}
+                                    >
+                                        <Trash2 size={16} aria-hidden />
+                                    </button>
+                                </li>
+                            ))}
+                        </ul>
+                    )}
+                    {choices.length > 0 && (
+                        <div className="mk-supply-pick">
+                            <label>
+                                {L.removals.variant}
+                                <select value={chosen?.variantId ?? ''} onChange={(event) => setVariantId(event.target.value ? Number(event.target.value) : null)}>
+                                    <option value="">{L.removals.choose}</option>
+                                    {choices.map((item) => (
+                                        <option key={item.variantId} value={item.variantId}>
+                                            {stockTitle(item)}
+                                        </option>
+                                    ))}
+                                </select>
+                                {chosen && <small className="mk-muted">{L.removals.available(left(chosen.variantId, 'good'), left(chosen.variantId, 'defect'))}</small>}
+                            </label>
+                            {chosen && (
+                                <label>
+                                    {L.removals.kindLabel}
+                                    <select value={chosenKind ?? ''} onChange={(event) => setKind(event.target.value === 'good' ? 'good' : 'defect')}>
+                                        {kinds.map((k) => (
+                                            <option key={k} value={k}>
+                                                {L.removals.kind[k]}
+                                            </option>
+                                        ))}
+                                    </select>
+                                </label>
+                            )}
+                            <label>
+                                {L.removals.quantity}
+                                <input type="number" inputMode="numeric" min={1} max={max || undefined} value={quantity} onChange={(event) => setQuantity(event.target.value)} />
+                                {chosen && count > max && <small className="is-error">{L.removals.max(max)}</small>}
+                            </label>
+                            <button type="button" className="mk-btn mk-btn--ghost" disabled={!valid} onClick={addLine}>
+                                <Plus size={16} aria-hidden /> {L.removals.addLine}
+                            </button>
+                        </div>
+                    )}
+                    {errors.items?.[0] && <small className="is-error">{errors.items[0]}</small>}
+                </fieldset>
+
+                <div className="mk-field--wide" style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                    <button type="submit" className="mk-btn" disabled={busy}>
+                        {L.removals.submit}
+                    </button>
+                </div>
+            </form>
         </section>
     );
 }

@@ -1,0 +1,33 @@
+/* ── Экраны сотрудников склада и пункта выдачи (StaffLayout) ──
+   Крупные кнопки и цели касания: склад — планшет, пункт — телефон. */
+.mk-staff{min-height:100vh;background:var(--mk-bg)}
+.mk-staff__in{max-width:1180px;margin:0 auto;padding:0 16px}
+.mk-staff--point .mk-staff__in{max-width:640px}
+.mk-staff__hd{position:sticky;top:0;z-index:20;background:var(--navy-900);color:#fff}
+.mk-staff__hd>.mk-staff__in{display:flex;align-items:center;gap:14px;min-height:56px;flex-wrap:wrap;padding-top:6px;padding-bottom:6px}
+.mk-staff__logo{font-size:20px;font-weight:800;letter-spacing:-.02em}
+.mk-staff__logo b{color:#60a5fa}
+.mk-staff__logo i{font-style:normal;font-size:12px;font-weight:700;background:rgb(255 255 255/.14);padding:2px 8px;border-radius:6px;margin-left:6px;vertical-align:3px}
+.mk-staff__place{display:flex;align-items:center;gap:6px;font-size:13px;min-width:0;flex:1}
+.mk-staff__place b{white-space:nowrap}
+.mk-staff__place span{opacity:.7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mk-staff__user{display:flex;align-items:center;gap:10px;font-size:13px;font-weight:600;margin-left:auto}
+.mk-staff__user button{display:inline-flex;align-items:center;gap:6px;min-height:40px;padding:0 12px;border-radius:10px;background:rgb(255 255 255/.12);color:#fff;font-weight:700}
+.mk-staff__user button:hover{background:rgb(255 255 255/.2)}
+.mk-staff__tabs{background:#fff;border-bottom:1px solid var(--border);color:var(--text)}
+.mk-staff__tabs .mk-staff__in{display:flex;gap:4px;overflow-x:auto;scrollbar-width:none}
+.mk-staff__tabs a{display:inline-flex;align-items:center;gap:6px;min-height:52px;padding:0 16px;font-weight:700;font-size:15px;color:var(--text-muted);white-space:nowrap;border-bottom:3px solid transparent}
+.mk-staff__tabs a[aria-current=page]{color:var(--primary-700);border-bottom-color:var(--primary-700)}
+.mk-staff__count{min-width:22px;height:22px;padding:0 6px;border-radius:11px;background:var(--mk-sale);color:#fff;font-size:12px;font-weight:800;display:inline-grid;place-items:center}
+.mk-staff__main{padding:18px 0 40px}
+.mk-staff .mk-btn{min-height:44px}
+.mk-staff .mk-btn--big{min-height:56px;font-size:17px;padding:0 24px}
+@media (max-width:640px){
+  .mk-staff__place span{display:none}
+  .mk-staff__user>span{display:none}
+  .mk-staff--point .mk-staff__tabs{position:fixed;bottom:0;left:0;right:0;border-top:1px solid var(--border);border-bottom:0;box-shadow:0 -4px 16px rgb(15 23 42/.08)}
+  .mk-staff--point .mk-staff__tabs .mk-staff__in{justify-content:space-around;gap:0;padding:0}
+  .mk-staff--point .mk-staff__tabs a{flex:1;justify-content:center;min-height:60px;padding:0 4px;font-size:13px;border-bottom:0;border-top:3px solid transparent}
+  .mk-staff--point .mk-staff__tabs a[aria-current=page]{border-top-color:var(--primary-700)}
+  .mk-staff--point .mk-staff__main{padding-bottom:90px}
+}
