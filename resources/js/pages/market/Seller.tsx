@@ -710,6 +710,13 @@ function Supplies({ products }: { products: MyProduct[] }) {
                                                         {item.accepted !== null && (
                                                             <small className={cn(item.defect ? 'mk-low' : undefined)}> · {L.supplies.accepted(item.accepted, item.defect ?? 0)}</small>
                                                         )}
+                                                        {/* Склад принимает факт (решение 23.11): расхождение с заявкой — явно */}
+                                                        {item.accepted !== null && item.accepted + (item.defect ?? 0) !== item.declared && (
+                                                            <small className="mk-low">
+                                                                {' '}
+                                                                · {item.accepted + (item.defect ?? 0) < item.declared ? L.supplies.short(item.declared - item.accepted - (item.defect ?? 0)) : L.supplies.extra(item.accepted + (item.defect ?? 0) - item.declared)}
+                                                            </small>
+                                                        )}
                                                     </li>
                                                 );
                                             })}
