@@ -24,6 +24,29 @@ from savdex.web.shared import Context, market_open
 #: Строка отбора каталога длиннее не бывает: адрес с фильтрами короче
 _SEARCH_LIMIT = 2000
 
+#: Заголовки страниц (<title>): русский и узбекский — языки маркетплейса
+#: (решение 23.11); на остальных языках площадки — русский. Товар и
+#: продавец свой заголовок ставят сами, когда придут данные
+_TITLES: dict[str, tuple[str, str]] = {
+    "home": ("SavdEx Market", "SavdEx Market"),
+    "catalog": ("Каталог", "Katalog"),
+    "cart": ("Корзина", "Savat"),
+    "checkout": ("Оформление заказа", "Buyurtmani rasmiylashtirish"),
+    "orders": ("Мои заказы", "Buyurtmalarim"),
+    "order": ("Заказ", "Buyurtma"),
+    "sell": ("Стать продавцом", "Sotuvchi bo‘lish"),
+    "seller": ("Кабинет продавца", "Sotuvchi kabineti"),
+}
+
+
+def _title(page: str, locale: str) -> str:
+    """«Корзина · SavdEx Market»; главная, товар и продавец — просто «SavdEx Market»."""
+    ru, uz = _TITLES.get(page, _TITLES["home"])
+    name = uz if locale == "uz" else ru
+
+    return name if name == "SavdEx Market" else f"{name} · SavdEx Market"
+
+
 #: Вкладки кабинета продавца; первая — та, что открывается по умолчанию
 _SELLER_TABS = ("products", "stock", "supplies", "orders", "payouts")
 
@@ -36,7 +59,7 @@ def _seo(ctx: Context, title: str) -> Seo:
 
 
 def _page(
-    request: HttpRequest, component: str, title: str, props: dict[str, object]
+    request: HttpRequest, component: str, page: str, props: dict[str, object]
 ) -> HttpResponse:
     # На боевом маркетплейс не показывается, пока не запущен: адреса
     # отвечают «страница не найдена»
@@ -48,11 +71,11 @@ def _page(
     if isinstance(ctx, HttpResponse):
         return ctx
 
-    return inertia.render(ctx, component, props, _seo(ctx, title))
+    return inertia.render(ctx, component, props, _seo(ctx, _title(page, ctx.locale)))
 
 
 def home(request: HttpRequest) -> HttpResponse:
-    return _page(request, "market/Home", "SavdEx Market", {})
+    return _page(request, "market/Home", "home", {})
 
 
 def catalog(request: HttpRequest) -> HttpResponse:
@@ -61,38 +84,36 @@ def catalog(request: HttpRequest) -> HttpResponse:
     # отбрасывает непонятное, разбирать адрес дважды незачем
     search = request.META.get("QUERY_STRING", "")[:_SEARCH_LIMIT]
 
-    return _page(request, "market/Catalog", "Каталог · SavdEx Market", {"search": search})
+    return _page(request, "market/Catalog", "catalog", {"search": search})
 
 
 def product(request: HttpRequest, slug: str) -> HttpResponse:
-    return _page(request, "market/Product", "SavdEx Market", {"slug": slug})
+    return _page(request, "market/Product", "home", {"slug": slug})
 
 
 def cart(request: HttpRequest) -> HttpResponse:
-    return _page(request, "market/Cart", "Корзина · SavdEx Market", {})
+    return _page(request, "market/Cart", "cart", {})
 
 
 def checkout(request: HttpRequest) -> HttpResponse:
-    return _page(request, "market/Checkout", "Оформление заказа · SavdEx Market", {})
+    return _page(request, "market/Checkout", "checkout", {})
 
 
 def orders(request: HttpRequest) -> HttpResponse:
-    return _page(request, "market/Orders", "Мои заказы · SavdEx Market", {})
+    return _page(request, "market/Orders", "orders", {})
 
 
 def order(request: HttpRequest, number: str) -> HttpResponse:
     """Один заказ: сюда же возвращает покупателя страница оплаты провайдера."""
-    return _page(
-        request, "market/Order", "Заказ · SavdEx Market", {"number": number.strip().upper()}
-    )
+    return _page(request, "market/Order", "order", {"number": number.strip().upper()})
 
 
 def shop(request: HttpRequest, slug: str) -> HttpResponse:
-    return _page(request, "market/Shop", "SavdEx Market", {"slug": slug})
+    return _page(request, "market/Shop", "home", {"slug": slug})
 
 
 def sell(request: HttpRequest) -> HttpResponse:
-    return _page(request, "market/Sell", "Стать продавцом · SavdEx Market", {})
+    return _page(request, "market/Sell", "sell", {})
 
 
 def seller(request: HttpRequest) -> HttpResponse:
@@ -101,6 +122,6 @@ def seller(request: HttpRequest) -> HttpResponse:
     return _page(
         request,
         "market/Seller",
-        "Кабинет продавца · SavdEx Market",
+        "seller",
         {"tab": tab if tab in _SELLER_TABS else _SELLER_TABS[0]},
     )

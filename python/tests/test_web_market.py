@@ -148,3 +148,17 @@ def test_заказ_получает_номер_заглавными(сайт):
     д = открыть(сайт, "/market/orders/ab23cd45ef")
 
     assert страница(д["body"])["props"]["number"] == "AB23CD45EF"
+
+
+@pytest.mark.parametrize(
+    ("path", "title"),
+    [
+        ("/market/cart", ">Корзина · SavdEx Market"),
+        ("/uz/market/cart", ">Savat · SavdEx Market"),
+        ("/uz/market/sell", ">Sotuvchi bo‘lish · SavdEx Market"),
+        # Языки маркетплейса — русский и узбекский: на прочих — по-русски
+        ("/en/market/orders", ">Мои заказы · SavdEx Market"),
+    ],
+)
+def test_заголовок_страницы_на_русском_или_узбекском(сайт, path, title):
+    assert title in открыть(сайт, path)["body"]
